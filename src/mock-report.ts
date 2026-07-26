@@ -4,11 +4,7 @@ import type {
   FeishuReportDraft,
   ScoreDimension,
 } from "./domain.ts";
-
-const REPORT_ID = "MOCK-report-volcano-v1";
-const JOB_ID = "MOCK-job-volcano-v1";
-const RUN_ID = "MOCK-run-wps-volcano-v1";
-const FIXED_TIME = "2026-01-01T00:00:00.000Z";
+import { MOCK_SCENARIO } from "./mock-scenario.ts";
 
 const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
   requirement_understanding_and_content_coverage: "需求理解与内容覆盖",
@@ -33,8 +29,8 @@ export function createMockReportDraft(
 
 > **MOCK 测试数据，禁止作为真实厂商结论。**
 
-- Bakeoff Job：\`${JOB_ID}\`
-- Run：\`${RUN_ID}\`
+- Bakeoff Job：\`${scorecard.jobId}\`
+- Run：\`${scorecard.runId}\`
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
@@ -47,14 +43,14 @@ ${scoreRows}
 本报告展示独立维度，不生成总分或总冠军，也不外推为稳定厂商排名。
 `;
   return {
-    reportId: REPORT_ID,
+    reportId: MOCK_SCENARIO.reportId,
     provenance: "MOCK",
     title: "MOCK｜火山 Case Sample 最小评测报告",
-    jobId: JOB_ID,
-    runIds: [RUN_ID],
+    jobId: scorecard.jobId,
+    runIds: [scorecard.runId],
     artifactIds: [artifact.artifactId],
     claimLevel: "case_sample",
     markdown,
-    createdAt: FIXED_TIME,
+    createdAt: MOCK_SCENARIO.fixedTime,
   };
 }

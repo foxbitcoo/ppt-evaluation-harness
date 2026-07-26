@@ -8,16 +8,11 @@ import {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
 } from "./fixtures/volcano-case.ts";
-import {
-  captureMockWpsArtifact,
-  renderMockWpsArtifact,
-} from "./mock-wps.ts";
+import { renderStaticArtifact } from "./mock-wps.ts";
 import { createMockReportDraft } from "./mock-report.ts";
-import { scoreMockWpsArtifact } from "./mock-score.ts";
-
-const MOCK_JOB_ID = "MOCK-job-volcano-v1";
-const MOCK_RUN_ID = "MOCK-run-wps-volcano-v1";
-const FIXED_TIME = "2026-01-01T00:00:00.000Z";
+import { MOCK_SCENARIO } from "./mock-scenario.ts";
+import { scoreRenderedArtifact } from "./mock-score.ts";
+import type { ProductAdapterPort } from "./product-adapter.ts";
 
 export interface BakeoffHarness {
   startBakeoffJob(command: StartBakeoffJobCommand): Promise<BakeoffJobOutcome>;
@@ -25,10 +20,12 @@ export interface BakeoffHarness {
 
 export interface BakeoffHarnessDependencies {
   readonly feishu: FeishuProjectionPort;
+  readonly productAdapter: ProductAdapterPort;
 }
 
 export function createBakeoffHarness({
   feishu,
+  productAdapter,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   return {
     async startBakeoffJob(command) {
@@ -36,36 +33,53 @@ export function createBakeoffHarness({
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
       }
 
-      const artifact = captureMockWpsArtifact();
-      const renderManifest = renderMockWpsArtifact(artifact);
-      const scorecard = scoreMockWpsArtifact(artifact, renderManifest);
+      const artifact = await productAdapter.execute({
+        jobId: MOCK_SCENARIO.jobId,
+        runId: MOCK_SCENARIO.runId,
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+      });
+      if (
+        artifact.runId !== MOCK_SCENARIO.runId ||
+        artifact.provenance !== "MOCK"
+      ) {
+        throw new Error("Test Bakeoff Job requires MOCK Artifact lineage");
+      }
+      const renderManifest = renderStaticArtifact(artifact);
+      const scorecard = scoreRenderedArtifact(artifact, renderManifest, {
+        jobId: MOCK_SCENARIO.jobId,
+        runId: MOCK_SCENARIO.runId,
+      });
       const parentRecord: RunRecord = {
-        recordId: MOCK_JOB_ID,
+        recordId: MOCK_SCENARIO.jobId,
         recordType: "bakeoff_job",
-        jobId: MOCK_JOB_ID,
+        jobId: MOCK_SCENARIO.jobId,
         parentRecordId: null,
         caseId: command.caseId,
         product: null,
+        productPackageId: null,
+        adapterVersion: null,
         status: "completed",
         provenance: "MOCK",
-        createdAt: FIXED_TIME,
-        lastSyncedAt: FIXED_TIME,
+        createdAt: MOCK_SCENARIO.fixedTime,
+        lastSyncedAt: MOCK_SCENARIO.fixedTime,
         reportUrl: null,
         artifactId: null,
         renderManifestId: null,
         scorecardId: null,
       };
       const runRecord: RunRecord = {
-        recordId: MOCK_RUN_ID,
+        recordId: MOCK_SCENARIO.runId,
         recordType: "vendor_run",
-        jobId: MOCK_JOB_ID,
-        parentRecordId: MOCK_JOB_ID,
+        jobId: MOCK_SCENARIO.jobId,
+        parentRecordId: MOCK_SCENARIO.jobId,
         caseId: command.caseId,
-        product: "Mock WPS AI PPT",
+        product: productAdapter.productPackage.displayName,
+        productPackageId: productAdapter.productPackage.packageId,
+        adapterVersion: productAdapter.productPackage.adapterVersion,
         status: "completed",
         provenance: "MOCK",
-        createdAt: FIXED_TIME,
-        lastSyncedAt: FIXED_TIME,
+        createdAt: MOCK_SCENARIO.fixedTime,
+        lastSyncedAt: MOCK_SCENARIO.fixedTime,
         reportUrl: null,
         artifactId: artifact.artifactId,
         renderManifestId: renderManifest.renderManifestId,
@@ -85,11 +99,11 @@ export function createBakeoffHarness({
       const report = await feishu.createReport(
         createMockReportDraft(artifact, scorecard),
       );
-      await feishu.linkReportToBakeoffJob(MOCK_JOB_ID, report.url);
+      await feishu.linkReportToBakeoffJob(MOCK_SCENARIO.jobId, report.url);
 
       return {
         job: {
-          jobId: MOCK_JOB_ID,
+          jobId: MOCK_SCENARIO.jobId,
           caseId: command.caseId,
           environment: command.environment,
           status: "completed",

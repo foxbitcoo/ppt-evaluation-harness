@@ -10,6 +10,12 @@ export {
   type RunRecordTablePort,
 } from "./feishu.ts";
 export { VOLCANO_CASE_ID } from "./fixtures/volcano-case.ts";
+export { MockWpsProductAdapter } from "./mock-wps.ts";
+export type {
+  ProductAdapterPort,
+  ProductPackageSnapshot,
+  ProductRunCommand,
+} from "./product-adapter.ts";
 export type {
   Artifact,
   ArtifactScorecard,

@@ -22,6 +22,8 @@ export interface RunRecord {
   readonly parentRecordId: string | null;
   readonly caseId: string;
   readonly product: string | null;
+  readonly productPackageId: string | null;
+  readonly adapterVersion: string | null;
   readonly status: "completed";
   readonly provenance: MockProvenance;
   readonly createdAt: string;
@@ -51,6 +53,7 @@ export interface StaticSlideRender {
   readonly mimeType: "image/svg+xml";
   readonly contentHash: `sha256:${string}`;
   readonly content: string;
+  readonly extractedText: string;
 }
 
 export interface RenderManifest {

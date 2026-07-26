@@ -1,15 +1,27 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
   InMemoryFeishuProjection,
+  MockWpsProductAdapter,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
+  type Artifact,
+  type ProductAdapterPort,
+  type ProductRunCommand,
 } from "../src/index.ts";
+
+function createFixedMockHarness(feishu: InMemoryFeishuProjection) {
+  return createBakeoffHarness({
+    feishu,
+    productAdapter: new MockWpsProductAdapter(),
+  });
+}
 
 test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK parent and WPS Run records", async () => {
   const feishu = new InMemoryFeishuProjection();
-  const harness = createBakeoffHarness({ feishu });
+  const harness = createFixedMockHarness(feishu);
 
   const outcome = await harness.startBakeoffJob({
     environment: "test",
@@ -68,15 +80,15 @@ test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK paren
 
 test("the completed Mock WPS Run captures one content-addressed PPT Artifact and 16 static renders", async () => {
   const firstFeishu = new InMemoryFeishuProjection();
-  const firstOutcome = await createBakeoffHarness({
-    feishu: firstFeishu,
-  }).startBakeoffJob({
+  const firstOutcome = await createFixedMockHarness(
+    firstFeishu,
+  ).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
-  const secondOutcome = await createBakeoffHarness({
-    feishu: new InMemoryFeishuProjection(),
-  }).startBakeoffJob({
+  const secondOutcome = await createFixedMockHarness(
+    new InMemoryFeishuProjection(),
+  ).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
@@ -137,15 +149,15 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
 
 test("the captured Artifact receives one deterministic six-dimension 1–5 scorecard with page evidence", async () => {
   const firstFeishu = new InMemoryFeishuProjection();
-  const firstOutcome = await createBakeoffHarness({
-    feishu: firstFeishu,
-  }).startBakeoffJob({
+  const firstOutcome = await createFixedMockHarness(
+    firstFeishu,
+  ).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
-  const secondOutcome = await createBakeoffHarness({
-    feishu: new InMemoryFeishuProjection(),
-  }).startBakeoffJob({
+  const secondOutcome = await createFixedMockHarness(
+    new InMemoryFeishuProjection(),
+  ).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
@@ -205,9 +217,7 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
 
 test("the four Feishu domain tables expose the completed MOCK lineage and the job links a minimal report", async () => {
   const feishu = new InMemoryFeishuProjection();
-  const outcome = await createBakeoffHarness({
-    feishu,
-  }).startBakeoffJob({
+  const outcome = await createFixedMockHarness(feishu).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
@@ -248,4 +258,122 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
   );
   assert.equal(parentRecord?.reportUrl, outcome.report.url);
   assert.match(parentRecord?.reportUrl ?? "", /^mock-feishu:\/\//);
+});
+
+test("the public product adapter port can be replaced without changing the Bakeoff Job seam", async () => {
+  const fixedMockAdapter = new MockWpsProductAdapter();
+  const replacementAdapter: ProductAdapterPort = {
+    productPackage: {
+      packageId: "MOCK-replacement-package-v1",
+      displayName: "Replacement Playwright-ready WPS Adapter",
+      adapterVersion: "replacement-test@1",
+    },
+    async execute(command: ProductRunCommand): Promise<Artifact> {
+      const artifact = await fixedMockAdapter.execute(command);
+      return {
+        ...artifact,
+        filename: "MOCK-replacement-wps-volcano-16.pptx",
+      };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapter: replacementAdapter,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.equal(
+    feishu.snapshot().runRecordTable[1]?.product,
+    "Replacement Playwright-ready WPS Adapter",
+  );
+  assert.equal(
+    feishu.snapshot().runRecordTable[1]?.productPackageId,
+    "MOCK-replacement-package-v1",
+  );
+  assert.equal(outcome.artifact.filename, "MOCK-replacement-wps-volcano-16.pptx");
+});
+
+test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match its content hash", async () => {
+  const fixedMockAdapter = new MockWpsProductAdapter();
+  const tamperingAdapter: ProductAdapterPort = {
+    productPackage: fixedMockAdapter.productPackage,
+    async execute(command: ProductRunCommand): Promise<Artifact> {
+      const artifact = await fixedMockAdapter.execute(command);
+      const content = artifact.content.slice();
+      content[100] = (content[100] ?? 0) ^ 0xff;
+      return { ...artifact, content };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapter: tamperingAdapter,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /Artifact content hash mismatch/,
+  );
+  assert.deepEqual(feishu.snapshot().runRecordTable, []);
+  assert.deepEqual(feishu.snapshot().artifactScoreTable, []);
+  assert.deepEqual(feishu.snapshot().reports, []);
+});
+
+test("Artifact byte changes with a valid new hash drive new static renders and evidence-based scores", async () => {
+  const fixedMockAdapter = new MockWpsProductAdapter();
+  const variantAdapter: ProductAdapterPort = {
+    productPackage: {
+      ...fixedMockAdapter.productPackage,
+      packageId: "MOCK-content-variant-package-v1",
+    },
+    async execute(command: ProductRunCommand): Promise<Artifact> {
+      const artifact = await fixedMockAdapter.execute(command);
+      const original = Buffer.from("火山为什么会喷发");
+      const replacement = Buffer.from("岩浆为什么会上升");
+      assert.equal(original.byteLength, replacement.byteLength);
+      const content = artifact.content.slice();
+      const firstMatch = Buffer.from(content).indexOf(original);
+      assert.notEqual(firstMatch, -1);
+      content.set(replacement, firstMatch);
+      return {
+        ...artifact,
+        content,
+        contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+      };
+    },
+  };
+  const fixedOutcome = await createBakeoffHarness({
+    feishu: new InMemoryFeishuProjection(),
+    productAdapter: fixedMockAdapter,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const variantOutcome = await createBakeoffHarness({
+    feishu: new InMemoryFeishuProjection(),
+    productAdapter: variantAdapter,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.notEqual(variantOutcome.artifact.contentHash, fixedOutcome.artifact.contentHash);
+  assert.notEqual(
+    variantOutcome.renderManifest.contentHash,
+    fixedOutcome.renderManifest.contentHash,
+  );
+  assert.match(
+    variantOutcome.renderManifest.slides[0]?.extractedText ?? "",
+    /岩浆为什么会上升/,
+  );
+  assert.notDeepEqual(
+    variantOutcome.scorecard.dimensions,
+    fixedOutcome.scorecard.dimensions,
+  );
 });

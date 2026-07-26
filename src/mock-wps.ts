@@ -9,12 +9,15 @@ import {
   MOCK_WPS_VOLCANO_SLIDES,
   type MockSlideFixture,
 } from "./fixtures/mock-wps-deck.ts";
+import { MOCK_SCENARIO } from "./mock-scenario.ts";
+import type {
+  ProductAdapterPort,
+  ProductPackageSnapshot,
+  ProductRunCommand,
+} from "./product-adapter.ts";
 
-const ARTIFACT_ID = "MOCK-artifact-wps-volcano-v1";
-const RENDER_MANIFEST_ID = "MOCK-render-wps-volcano-v1";
-const RUN_ID = "MOCK-run-wps-volcano-v1";
-const FIXED_TIME = "2026-01-01T00:00:00.000Z";
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 interface ZipEntry {
   readonly name: string;
@@ -32,6 +35,15 @@ function escapeXml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
+}
+
+function unescapeXml(value: string): string {
+  return value
+    .replaceAll("&apos;", "'")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&gt;", ">")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&amp;", "&");
 }
 
 function slideXml(slide: MockSlideFixture, pageNumber: number): string {
@@ -207,6 +219,88 @@ function mockPptx(): Uint8Array {
   return storedZip(entries);
 }
 
+function readStoredZip(content: Uint8Array): ReadonlyMap<string, Uint8Array> {
+  const view = new DataView(
+    content.buffer,
+    content.byteOffset,
+    content.byteLength,
+  );
+  const entries = new Map<string, Uint8Array>();
+  let offset = 0;
+
+  while (offset + 4 <= content.byteLength) {
+    const signature = view.getUint32(offset, true);
+    if (signature === 0x02014b50 || signature === 0x06054b50) {
+      break;
+    }
+    if (signature !== 0x04034b50 || offset + 30 > content.byteLength) {
+      throw new Error("Artifact is not a verifiable stored PPTX fixture");
+    }
+    const compressionMethod = view.getUint16(offset + 8, true);
+    if (compressionMethod !== 0) {
+      throw new Error("Artifact uses an unsupported compression method");
+    }
+    const contentLength = view.getUint32(offset + 18, true);
+    const nameLength = view.getUint16(offset + 26, true);
+    const extraLength = view.getUint16(offset + 28, true);
+    const nameStart = offset + 30;
+    const contentStart = nameStart + nameLength + extraLength;
+    const contentEnd = contentStart + contentLength;
+    if (contentEnd > content.byteLength) {
+      throw new Error("Artifact contains a truncated PPTX entry");
+    }
+    const name = textDecoder.decode(
+      content.subarray(nameStart, nameStart + nameLength),
+    );
+    entries.set(name, content.slice(contentStart, contentEnd));
+    offset = contentEnd;
+  }
+
+  return entries;
+}
+
+function slidesFromArtifact(artifact: Artifact): readonly MockSlideFixture[] {
+  if (sha256(artifact.content) !== artifact.contentHash) {
+    throw new Error("Artifact content hash mismatch");
+  }
+  const entries = readStoredZip(artifact.content);
+  const slideEntries = [...entries.entries()]
+    .map(([name, content]) => {
+      const match = /^ppt\/slides\/slide(\d+)\.xml$/.exec(name);
+      return match === null
+        ? null
+        : { pageNumber: Number(match[1]), content };
+    })
+    .filter(
+      (
+        entry,
+      ): entry is { readonly pageNumber: number; readonly content: Uint8Array } =>
+        entry !== null,
+    )
+    .sort((left, right) => left.pageNumber - right.pageNumber);
+
+  if (slideEntries.length !== artifact.pageCount) {
+    throw new Error(
+      `Artifact page count mismatch: declared ${artifact.pageCount}, found ${slideEntries.length}`,
+    );
+  }
+  return slideEntries.map(({ pageNumber, content }, index) => {
+    if (pageNumber !== index + 1) {
+      throw new Error("Artifact slide sequence is not contiguous");
+    }
+    const xml = textDecoder.decode(content);
+    const textRuns = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map(
+      (match) => unescapeXml(match[1] ?? ""),
+    );
+    const title = textRuns[0];
+    const body = textRuns[1];
+    if (title === undefined || body === undefined) {
+      throw new Error(`Artifact slide ${pageNumber} has no verifiable text`);
+    }
+    return { title, body };
+  });
+}
+
 function renderSlide(
   slide: MockSlideFixture,
   pageNumber: number,
@@ -224,14 +318,15 @@ function renderSlide(
     mimeType: "image/svg+xml",
     contentHash: sha256(content),
     content,
+    extractedText: `${slide.title}\n${slide.body}`,
   };
 }
 
-export function captureMockWpsArtifact(): Artifact {
+function captureMockWpsArtifact(runId: string): Artifact {
   const content = mockPptx();
   return {
-    artifactId: ARTIFACT_ID,
-    runId: RUN_ID,
+    artifactId: MOCK_SCENARIO.artifactId,
+    runId,
     provenance: "MOCK",
     filename: "MOCK-wps-volcano-16.pptx",
     mimeType:
@@ -239,13 +334,14 @@ export function captureMockWpsArtifact(): Artifact {
     byteSize: content.byteLength,
     pageCount: MOCK_WPS_VOLCANO_SLIDES.length,
     contentHash: sha256(content),
-    capturedAt: FIXED_TIME,
+    capturedAt: MOCK_SCENARIO.fixedTime,
     content,
   };
 }
 
-export function renderMockWpsArtifact(artifact: Artifact): RenderManifest {
-  const slides = MOCK_WPS_VOLCANO_SLIDES.map((slide, index) =>
+export function renderStaticArtifact(artifact: Artifact): RenderManifest {
+  const slideFixtures = slidesFromArtifact(artifact);
+  const slides = slideFixtures.map((slide, index) =>
     renderSlide(slide, index + 1),
   );
   const manifestPayload = JSON.stringify({
@@ -257,7 +353,7 @@ export function renderMockWpsArtifact(artifact: Artifact): RenderManifest {
     })),
   });
   return {
-    renderManifestId: RENDER_MANIFEST_ID,
+    renderManifestId: MOCK_SCENARIO.renderManifestId,
     artifactId: artifact.artifactId,
     provenance: "MOCK",
     renderer: "mock-static-svg@1",
@@ -265,4 +361,19 @@ export function renderMockWpsArtifact(artifact: Artifact): RenderManifest {
     contentHash: sha256(manifestPayload),
     slides,
   };
+}
+
+export class MockWpsProductAdapter implements ProductAdapterPort {
+  readonly productPackage: ProductPackageSnapshot = Object.freeze({
+    packageId: "MOCK-wps-package-v1",
+    displayName: "Mock WPS AI PPT",
+    adapterVersion: "mock-wps@1",
+  });
+
+  async execute(command: ProductRunCommand): Promise<Artifact> {
+    if (command.evaluationCase.targetPageCount !== 16) {
+      throw new Error("Mock WPS fixture supports only the frozen 16-page Case");
+    }
+    return captureMockWpsArtifact(command.runId);
+  }
 }
