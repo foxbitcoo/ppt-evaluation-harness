@@ -1,6 +1,6 @@
 # AI PPT Evaluation Framework
 
-Status: Proposed — experimental, not yet calibrated  
+Status: Reviewed Baseline — framework approved for M0/M1 detailed design and pilot; scores remain experimental until calibrated  
 Version: 0.8  
 Updated: 2026-07-27
 
