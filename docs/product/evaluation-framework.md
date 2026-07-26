@@ -1,7 +1,7 @@
 # AI PPT Evaluation Framework
 
 Status: Proposed — experimental, not yet calibrated  
-Version: 0.7  
+Version: 0.8  
 Updated: 2026-07-27
 
 ## 1. Purpose and claim boundary
@@ -197,6 +197,8 @@ Before Presentation Design scoring, a render-fidelity check compares the canonic
 
 Renderer-introduced loss is recorded as Delivery/export evidence and is not double-penalized as design quality.
 
+The `design_judgment_surface` records `canonical | native_frozen`, surface version, viewport/resolution, and content hashes. Direct Presentation Design comparison requires the same surface class and compatible parameters. If different surfaces have not been shown measurement-equivalent on Anchor Artifacts, Presentation Design is marked non-comparable and cannot support Stable or Suite claims.
+
 ## 7. Quality gates
 
 Quality gates describe delivery state; they do not masquerade as aesthetic scores.
@@ -350,6 +352,7 @@ Direct comparison requires equality of:
 - scorecard and scenario-weight-profile version;
 - exact Judge model revision, parameters, policy, and prompt version;
 - render/extraction/evaluation-input pipeline version.
+- design-judgment surface class, version, and compatibility status.
 
 Product Package differences are displayed as treatments. A declared comparability breaker moves the result into a separate group rather than a footnote.
 
@@ -444,6 +447,7 @@ No eligible candidate, stale evidence, or insufficient coverage returns `NO_RECO
 | Data | Authority |
 |---|---|
 | PRD, ADR, schema, rubric, adapter spec, and task status | Private GitHub repository |
+| Content-addressed Run specification bundle | Recovery store outside the GitHub repository, immutable for the Run retention period |
 | Run, Attempt, event, Artifact metadata, and evaluation records | Feishu Base, under append-only system-field rules |
 | Operational-ledger recovery copy | Versioned, access-controlled export outside Feishu; recovery-only, not a second writable authority |
 | Original PPT/cloud snapshot and derivatives | A primary Feishu attachment/drive copy plus a second controlled, recoverable copy, both hash-verified |
@@ -454,6 +458,8 @@ In Feishu, automated identity, hash, timing, and score fields are not manually o
 Upload is followed by read-back hash verification, and an existing blob is never replaced in place. Until retention-locked object storage exists, M0 keeps a second controlled recoverable copy outside the individual Base attachment entry. A hash without a recoverable blob is not an immutable Artifact.
 
 The append-only operational ledger is exported on a declared schedule to a versioned, access-controlled recovery store outside Feishu. Each export has a schema version, range/checkpoint, record count, content hash, and encryption/retention metadata. It is never edited as a parallel authority; it exists to restore stable IDs, events, manifests, and adjudication history if Base records are lost or corrupted.
+
+Each Run also stores a content-addressed specification bundle containing the exact Case, Product Package, run policy, schemas, rubric/weight/estimator references, and adapter specification needed to interpret it. The bundle is a recovery snapshot, not a writable fork of GitHub.
 
 ### Scale target
 
@@ -469,6 +475,18 @@ Before unattended or high-volume operation, Run/Attempt/events/scores move to a 
 - Downloaded files are checked for declared type, size, archives, macros, and external links before sandboxed rendering.
 - Private GitHub status does not make it acceptable to store secrets.
 - Vendor terms-of-service, automation, account, and suspension risk are recorded.
+
+Before any vendor, Judge, renderer, extractor, or storage submission, a fail-closed egress gate evaluates:
+
+- data classification and source owner;
+- processing purpose;
+- target service, account, region, and subprocessors;
+- allowed content fields and required redaction;
+- approved legal/security basis and expiry.
+
+The authorization decision and policy version are frozen in the Run. A missing, expired, or denied decision blocks submission. M0 uses public or synthetic Query Cases unless a stronger classification has explicit approval.
+
+Retention applies to every primary copy, recovery copy, ledger export, specification bundle, and quarantine item. Expiry creates an append-only tombstone, deletes or cryptographically erases all covered payload copies, records deletion evidence, and prevents restore jobs from rehydrating tombstoned content. Metadata retained for audit is minimized and cannot contain the expired payload.
 
 ## 15. Observability and service objectives
 
@@ -503,7 +521,8 @@ Exit evidence:
 - a partial bake-off report can be produced without treating missing vendors as zero quality.
 - for one declared supported Case and protocol, at least 3 supported Product Packages yield captured, openable Artifacts: the current WPS Package and at least 2 competitor Packages;
 - at least one Package completes a second independent Run without one-off rescue.
-- a recovery drill deletes/ignores the disposable local cache and treats both Feishu Base and the primary Artifact copy as unavailable, then restores the operational ledger, stable IDs, events, manifests, and complete Artifact package from the external ledger export and second blob copy; record counts and all original/derivative hashes must verify.
+- a recovery drill deletes/ignores the disposable local cache and treats GitHub, Feishu Base, and the primary Artifact copy as unavailable, then restores the Run specification bundle, operational ledger, stable IDs, events, manifests, and complete Artifact package from the recovery stores; record counts and all specification, original, and derivative hashes must verify;
+- a retention drill proves that tombstoned payloads are absent from primary/recovery/quarantine stores and are not resurrected by restore.
 
 Blocked or paid-only products remain valuable reachability evidence but do not count toward the three captured Artifacts.
 
@@ -545,6 +564,7 @@ Every Run freezes:
 - `spec_commit_sha`;
 - Case, Product Package, run-policy, adapter, and schema content hashes;
 - runner code/image digest and environment evidence.
+- the content hash and recovery location of its complete specification bundle.
 
 Every Evaluation additionally freezes:
 
@@ -585,3 +605,5 @@ Version 0.5 removes duplicated page-count/instruction scoring: the observation r
 Version 0.6 prevents three-Run pilots from being mislabeled stable, requires the short-term exits to contain WPS-versus-competitor evidence, and adds recoverable off-Feishu backup/restore of the operational ledger.
 
 Version 0.7 makes pre-Artifact event identity valid, routes assessable content incompleteness to Task Success instead of exclusion, and requires the human rubric baseline itself to pass reliability calibration.
+
+Version 0.8 aligns design-judgment surfaces, adds fail-closed data-egress authorization, reconciles immutable recovery with retention deletion, and includes content-addressed specification recovery.
