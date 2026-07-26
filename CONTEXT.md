@@ -78,5 +78,5 @@ A long-term, user/scenario-specific recommendation signal that combines Artifact
 _Avoid_: LLM aesthetic score, universal leaderboard
 
 **Claim Level**:
-The strength of statement permitted by the evidence, ranging from a single Case sample through a calibrated user recommendation. More Attempts inside one Run do not raise the Claim Level.
+The strength of statement permitted by the evidence, ranging from a single Case sample through a calibrated user recommendation. More Attempts inside one Run do not raise it; three independent Runs create a replicated pilot, while a Stable claim also requires a preregistered precision or stability rule to pass.
 _Avoid_: Confidence adjective, marketing label
