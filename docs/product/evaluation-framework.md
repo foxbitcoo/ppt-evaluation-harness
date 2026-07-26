@@ -1,7 +1,7 @@
 # AI PPT Evaluation Framework
 
 Status: Proposed — experimental, not yet calibrated  
-Version: 0.4  
+Version: 0.5  
 Updated: 2026-07-27
 
 ## 1. Purpose and claim boundary
@@ -274,10 +274,9 @@ Delivery Quality is reported separately and combines gate status with measurable
 - export availability and loss;
 - text, image, shape, chart/data, theme/master, and animation editability;
 - whole-slide bitmap proportion;
-- actual page count and instruction compliance;
 - openability and cross-render integrity.
 
-It is never inferred from a screenshot alone.
+Actual page count remains an Operational Metric. A deviation from an explicit page or instruction requirement is scored only under Task Success, according to the gate ownership table. It is never inferred from a screenshot alone or scored again under Delivery Quality.
 
 ### 8.6 Scoring rules
 
@@ -571,3 +570,5 @@ Not accepted:
 Version 0.3 additionally closes second-round ambiguities in vendor-visible instructions, independent sampling units, Judge aggregation, explicit estimator/weight profiles, fixed gate ownership, render fidelity, Pairwise ties, Bakeoff Job state, orthogonal vendor/capture/render outcomes, event replay, recoverable binary copies, reproducibility pins, workflow research, recommendation hard filters, and track-specific MVP completion.
 
 Version 0.4 closes third-round boundaries in randomized time-block execution, holdout validity calibration, preregistered primary endpoints and multiplicity, tested Artifact recovery, and append-only human adjudication.
+
+Version 0.5 removes duplicated page-count/instruction scoring: the observation remains operational evidence and compliance belongs only to Task Success.
