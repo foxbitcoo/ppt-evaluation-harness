@@ -1,7 +1,7 @@
 # AI PPT Evaluation Framework
 
 Status: Proposed — experimental, not yet calibrated  
-Version: 0.3  
+Version: 0.4  
 Updated: 2026-07-27
 
 ## 1. Purpose and claim boundary
@@ -99,6 +99,8 @@ Every protocol declares:
 - comparability breakers;
 - allowed manual actions;
 - retry, timeout, and successful-output selection policy.
+
+Stable and Suite comparisons additionally use time blocks. For the same Case, Product Package Runs are scheduled inside the same declared time window and vendor order is randomized within each block. The estimator uses within-block paired contrasts. Runs that cannot be placed in a valid block remain exploratory because time, product rollout, or load may confound the vendor effect.
 
 Capacity, payment, authentication, CAPTCHA, and quota outcomes are retained as reachability evidence. They are not silently retried until a favorable output appears.
 
@@ -309,7 +311,14 @@ Before stable comparisons, a fixed Human Anchor Set must establish:
 - model–human agreement;
 - drift when the Judge, rubric, renderer, or prompt changes.
 
-The initial acceptance target is that at least 80% of repeated dimension judgments are within one ordinal point and that automated agreement is not materially below the measured human–human baseline. These are pilot targets to validate, not permanent universal constants.
+Judge calibration uses a versioned protocol with:
+
+- a development set and untouched holdout set spanning vendors, scenarios, and the intended quality range;
+- preregistered ordinal agreement, systematic-bias, and high/low-quality discrimination metrics;
+- thresholds and uncertainty bounds declared before holdout evaluation;
+- separate repeatability and validity decisions.
+
+The initial repeatability target is that at least 80% of repeated dimension judgments are within one ordinal point. This target alone is insufficient: the Judge may support Stable or Suite claims only when the holdout protocol also shows that agreement is not materially below the human–human baseline, systematic bias remains inside its preregistered bound, and the Judge discriminates the anchor quality levels. Failed holdout calibration restricts outputs to exploratory raw judgments.
 
 ### Pairwise Judgment
 
@@ -351,6 +360,9 @@ Scenario strata -> declared Suite profile
 
 Every Suite preregisters a versioned estimator profile:
 
+- primary dimensions/endpoints and primary Product Package contrasts;
+- secondary exploratory dimensions, slices, and Gap Card searches;
+- a multiplicity policy for the declared family of primary comparisons;
 - the paired Case-level estimand for each dimension;
 - how independent Runs become one Case distribution;
 - Case—not retry Attempt—as the sampling/cluster unit for Suite uncertainty;
@@ -359,6 +371,8 @@ Every Suite preregisters a versioned estimator profile:
 - scenario weights and practical tie band.
 
 Reports include sample count, delivery/failure rate, ordinal distribution, uncertainty, and missingness. Dimension results remain primary; an index requires its explicit weight profile. Rubric or Judge changes create a new series. An Anchor Artifact set may be dual-evaluated to build an explicit bridge, but old and new versions are never assumed equivalent.
+
+Unregistered, uncorrected, or post-hoc findings are labeled exploratory. They cannot support a stable ranking or a claim that a gap is repeatable until confirmed in a new preregistered evaluation.
 
 ## 11. Comparison View and WPS Gap Cards
 
@@ -429,7 +443,7 @@ No eligible candidate, stale evidence, or insufficient coverage returns `NO_RECO
 | Original PPT/cloud snapshot and derivatives | A primary Feishu attachment/drive copy plus a second controlled, recoverable copy, both hash-verified |
 | Local files and browser downloads | Disposable working cache, never authority |
 
-In Feishu, automated identity, hash, timing, and score fields are not manually overwritten. Human-editable fields are limited to review status, annotation, and adjudication. Every record carries stable external IDs, version fields, `created_at`, and `last_synced_at`.
+In Feishu, automated identity, hash, timing, and score fields are not manually overwritten. Human review, annotation, and adjudication are appended as immutable `ReviewEvent` / `AdjudicationEvent` records containing actor, timestamp, reason, prior reference, and decision. A convenient current-review status is a derived projection, never the only history. Every record carries stable external IDs, version fields, `created_at`, and `last_synced_at`.
 
 Upload is followed by read-back hash verification, and an existing blob is never replaced in place. Until retention-locked object storage exists, M0 keeps a second controlled recoverable copy outside the individual Base attachment entry. A hash without a recoverable blob is not an immutable Artifact.
 
@@ -481,6 +495,7 @@ Exit evidence:
 - a partial bake-off report can be produced without treating missing vendors as zero quality.
 - for one declared supported Case, at least 3 supported Product Packages yield captured, openable Artifacts;
 - at least one Package completes a second independent Run without one-off rescue.
+- a recovery drill deletes/ignores the disposable local cache and makes the primary copy unavailable, then reconstructs the complete Artifact package from stable IDs, manifests, and the second copy with all original and derivative hashes verified.
 
 Blocked or paid-only products remain valuable reachability evidence but do not count toward the three captured Artifacts.
 
@@ -554,3 +569,5 @@ Not accepted:
 - no hidden internal pipeline cause is asserted from output evidence alone.
 
 Version 0.3 additionally closes second-round ambiguities in vendor-visible instructions, independent sampling units, Judge aggregation, explicit estimator/weight profiles, fixed gate ownership, render fidelity, Pairwise ties, Bakeoff Job state, orthogonal vendor/capture/render outcomes, event replay, recoverable binary copies, reproducibility pins, workflow research, recommendation hard filters, and track-specific MVP completion.
+
+Version 0.4 closes third-round boundaries in randomized time-block execution, holdout validity calibration, preregistered primary endpoints and multiplicity, tested Artifact recovery, and append-only human adjudication.
