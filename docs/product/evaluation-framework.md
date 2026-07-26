@@ -1,7 +1,7 @@
 # AI PPT Evaluation Framework
 
 Status: Proposed — experimental, not yet calibrated  
-Version: 0.2  
+Version: 0.3  
 Updated: 2026-07-27
 
 ## 1. Purpose and claim boundary
@@ -33,7 +33,7 @@ LLM scoring or LLM Pairwise Judgment alone must never be described as “what us
 |---|---|---|
 | Case sample | One Attempt for one Case × Product Package | “This captured output exhibited…” |
 | Exploratory comparison | A small declared set of Cases or fewer than 3 independent Attempts per cell | “In this pilot sample…” |
-| Stable case comparison | At least 3 policy-compliant Attempts per Case × Package, including failures | Case-level distribution, success rate, and uncertainty |
+| Stable case comparison | At least 3 independent, policy-compliant Runs per Case × Package, including failures | Case-level distribution, success rate, and uncertainty |
 | Suite comparison | A preregistered, scenario-stratified Benchmark Suite with repeat runs and calibrated Judges | Suite-level findings with confidence intervals |
 | User recommendation | Suite evidence plus segmented human preference and utility inputs | Recommendation for the declared user/scenario |
 
@@ -55,7 +55,14 @@ The two tracks use separate rubrics and separate Benchmark Suites even if they s
 
 ## 3. Evaluation Case manifest
 
-A prompt string alone is not an Evaluation Case. Every versioned Case records:
+A prompt string alone is not an Evaluation Case. Each Case separates:
+
+- `vendor_input_contract`: every instruction and input actually submitted to the product;
+- `evaluator_reference`: fact-check material, research labels, expected patterns, and analysis metadata not submitted to the product.
+
+Only the vendor input contract may create a compliance requirement. An evaluator-only audience, style, or coverage label may be used for slicing and research, but not for deducting quality. If the test intentionally measures whether a product infers an unstated requirement, that inference target is declared as the treatment variable rather than treated as a hidden instruction.
+
+Every versioned Case records:
 
 - `case_id`, `case_version`, `track`, language, and scenario;
 - normalized input text hash or source-document binary hash;
@@ -100,32 +107,48 @@ Capacity, payment, authentication, CAPTCHA, and quota outcomes are retained as r
 ```text
 Benchmark Suite
   └─ Evaluation Case
-      └─ Run
-          └─ Attempt
-              └─ Artifact
-                  ├─ Original blob or frozen cloud snapshot
-                  ├─ Render manifest and slide renders
-                  ├─ Extracted text
-                  └─ Contact sheet
-                      └─ Evaluation[]
+      └─ Bakeoff Job
+          └─ Run
+              └─ Attempt
+                  └─ Artifact [0..n]
+                      ├─ Original blob or frozen cloud snapshot
+                      ├─ Render manifest and slide renders
+                      ├─ Extracted text
+                      └─ Contact sheet
+                          └─ Evaluation[]
 ```
 
-### Run and Attempt
+### Bakeoff Job, Run, and Attempt
+
+- A **Bakeoff Job** is one user-triggered multi-product batch. It freezes the selected Run set, shared protocol snapshot, deadline, and cancellation policy, and ends `completed | partial | failed | canceled`.
+- The Bakeoff Job records each selected Run as `not_scheduled | active | terminal`; `partial` cannot conceal a product that was never scheduled.
 
 - A **Run** is one logical Case × Product Package task.
 - An **Attempt** is one real interaction with the vendor product.
-- Every Attempt has its own status, timestamps, observable trace, manual actions, cost evidence, error classification, and resulting Artifact.
+- Every Attempt has its own status, timestamps, observable trace, manual actions, cost evidence, error classification, and zero or more resulting Artifacts.
 - Browser execution is treated as at-least-once. A stable idempotency key, vendor task ID when observable, submit evidence, and downloaded Artifact hash are used to detect duplicate submission.
-- The default result-selection rule is the first policy-compliant successful Attempt. Cherry-picking the best output is forbidden. Repeat-sampling protocols retain and analyze all Attempts.
+- The default result-selection rule is the first policy-compliant captured Artifact within a Run. Cherry-picking the best output is forbidden. Repeat-sampling protocols use independent Runs and retain all failures; retry Attempts are nested recovery events and do not increase statistical sample size.
 
 Attempt state machine:
 
 ```text
 queued -> preflight -> submitting -> generating -> export_pending
-       -> succeeded | blocked | timed_out | failed | canceled
+       -> waiting_for_human
+       -> submission_unknown -> reconciling
+       -> terminal
 ```
 
-The runner is asynchronous. Each vendor/account has a concurrency limit and profile lock. Login preflight, submission, generation, and export have separate timeouts. Capacity, payment, quota, CAPTCHA, and invalid authentication are non-retriable unless the underlying condition is explicitly changed. One vendor failure does not block other vendors; a bake-off may end `completed_with_partial_results`.
+`submission_unknown` is never auto-resubmitted. Recovery first reconciles vendor history, visible task ID, page evidence, and captured hashes; unresolved ambiguity requires a human decision. `waiting_for_human` pauses vendor-generation timing.
+
+Attempt terminal state is derived from orthogonal outcomes rather than one overloaded success flag:
+
+- `vendor_outcome`: generated, blocked, timed_out, failed, canceled, unknown;
+- `capture_outcome`: captured, no_artifact, partial, failed, unknown;
+- `render_outcome`: renderable, degraded, failed, not_attempted.
+
+“Vendor generated successfully,” “Artifact was captured,” and “Artifact is scorable” are separate facts. One Attempt may yield zero, one, or multiple Artifacts; duplicates and alternate exports remain linked and are never silently discarded.
+
+The runner is asynchronous. Each vendor/account has a concurrency limit and profile lock. Login preflight, submission, generation, and export have separate timeouts. Capacity, payment, quota, CAPTCHA, and invalid authentication are non-retriable unless the underlying condition is explicitly changed. One vendor failure does not block other vendors; a Bakeoff Job may end `partial`.
 
 ### Observable Trace
 
@@ -133,7 +156,9 @@ Trace means observable UI, network-task metadata, screenshots, timestamps, downl
 
 Structured events carry at least:
 
-`case_id`, `run_id`, `attempt_id`, `job_id`, `artifact_id`, `vendor_adapter_version`, event type, timestamp, and evidence reference.
+`event_id`, `job_id`, `case_id`, `run_id`, `attempt_id`, `artifact_id`, `attempt_seq`, `state_version`, `vendor_adapter_version`, event type, `source_at`, `observed_at`, `writer_id`, and evidence reference.
+
+Current state is derived from idempotently upserted events. Duplicate IDs are ignored, and stale or illegal state transitions are rejected. A state update without its causal event is invalid.
 
 ### Artifact immutability
 
@@ -160,6 +185,13 @@ Every Evaluation points to an `evaluation_input_manifest` containing:
 
 The original Artifact and canonical render are both preserved. Rendering or extraction failure is diagnosed separately from an Artifact design defect. Untrusted downloads are type/size checked and rendered in a sandbox with network disabled by default.
 
+Before Presentation Design scoring, a render-fidelity check compares the canonical render with the frozen native completion view. If material layout, font, asset, crop, animation-frame, or color differences are introduced by capture/export/rendering, the system either:
+
+- uses a verified native frozen view for design judgment and records the canonical incompatibility; or
+- marks Presentation Design non-comparable.
+
+Renderer-introduced loss is recorded as Delivery/export evidence and is not double-penalized as design quality.
+
 ## 7. Quality gates
 
 Quality gates describe delivery state; they do not masquerade as aesthetic scores.
@@ -168,17 +200,21 @@ Each gate stores:
 
 - `status`: `PASS | CONDITIONAL | FAIL | NOT_ASSESSABLE`;
 - `severity`: `blocking | major | warning`;
-- `effect`: `exclude_from_quality | score_with_cap | score_normally_with_flag`;
+- `effect`: `exclude_from_quality | score_normally_with_flag | route_to_dimension`;
 - page/evidence references and ownership classification.
 
-Required gates include:
+Version 0.3 fixes the gate decision table:
 
-- Artifact can be opened and completely browsed;
-- required delivery format is present;
-- sufficient canonical visual input exists for scoring;
-- no blocking overlap, clipping, missing font, or unreadable rendering;
-- page-count and material instruction compliance;
-- source corruption or serious factual error, when assessable.
+| Gate | FAIL effect | Score ownership |
+|---|---|---|
+| Artifact captured and openable | `exclude_from_quality` | Delivery outcome only |
+| Sufficient faithful visual input | `exclude_from_quality` | Harness/render diagnosis; not product design |
+| Required delivery/export format | `score_normally_with_flag` | Delivery Quality only |
+| Deck globally unreadable or materially incomplete | `exclude_from_quality` | Delivery outcome; page-local defects stay in the relevant design dimension |
+| Page count and explicit instruction compliance | `route_to_dimension` | Task Success only |
+| Factual correctness or source fidelity | `route_to_dimension` | Task Success only |
+
+`CONDITIONAL` and `NOT_ASSESSABLE` follow the table's declared score ownership and remain visible. A defect is owned by one score dimension or one gate outcome; it is never deducted twice. Only a catastrophic defect that prevents reliable judgment excludes quality.
 
 An unopenable or unrenderable Artifact remains a delivery result but is `not_scorable`; it is not assigned a zero aesthetic score. Reports show delivery success rate and quality conditional on scorable delivery together, preventing survivor bias.
 
@@ -194,7 +230,9 @@ Version 0.2 reports three separate score families:
 
 No universal `70 visual + 30 task` total is authoritative. A scenario-specific composite may be shown only when its versioned weight profile is explicitly labeled **experimental**. Different profile versions are not ranked together. Final weights require human preference and task-success calibration; a reviewer-proposed 50/50 split is also only a hypothesis.
 
-Raw judgments use a 1–5 ordinal scale. The UI may map a family average to 0–100 for readability using `(raw - 1) / 4 × 100`, but raw ordinal values remain authoritative.
+Raw judgments use a 1–5 ordinal scale. Dimension distributions are the primary result. A UI may map an individual dimension to 0–100 for readability using `(raw - 1) / 4 × 100`, but raw ordinal values remain authoritative.
+
+Any family index—including equal weighting—requires a named, versioned, explicitly experimental weight profile. The system does not compute an undeclared family average.
 
 ### 8.2 Task Success — Query Generation
 
@@ -256,9 +294,10 @@ For a scored Artifact:
 
 1. vendor identity is hidden where feasible and residual identity leakage is recorded;
 2. slide order is preserved, while Artifact evaluation order is randomized;
-3. two independent Judge passes score the same canonical input;
-4. a two-point or larger disagreement on any 1–5 dimension, invalid evidence, or contradictory gate result triggers a third adjudication pass or human review;
-5. the stored result includes all raw passes and the aggregation decision.
+3. two context-isolated Judge passes use the frozen model revision, parameters, prompt, input hashes, and declared randomization policy;
+4. if a single Artifact value is required and the two ordinal values differ at all, a third independent pass is run and the median is used; invalid evidence or contradictory gate results trigger human review;
+5. exploratory runs may display the two raw values without resolving them, but cannot present a single stable value;
+6. the stored result includes all raw passes and the deterministic aggregation decision.
 
 Model self-reported confidence is explanatory metadata, not a reliability measure.
 
@@ -280,6 +319,7 @@ Pairwise is supplementary and is scoped to one declared subjective construct:
 - left/right placement is randomized and then swapped at least once;
 - presentation order, random seed, input hashes, and masking policy are stored;
 - inconsistent swapped outcomes are `inconclusive` or sent to human arbitration;
+- each pass must return `A | B | tie | not_assessable`; no observable material difference means `tie`, and insufficient faithful evidence means `not_assessable`;
 - a Pairwise result never mutates the independent Artifact Scorecard;
 - disagreement between absolute and Pairwise evidence is reported as measurement disagreement, not silently reconciled;
 - on-demand pairs explain local differences; they do not produce a global ranking.
@@ -294,7 +334,7 @@ Direct comparison requires equality of:
 - track and normalized core-constraint hash;
 - benchmark protocol and run-protocol version;
 - scorecard and scenario-weight-profile version;
-- Judge policy, model family, and prompt version;
+- exact Judge model revision, parameters, policy, and prompt version;
 - render/extraction/evaluation-input pipeline version.
 
 Product Package differences are displayed as treatments. A declared comparability breaker moves the result into a separate group rather than a footnote.
@@ -303,12 +343,22 @@ Aggregation order is:
 
 ```text
 Judge passes -> Artifact
-Artifacts/Attempts -> Case × Product Package
+retry Attempts -> one Run outcome
+independent Runs -> Case × Product Package
 Cases -> scenario stratum
 Scenario strata -> declared Suite profile
 ```
 
-Reports include sample count, delivery/failure rate, distribution, uncertainty, and missingness. Suite-level comparisons use stratification and confidence intervals; scenario weights are declared for the target user rather than silently averaged. Rubric or Judge changes create a new series. An Anchor Artifact set may be dual-evaluated to build an explicit bridge, but old and new versions are never assumed equivalent.
+Every Suite preregisters a versioned estimator profile:
+
+- the paired Case-level estimand for each dimension;
+- how independent Runs become one Case distribution;
+- Case—not retry Attempt—as the sampling/cluster unit for Suite uncertainty;
+- treatment of vendor failure, missing Artifact, `NOT_APPLICABLE`, and `NOT_ASSESSABLE`;
+- ordinal-appropriate interval or resampling method rather than an automatic normal-theory CI;
+- scenario weights and practical tie band.
+
+Reports include sample count, delivery/failure rate, ordinal distribution, uncertainty, and missingness. Dimension results remain primary; an index requires its explicit weight profile. Rubric or Judge changes create a new series. An Anchor Artifact set may be dual-evaluated to build an explicit bridge, but old and new versions are never assumed equivalent.
 
 ## 11. Comparison View and WPS Gap Cards
 
@@ -339,6 +389,8 @@ Each Gap Card contains:
 
 Observed output cannot prove an internal pipeline cause. Gap Card attribution remains a hypothesis until an experiment validates it.
 
+Accepted Gap Cards enter a WPS-private Gap Backlog with impact, recurrence, evidence strength, user value, controllability, priority, owner, target version, experiment link, result, and state. Vendor-neutral Artifact findings remain separable from private WPS diagnosis. M1 is not complete until at least one item closes the loop `finding -> diagnosis -> experiment -> result`.
+
 ## 12. Operational metrics and long-term utility
 
 Operational metrics do not alter Artifact Quality. They are displayed separately:
@@ -351,7 +403,20 @@ Operational metrics do not alter Artifact Quality. They are displayed separately
 - export format and loss;
 - payment, capacity, authentication, quota, CAPTCHA, and automation blockers.
 
-Long-term Selection Utility may combine Artifact Quality, Human Preference, and Operational Metrics only through an explicit user/scenario utility profile. It is a different output from Artifact Quality.
+Long-term human evidence has two distinct forms:
+
+- blind output preference;
+- hands-on workflow usability covering requirement entry, iteration, local editing, collaboration, export, and failure recovery.
+
+Selection Utility must disclose which evidence forms are available. Without hands-on task evidence, it may produce only an “output selection suggestion,” not a complete product recommendation.
+
+Recommendation is a three-step decision:
+
+1. apply eligibility hard filters such as region, platform, budget, privacy, required format, and current availability;
+2. validate package/version age, evidence freshness, sample coverage, and missingness;
+3. calculate the declared utility profile only across eligible candidates and return trade-offs/tie sets.
+
+No eligible candidate, stale evidence, or insufficient coverage returns `NO_RECOMMENDATION`.
 
 ## 13. SSOT and storage authority
 
@@ -361,10 +426,12 @@ Long-term Selection Utility may combine Artifact Quality, Human Preference, and 
 |---|---|
 | PRD, ADR, schema, rubric, adapter spec, and task status | Private GitHub repository |
 | Run, Attempt, event, Artifact metadata, and evaluation records | Feishu Base, under append-only system-field rules |
-| Original PPT/cloud snapshot and derivatives | Feishu attachment/drive storage with hashes recorded in Base |
+| Original PPT/cloud snapshot and derivatives | A primary Feishu attachment/drive copy plus a second controlled, recoverable copy, both hash-verified |
 | Local files and browser downloads | Disposable working cache, never authority |
 
 In Feishu, automated identity, hash, timing, and score fields are not manually overwritten. Human-editable fields are limited to review status, annotation, and adjudication. Every record carries stable external IDs, version fields, `created_at`, and `last_synced_at`.
+
+Upload is followed by read-back hash verification, and an existing blob is never replaced in place. Until retention-locked object storage exists, M0 keeps a second controlled recoverable copy outside the individual Base attachment entry. A hash without a recoverable blob is not an immutable Artifact.
 
 ### Scale target
 
@@ -372,9 +439,10 @@ Before unattended or high-volume operation, Run/Attempt/events/scores move to a 
 
 ## 14. Security, privacy, and retention
 
-- Credentials are read on demand from the approved secret source and never enter GitHub, Feishu, prompts, screenshots, HAR, or logs.
+- Credentials are read on demand from the approved secret source and never enter GitHub, Feishu, prompts, screenshots, Trace, or logs.
 - Vendor browser profiles are isolated and locked per account.
-- Cookies, authorization headers, personal data, and sensitive source content are redacted from retained Trace.
+- Full HAR and request bodies are not captured by default. Network Trace is allow-listed metadata only.
+- Screenshots and Trace are redacted before persistence/upload; redaction failure sends evidence to an isolated quarantine, never the normal store.
 - Source documents, screenshots, and Trace receive access controls and explicit retention periods.
 - Downloaded files are checked for declared type, size, archives, macros, and external links before sandboxed rendering.
 - Private GitHub status does not make it acceptable to store secrets.
@@ -397,7 +465,7 @@ MVP service objectives are declared per release and measured before unattended o
 
 ## 16. Phased MVP
 
-### M0 — capture and provenance
+### M0 — Query-track capture and provenance
 
 - Query Generation only;
 - 3–5 selected products;
@@ -411,8 +479,12 @@ Exit evidence:
 - every captured Artifact has a hash and provenance manifest;
 - duplicate submission, manual action, and failure classifications are auditable;
 - a partial bake-off report can be produced without treating missing vendors as zero quality.
+- for one declared supported Case, at least 3 supported Product Packages yield captured, openable Artifacts;
+- at least one Package completes a second independent Run without one-off rescue.
 
-### M1 — experimental evaluation and comparison
+Blocked or paid-only products remain valuable reachability evidence but do not count toward the three captured Artifacts.
+
+### M1 — Query-track experimental evaluation and comparison
 
 - canonical render/extraction;
 - versioned rubric anchors;
@@ -425,6 +497,7 @@ Exit evidence:
 - scoring repeatability reaches the declared pilot threshold;
 - every score has page/source evidence and a reproducible input manifest;
 - WPS reviewers confirm that Gap Cards yield testable product hypotheses.
+- at least one Gap Card completes `finding -> diagnosis -> experiment -> result`.
 
 ### M2 — Document Generation
 
@@ -433,13 +506,32 @@ Exit evidence:
 - privacy and document-retention controls;
 - separate Document Benchmark Suite.
 
+M2 is part of the short-term WPS dual-track objective, not part of the long-term recommendation phase. Query and Document tracks each have independent readiness and exit status. Only after both pass their own capture and evaluation exits may the project claim a “short-term dual-track release.”
+
 ### M3 — user preference and selection utility
 
 - segmented blind human studies;
 - scenario-specific utility profiles;
 - calibrated recommendation rather than LLM-only preference claims.
+- hands-on workflow evidence, eligibility filters, evidence freshness, and `NO_RECOMMENDATION`.
 
-## 17. Review disposition from version 0.1
+## 17. Reproducibility pinning
+
+Every Run freezes:
+
+- `spec_commit_sha`;
+- Case, Product Package, run-policy, adapter, and schema content hashes;
+- runner code/image digest and environment evidence.
+
+Every Evaluation additionally freezes:
+
+- exact Judge model ID/revision and parameters;
+- prompt, rubric, anonymization, estimator, and weight-profile hashes;
+- render/extraction image or code digest and all evaluation-input hashes.
+
+A Git branch or `main` reference alone is never a reproducibility identifier.
+
+## 18. Review disposition
 
 Accepted:
 
@@ -452,7 +544,7 @@ Accepted:
 
 Accepted with modification:
 
-- repeated stable claims require at least 3 Attempts, while a single Attempt remains allowed only as a Case sample;
+- repeated stable claims require at least 3 independent Runs, while retry Attempts remain nested recovery evidence;
 - a scenario weight profile may exist, but no reviewer-proposed 50/50 or previous 70/30 split is authoritative before calibration;
 - Feishu remains the temporary operational source for the current MVP because the working process already uses it; the scale architecture moves computation to a runtime database and immutable object store.
 
@@ -460,3 +552,5 @@ Not accepted:
 
 - no exact replacement weight is adopted merely because a reviewer proposed it;
 - no hidden internal pipeline cause is asserted from output evidence alone.
+
+Version 0.3 additionally closes second-round ambiguities in vendor-visible instructions, independent sampling units, Judge aggregation, explicit estimator/weight profiles, fixed gate ownership, render fidelity, Pairwise ties, Bakeoff Job state, orthogonal vendor/capture/render outcomes, event replay, recoverable binary copies, reproducibility pins, workflow research, recommendation hard filters, and track-specific MVP completion.
