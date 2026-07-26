@@ -1,7 +1,7 @@
 # AI PPT Evaluation Framework
 
 Status: Proposed — experimental, not yet calibrated  
-Version: 0.6  
+Version: 0.7  
 Updated: 2026-07-27
 
 ## 1. Purpose and claim boundary
@@ -159,7 +159,9 @@ Trace means observable UI, network-task metadata, screenshots, timestamps, downl
 
 Structured events carry at least:
 
-`event_id`, `job_id`, `case_id`, `run_id`, `attempt_id`, `artifact_id`, `attempt_seq`, `state_version`, `vendor_adapter_version`, event type, `source_at`, `observed_at`, `writer_id`, and evidence reference.
+`event_id`, `job_id`, `case_id`, `run_id`, `attempt_id`, nullable `artifact_id`, `attempt_seq`, `state_version`, `vendor_adapter_version`, event type, `source_at`, `observed_at`, `writer_id`, and evidence reference.
+
+`artifact_id` is null before an Artifact exists. The append-only Artifact-created event binds a new `artifact_id` to its `attempt_id`; every later Artifact-specific event must carry that ID, and the binding cannot be reassigned.
 
 Current state is derived from idempotently upserted events. Duplicate IDs are ignored, and stale or illegal state transitions are rejected. A state update without its causal event is invalid.
 
@@ -213,7 +215,8 @@ Version 0.3 fixes the gate decision table:
 | Artifact captured and openable | `exclude_from_quality` | Delivery outcome only |
 | Sufficient faithful visual input | `exclude_from_quality` | Harness/render diagnosis; not product design |
 | Required delivery/export format | `score_normally_with_flag` | Delivery Quality only |
-| Deck globally unreadable or materially incomplete | `exclude_from_quality` | Delivery outcome; page-local defects stay in the relevant design dimension |
+| Artifact structurally damaged, globally unreadable, or missing evidence needed for reliable judgment | `exclude_from_quality` | Delivery outcome; assessable defects stay in their owned score dimension |
+| Assessable content coverage or completeness defect | `route_to_dimension` | Task Success only |
 | Page count and explicit instruction compliance | `route_to_dimension` | Task Success only |
 | Factual correctness or source fidelity | `route_to_dimension` | Task Success only |
 
@@ -318,7 +321,9 @@ Judge calibration uses a versioned protocol with:
 - thresholds and uncertainty bounds declared before holdout evaluation;
 - separate repeatability and validity decisions.
 
-The initial repeatability target is that at least 80% of repeated dimension judgments are within one ordinal point. This target alone is insufficient: the Judge may support Stable or Suite claims only when the holdout protocol also shows that agreement is not materially below the human–human baseline, systematic bias remains inside its preregistered bound, and the Judge discriminates the anchor quality levels. Failed holdout calibration restricts outputs to exploratory raw judgments.
+Before any model comparison, the rubric and Human Anchor Set must themselves pass a preregistered minimum inter-rater agreement or consensus-reliability threshold with uncertainty. If humans cannot apply the rubric reliably, the rubric is revised and cannot support Stable or Suite claims.
+
+The initial model repeatability target is that at least 80% of repeated dimension judgments are within one ordinal point. This target alone is insufficient: the Judge may support Stable or Suite claims only when the holdout protocol also shows that agreement is not materially below an already-qualified human–human baseline, systematic bias remains inside its preregistered bound, and the Judge discriminates the anchor quality levels. Failed rubric, human-baseline, or model holdout calibration restricts outputs to exploratory raw judgments.
 
 ### Pairwise Judgment
 
@@ -578,3 +583,5 @@ Version 0.4 closes third-round boundaries in randomized time-block execution, ho
 Version 0.5 removes duplicated page-count/instruction scoring: the observation remains operational evidence and compliance belongs only to Task Success.
 
 Version 0.6 prevents three-Run pilots from being mislabeled stable, requires the short-term exits to contain WPS-versus-competitor evidence, and adds recoverable off-Feishu backup/restore of the operational ledger.
+
+Version 0.7 makes pre-Artifact event identity valid, routes assessable content incompleteness to Task Success instead of exclusion, and requires the human rubric baseline itself to pass reliability calibration.
