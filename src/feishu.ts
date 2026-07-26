@@ -1,6 +1,7 @@
 import type {
   ArtifactScorecard,
   ArtifactScoreTableRecord,
+  ComparisonRecord,
   EvaluationCaseRecord,
   FeishuReport,
   FeishuReportDraft,
@@ -29,6 +30,10 @@ export interface ProductGapCardTablePort {
   appendProductGapCard(record: ProductGapCardRecord): Promise<void>;
 }
 
+export interface ComparisonTablePort {
+  appendComparison(record: ComparisonRecord): Promise<void>;
+}
+
 export interface ReportDocumentPort {
   createReport(draft: FeishuReportDraft): Promise<FeishuReport>;
 }
@@ -37,14 +42,20 @@ export interface FeishuProjectionPort
   extends EvaluationCaseTablePort,
     RunRecordTablePort,
     ArtifactScoreTablePort,
+    ComparisonTablePort,
     ProductGapCardTablePort,
-    ReportDocumentPort {}
+    ReportDocumentPort {
+  readonly targetEnvironment: "test" | "production";
+}
 
 export interface FeishuProjectionSnapshot {
   readonly caseTable: readonly EvaluationCaseRecord[];
   readonly runRecordTable: readonly RunRecord[];
   readonly artifactScoreTable: readonly ArtifactScoreTableRecord[];
-  readonly productGapCardTable: readonly ProductGapCardRecord[];
+  readonly productGapCardTable: readonly (
+    | ComparisonRecord
+    | ProductGapCardRecord
+  )[];
   readonly reports: readonly FeishuReport[];
 }
 
@@ -56,18 +67,21 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #caseTable: EvaluationCaseRecord[] = [];
   readonly #runRecordTable: RunRecord[] = [];
   readonly #artifactScoreTable: ArtifactScoreTableRecord[] = [];
-  readonly #productGapCardTable: ProductGapCardRecord[] = [];
+  readonly #productGapCardTable: (
+    | ComparisonRecord
+    | ProductGapCardRecord
+  )[] = [];
   readonly #reports: FeishuReport[] = [];
-  readonly #targetEnvironment: "test" | "production";
+  readonly targetEnvironment: "test" | "production";
 
   constructor(options: InMemoryFeishuProjectionOptions = {}) {
-    this.#targetEnvironment = options.targetEnvironment ?? "test";
+    this.targetEnvironment = options.targetEnvironment ?? "test";
   }
 
   #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {
     assertEnvironmentOriginAllowed(
       origin,
-      this.#targetEnvironment,
+      this.targetEnvironment,
       entityName,
     );
   }
@@ -125,6 +139,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       throw new Error("Artifact score projection contains inconsistent lineage");
     }
     this.#artifactScoreTable.push(record);
+  }
+
+  async appendComparison(record: ComparisonRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Comparison");
+    this.#productGapCardTable.push(record);
   }
 
   async appendProductGapCard(record: ProductGapCardRecord): Promise<void> {

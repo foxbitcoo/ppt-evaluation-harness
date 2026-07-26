@@ -20,6 +20,7 @@ export interface ProductRunCommand {
   readonly attemptId: string;
   readonly attemptSeq: number;
   readonly timeoutMs: number;
+  readonly signal: AbortSignal;
   readonly evaluationCase: EvaluationCaseRecord;
 }
 

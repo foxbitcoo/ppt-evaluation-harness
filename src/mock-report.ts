@@ -13,7 +13,7 @@ export interface MockReportVendorResult {
   readonly product: string;
   readonly runId: string;
   readonly status: RunStatus;
-  readonly terminalReason: TerminalReason;
+  readonly stateReason: TerminalReason;
   readonly artifact: Artifact | null;
   readonly scorecard: ArtifactScorecard | null;
 }
@@ -29,7 +29,7 @@ const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
 
 export function createMockReportDraft(
   jobId: string,
-  jobStatus: "completed" | "partial" | "failed",
+  jobStatus: "active" | "completed" | "partial" | "failed",
   results: readonly MockReportVendorResult[],
 ): FeishuReportDraft {
   const firstResult = results[0];
@@ -37,13 +37,13 @@ export function createMockReportDraft(
     throw new Error("A Mock report requires at least one vendor Run");
   }
   const vendorSections = results
-    .map(({ product, runId, status, terminalReason, artifact, scorecard }) => {
+    .map(({ product, runId, status, stateReason, artifact, scorecard }) => {
       if (artifact === null || scorecard === null) {
         return `## ${product}
 
 - Run：\`${runId}\`
 - 状态：\`${status}\`
-- 终止原因：\`${terminalReason}\`
+- 状态原因：\`${stateReason}\`
 - Artifact：无`;
       }
       const scoreRows = scorecard.dimensions
@@ -56,7 +56,7 @@ export function createMockReportDraft(
 
 - Run：\`${scorecard.runId}\`
 - 状态：\`${status}\`
-- 终止原因：\`${terminalReason}\`
+- 状态原因：\`${stateReason}\`
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}

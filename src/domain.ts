@@ -9,6 +9,7 @@ export type MockProvenance = typeof MOCK_PROVENANCE;
 export type ProvenanceLabel = MockProvenance | "PRODUCTION";
 
 export type RunStatus =
+  | "active"
   | "completed"
   | "partial"
   | "failed"
@@ -28,6 +29,34 @@ export type TerminalReason =
 export type BlockReason = "payment" | "quota" | "authentication";
 
 export type SubmissionEvidence = "not_submitted" | "submitted" | "unknown";
+
+export interface BakeoffProtocolSnapshot {
+  readonly protocolId: string;
+  readonly timeoutMs: number;
+  readonly retryPolicy: "one_if_provably_not_submitted";
+  readonly resultSelectionPolicy: "first_policy_compliant_artifact";
+  readonly cancellationPolicy: "independent_vendor_runs_continue";
+}
+
+export interface ObservableAttemptEvent {
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly caseId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly attemptSeq: number;
+  readonly eventType: string;
+  readonly sourceAt: string;
+  readonly observedAt: string;
+  readonly writerId: string;
+  readonly evidenceRef: string;
+}
+
+export interface CostEvidence {
+  readonly classification: "unknown";
+  readonly amount: null;
+  readonly currency: null;
+}
 
 export interface EvaluationCaseRecord {
   readonly recordId: string;
@@ -59,9 +88,19 @@ export interface RunRecord {
   readonly attemptSeq: number | null;
   readonly elapsedMs: number | null;
   readonly submissionEvidence: SubmissionEvidence | null;
-  readonly terminalReason: TerminalReason | null;
+  readonly terminalReason: Exclude<TerminalReason, "human_wait"> | null;
+  readonly waitingReason: "human_intervention" | null;
   readonly blockReason: BlockReason | null;
   readonly retryOfAttemptId: string | null;
+  readonly selectedRunIds: readonly string[] | null;
+  readonly protocolSnapshot: BakeoffProtocolSnapshot | null;
+  readonly deadlineAt: string | null;
+  readonly vendorGenerationMs: number | null;
+  readonly humanWaitMs: number | null;
+  readonly timingPausedAt: string | null;
+  readonly observableEvents: readonly ObservableAttemptEvent[] | null;
+  readonly manualActions: readonly string[] | null;
+  readonly costEvidence: CostEvidence | null;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly createdAt: string;
@@ -165,14 +204,25 @@ export interface ArtifactScoreTableRecord {
   readonly scorecard: ArtifactScorecard;
 }
 
+export interface ComparisonRecord {
+  readonly recordType: "comparison";
+  readonly comparisonId: string;
+  readonly caseId: string;
+  readonly jobId: string;
+  readonly leftRunId: string;
+  readonly rightRunId: string;
+  readonly leftScorecardId: string;
+  readonly rightScorecardId: string;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
 export interface ProductGapCardRecord {
+  readonly recordType: "gap_card";
   readonly gapCardId: string;
   readonly caseId: string;
   readonly jobId: string;
-  readonly baselineRunId: string;
-  readonly candidateRunId: string;
-  readonly baselineScorecardId: string;
-  readonly candidateScorecardId: string;
+  readonly comparisonId: string;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly workflowState: "draft";
@@ -200,16 +250,19 @@ export interface BakeoffJobSummary {
   readonly jobId: string;
   readonly caseId: string;
   readonly environment: "test" | "production";
-  readonly status: "completed" | "partial" | "failed";
+  readonly status: "active" | "completed" | "partial" | "failed";
   readonly provenance: MockProvenance;
   readonly environmentOrigin: TestEnvironmentOrigin;
 }
 
 export interface BakeoffJobOutcome {
   readonly job: BakeoffJobSummary;
-  readonly artifact: Artifact;
-  readonly renderManifest: RenderManifest;
-  readonly scorecard: ArtifactScorecard;
+  readonly artifact: Artifact | null;
+  readonly renderManifest: RenderManifest | null;
+  readonly scorecard: ArtifactScorecard | null;
+  readonly artifacts: readonly Artifact[];
+  readonly renderManifests: readonly RenderManifest[];
+  readonly scorecards: readonly ArtifactScorecard[];
   readonly report: FeishuReport;
 }
 

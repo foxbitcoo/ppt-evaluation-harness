@@ -30,6 +30,54 @@ import type {
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 
+export type AttemptDeadlineResult<T> =
+  | {
+      readonly timedOut: false;
+      readonly value: T;
+    }
+  | {
+      readonly timedOut: true;
+      readonly elapsedMs: number;
+    };
+
+export interface AttemptDeadlinePort {
+  run<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    timeoutMs: number,
+  ): Promise<AttemptDeadlineResult<T>>;
+}
+
+const WALL_CLOCK_ATTEMPT_DEADLINE: AttemptDeadlinePort = {
+  run<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    timeoutMs: number,
+  ): Promise<AttemptDeadlineResult<T>> {
+    const controller = new AbortController();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        controller.abort();
+        resolve({ timedOut: true, elapsedMs: timeoutMs });
+      }, timeoutMs);
+      void operation(controller.signal).then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve({ timedOut: false, value });
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  },
+};
+
 export interface BakeoffHarness {
   startBakeoffJob(command: StartBakeoffJobCommand): Promise<BakeoffJobOutcome>;
 }
@@ -38,6 +86,7 @@ export interface BakeoffHarnessDependencies {
   readonly feishu: FeishuProjectionPort;
   readonly productAdapter?: ProductAdapterPort;
   readonly productAdapters?: readonly ProductAdapterPort[];
+  readonly attemptDeadline?: AttemptDeadlinePort;
 }
 
 interface CapturedVendorResult {
@@ -50,6 +99,34 @@ interface CapturedVendorResult {
   readonly renderManifest: RenderManifest | null;
   readonly scorecard: ArtifactScorecard | null;
   readonly attemptRecords: readonly RunRecord[];
+}
+
+function vendorSlug(packageId: string): string {
+  const slugs = {
+    "MOCK-wps-package-v1": "wps",
+    "MOCK-qwen-package-v1": "qwen",
+    "MOCK-doubao-package-v1": "doubao",
+  } as const;
+  const knownSlug = slugs[packageId as keyof typeof slugs];
+  if (knownSlug !== undefined) return knownSlug;
+  const readableSlug =
+    packageId
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 32) || "package";
+  const hash = createHash("sha256").update(packageId).digest("hex").slice(0, 8);
+  return `${readableSlug}-${hash}`;
+}
+
+function runIdForPackage(packageId: string): string {
+  const scenario =
+    MOCK_SCENARIO.vendors[
+      packageId as keyof typeof MOCK_SCENARIO.vendors
+    ];
+  return (
+    scenario?.runId ?? `MOCK-run-${vendorSlug(packageId)}-volcano-v1`
+  );
 }
 
 function isArtifact(
@@ -87,6 +164,12 @@ function statusFromTerminalReason(reason: TerminalReason): RunStatus {
   return "failed";
 }
 
+function fixedTimestampAfter(elapsedMs: number): string {
+  return new Date(
+    Date.parse(MOCK_SCENARIO.fixedTime) + elapsedMs,
+  ).toISOString();
+}
+
 function attemptRecord(input: {
   readonly adapter: ProductAdapterPort;
   readonly runId: string;
@@ -111,9 +194,47 @@ function attemptRecord(input: {
     attemptSeq: input.attemptSeq,
     elapsedMs: input.result.elapsedMs,
     submissionEvidence: input.result.submissionEvidence,
-    terminalReason: input.terminalReason,
+    terminalReason:
+      input.terminalReason === "human_wait" ? null : input.terminalReason,
+    waitingReason:
+      input.terminalReason === "human_wait" ? "human_intervention" : null,
     blockReason: input.result.blockReason,
     retryOfAttemptId: input.retryOfAttemptId,
+    selectedRunIds: null,
+    protocolSnapshot: null,
+    deadlineAt: null,
+    vendorGenerationMs: input.result.elapsedMs,
+    humanWaitMs: null,
+    timingPausedAt:
+      input.terminalReason === "human_wait"
+        ? fixedTimestampAfter(input.result.elapsedMs)
+        : null,
+    observableEvents: [
+      {
+        eventId: `${input.attemptId}-event-1`,
+        jobId: MOCK_SCENARIO.jobId,
+        caseId: input.caseId,
+        runId: input.runId,
+        attemptId: input.attemptId,
+        attemptSeq: input.attemptSeq,
+        eventType:
+          input.terminalReason === "human_wait"
+            ? "waiting_for_human"
+            : `terminal:${input.terminalReason}`,
+        sourceAt: fixedTimestampAfter(input.result.elapsedMs),
+        observedAt: fixedTimestampAfter(input.result.elapsedMs),
+        writerId: "mock-runner@1",
+        evidenceRef: `mock://${vendorSlug(
+          input.adapter.productPackage.packageId,
+        )}/attempt-${input.attemptSeq}`,
+      },
+    ],
+    manualActions: [],
+    costEvidence: {
+      classification: "unknown",
+      amount: null,
+      currency: null,
+    },
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     createdAt: MOCK_SCENARIO.fixedTime,
@@ -128,12 +249,13 @@ function attemptRecord(input: {
 async function executeVendor(
   adapter: ProductAdapterPort,
   caseId: string,
+  attemptDeadline: AttemptDeadlinePort,
 ): Promise<CapturedVendorResult> {
   const scenario =
     MOCK_SCENARIO.vendors[
       adapter.productPackage.packageId as keyof typeof MOCK_SCENARIO.vendors
     ];
-  const runId = scenario?.runId ?? MOCK_SCENARIO.runId;
+  const runId = runIdForPackage(adapter.productPackage.packageId);
   const attempts: RunRecord[] = [];
   let retryOfAttemptId: string | null = null;
   let attemptSeq = 1;
@@ -143,15 +265,28 @@ async function executeVendor(
 
   while (true) {
     const attemptId = `${runId}-attempt-${attemptSeq}`;
-    const rawExecution = await adapter.execute({
-      jobId: MOCK_SCENARIO.jobId,
-      runId,
-      attemptId,
-      attemptSeq,
-      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-      evaluationCase: VOLCANO_EVALUATION_CASE,
-    });
-    result = normalizeExecution(rawExecution);
+    const deadlineResult = await attemptDeadline.run(
+      (signal) =>
+        adapter.execute({
+          jobId: MOCK_SCENARIO.jobId,
+          runId,
+          attemptId,
+          attemptSeq,
+          timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+          signal,
+          evaluationCase: VOLCANO_EVALUATION_CASE,
+        }),
+      VENDOR_GENERATION_TIMEOUT_MS,
+    );
+    result = deadlineResult.timedOut
+      ? {
+          terminalReason: "vendor_timeout",
+          blockReason: null,
+          submissionEvidence: "unknown",
+          elapsedMs: deadlineResult.elapsedMs,
+          artifactCandidates: [],
+        }
+      : normalizeExecution(deadlineResult.value);
     terminalReason =
       result.elapsedMs >= VENDOR_GENERATION_TIMEOUT_MS
         ? "vendor_timeout"
@@ -222,12 +357,15 @@ async function executeVendor(
   }
   const renderManifest = renderStaticArtifact(
     artifact,
-    scenario?.renderManifestId,
+    scenario?.renderManifestId ??
+      runId.replace(/^MOCK-run-/, "MOCK-render-"),
   );
   const scorecard = scoreRenderedArtifact(artifact, renderManifest, {
     jobId: MOCK_SCENARIO.jobId,
     runId,
-    scorecardId: scenario?.scorecardId,
+    scorecardId:
+      scenario?.scorecardId ??
+      runId.replace(/^MOCK-run-/, "MOCK-scorecard-"),
   });
   return {
     adapter,
@@ -262,6 +400,7 @@ export function createBakeoffHarness({
   feishu,
   productAdapter,
   productAdapters,
+  attemptDeadline = WALL_CLOCK_ATTEMPT_DEADLINE,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const selectedProductAdapters =
     productAdapters ?? (productAdapter === undefined ? [] : [productAdapter]);
@@ -274,6 +413,21 @@ export function createBakeoffHarness({
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
       }
+      if (command.environment !== feishu.targetEnvironment) {
+        throw new Error(
+          `${command.environment} command cannot use ${feishu.targetEnvironment} projection environment`,
+        );
+      }
+      const packageIds = selectedProductAdapters.map(
+        ({ productPackage }) => productPackage.packageId,
+      );
+      if (new Set(packageIds).size !== packageIds.length) {
+        throw new Error("Bakeoff Job contains duplicate Product Package IDs");
+      }
+      const selectedRunIds = packageIds.map(runIdForPackage);
+      if (new Set(selectedRunIds).size !== selectedRunIds.length) {
+        throw new Error("Bakeoff Job contains duplicate derived Run IDs");
+      }
       for (const adapter of selectedProductAdapters) {
         assertEnvironmentOriginAllowed(
           adapter.productPackage.environmentOrigin,
@@ -284,7 +438,9 @@ export function createBakeoffHarness({
 
       const results: CapturedVendorResult[] = [];
       for (const adapter of selectedProductAdapters) {
-        results.push(await executeVendor(adapter, command.caseId));
+        results.push(
+          await executeVendor(adapter, command.caseId, attemptDeadline),
+        );
       }
       const successful = results.filter(
         (
@@ -300,15 +456,14 @@ export function createBakeoffHarness({
           result.scorecard !== null,
       );
       const jobStatus =
-        successful.length === results.length
+        results.some(({ status }) => status === "waiting_for_human")
+          ? "active"
+          : successful.length === results.length
           ? "completed"
           : successful.length === 0
             ? "failed"
             : "partial";
       const firstSuccessful = successful[0];
-      if (firstSuccessful === undefined) {
-        throw new Error("Bakeoff Job produced no captured Artifact");
-      }
 
       await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
       await feishu.appendRunRecord({
@@ -323,8 +478,24 @@ export function createBakeoffHarness({
         elapsedMs: null,
         submissionEvidence: null,
         terminalReason: null,
+        waitingReason: null,
         blockReason: null,
         retryOfAttemptId: null,
+        selectedRunIds: results.map(({ runId }) => runId),
+        protocolSnapshot: {
+          protocolId: "MOCK-query-default-cost-v1",
+          timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+          retryPolicy: "one_if_provably_not_submitted",
+          resultSelectionPolicy: "first_policy_compliant_artifact",
+          cancellationPolicy: "independent_vendor_runs_continue",
+        },
+        deadlineAt: fixedTimestampAfter(VENDOR_GENERATION_TIMEOUT_MS),
+        vendorGenerationMs: null,
+        humanWaitMs: null,
+        timingPausedAt: null,
+        observableEvents: null,
+        manualActions: null,
+        costEvidence: null,
         artifactId: null,
         renderManifestId: null,
         scorecardId: null,
@@ -342,9 +513,25 @@ export function createBakeoffHarness({
           attemptSeq: null,
           elapsedMs: null,
           submissionEvidence: null,
-          terminalReason: result.terminalReason,
+          terminalReason:
+            result.terminalReason === "human_wait"
+              ? null
+              : result.terminalReason,
+          waitingReason:
+            result.terminalReason === "human_wait"
+              ? "human_intervention"
+              : null,
           blockReason: result.blockReason,
           retryOfAttemptId: null,
+          selectedRunIds: null,
+          protocolSnapshot: null,
+          deadlineAt: null,
+          vendorGenerationMs: null,
+          humanWaitMs: null,
+          timingPausedAt: null,
+          observableEvents: null,
+          manualActions: null,
+          costEvidence: null,
           artifactId: result.artifact?.artifactId ?? null,
           renderManifestId: result.renderManifest?.renderManifestId ?? null,
           scorecardId: result.scorecard?.scorecardId ?? null,
@@ -373,33 +560,34 @@ export function createBakeoffHarness({
         }
       }
 
-      const wpsResult = successful.find(
-        ({ adapter }) =>
-          adapter.productPackage.packageId === "MOCK-wps-package-v1",
-      );
-      for (const result of successful) {
-        if (
-          wpsResult === undefined ||
-          result === wpsResult ||
-          (result.adapter.productPackage.packageId !==
-            "MOCK-qwen-package-v1" &&
-            result.adapter.productPackage.packageId !==
-              "MOCK-doubao-package-v1")
-        ) {
-          continue;
-        }
-        await feishu.appendProductGapCard({
-          gapCardId:
-            result.adapter.productPackage.packageId ===
-            "MOCK-qwen-package-v1"
-              ? MOCK_SCENARIO.gapCards.qwen
-              : MOCK_SCENARIO.gapCards.doubao,
+      const leftResult = successful[0];
+      for (const rightResult of successful.slice(1)) {
+        if (leftResult === undefined) break;
+        const leftSlug = vendorSlug(
+          leftResult.adapter.productPackage.packageId,
+        );
+        const rightSlug = vendorSlug(
+          rightResult.adapter.productPackage.packageId,
+        );
+        const comparisonId = `MOCK-comparison-${leftSlug}-${rightSlug}-volcano-v1`;
+        await feishu.appendComparison({
+          recordType: "comparison",
+          comparisonId,
           caseId: command.caseId,
           jobId: MOCK_SCENARIO.jobId,
-          baselineRunId: wpsResult.runId,
-          candidateRunId: result.runId,
-          baselineScorecardId: wpsResult.scorecard.scorecardId,
-          candidateScorecardId: result.scorecard.scorecardId,
+          leftRunId: leftResult.runId,
+          rightRunId: rightResult.runId,
+          leftScorecardId: leftResult.scorecard.scorecardId,
+          rightScorecardId: rightResult.scorecard.scorecardId,
+          provenance: "MOCK",
+          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+        });
+        await feishu.appendProductGapCard({
+          recordType: "gap_card",
+          gapCardId: `MOCK-gap-${leftSlug}-${rightSlug}-volcano-v1`,
+          caseId: command.caseId,
+          jobId: MOCK_SCENARIO.jobId,
+          comparisonId,
           provenance: "MOCK",
           environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
           workflowState: "draft",
@@ -414,7 +602,7 @@ export function createBakeoffHarness({
             product: result.adapter.productPackage.displayName,
             runId: result.runId,
             status: result.status,
-            terminalReason: result.terminalReason,
+            stateReason: result.terminalReason,
             artifact: result.artifact,
             scorecard: result.scorecard,
           })),
@@ -431,11 +619,17 @@ export function createBakeoffHarness({
           provenance: "MOCK",
           environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
         },
-        artifact: firstSuccessful.artifact,
-        renderManifest: firstSuccessful.renderManifest,
-        scorecard: firstSuccessful.scorecard,
+        artifact: firstSuccessful?.artifact ?? null,
+        renderManifest: firstSuccessful?.renderManifest ?? null,
+        scorecard: firstSuccessful?.scorecard ?? null,
+        artifacts: successful.map(({ artifact }) => artifact),
+        renderManifests: successful.map(
+          ({ renderManifest }) => renderManifest,
+        ),
+        scorecards: successful.map(({ scorecard }) => scorecard),
         report,
       };
     },
   };
 }
+import { createHash } from "node:crypto";

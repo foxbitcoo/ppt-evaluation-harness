@@ -1,6 +1,8 @@
 export {
   VENDOR_GENERATION_TIMEOUT_MS,
   createBakeoffHarness,
+  type AttemptDeadlinePort,
+  type AttemptDeadlineResult,
 } from "./bakeoff.ts";
 export {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
@@ -13,6 +15,7 @@ export {
 export {
   InMemoryFeishuProjection,
   type ArtifactScoreTablePort,
+  type ComparisonTablePort,
   type EvaluationCaseTablePort,
   type FeishuProjectionPort,
   type FeishuProjectionSnapshot,
@@ -42,7 +45,10 @@ export type {
   ArtifactScoreTableRecord,
   BakeoffJobOutcome,
   BakeoffJobSummary,
+  BakeoffProtocolSnapshot,
   BlockReason,
+  ComparisonRecord,
+  CostEvidence,
   DeliveryQualityGate,
   EvaluationCaseRecord,
   DimensionScore,
@@ -50,6 +56,7 @@ export type {
   FeishuReport,
   FeishuReportDraft,
   ProductGapCardRecord,
+  ObservableAttemptEvent,
   RenderManifest,
   RunRecord,
   RunStatus,

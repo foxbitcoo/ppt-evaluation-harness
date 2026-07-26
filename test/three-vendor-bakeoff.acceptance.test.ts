@@ -4,12 +4,15 @@ import test from "node:test";
 import {
   InMemoryFeishuProjection,
   MOCK_TEST_ENVIRONMENT_ORIGIN,
+  PRODUCTION_ENVIRONMENT_ORIGIN,
   MockDoubaoProductAdapter,
   MockQwenProductAdapter,
   MockWpsProductAdapter,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   type ArtifactScoreTableRecord,
+  type AttemptDeadlinePort,
+  type ComparisonRecord,
   type EvaluationCaseRecord,
   type FeishuReportDraft,
   type ProductAdapterPort,
@@ -134,43 +137,39 @@ test("the four Feishu projections preserve stable Case, Run, score, and product-
     ],
   );
   assert.deepEqual(
-    projection.productGapCardTable.map(
-      ({
-        gapCardId,
-        caseId,
-        jobId,
-        baselineRunId,
-        candidateRunId,
-        baselineScorecardId,
-        candidateScorecardId,
-      }) => ({
-        gapCardId,
-        caseId,
-        jobId,
-        baselineRunId,
-        candidateRunId,
-        baselineScorecardId,
-        candidateScorecardId,
-      }),
-    ),
+    projection.productGapCardTable.map((record) => ({
+      recordType: record.recordType,
+      recordId:
+        record.recordType === "comparison"
+          ? record.comparisonId
+          : record.gapCardId,
+      caseId: record.caseId,
+      jobId: record.jobId,
+    })),
     [
       {
-        gapCardId: "MOCK-gap-wps-vs-qwen-volcano-v1",
+        recordType: "comparison",
+        recordId: "MOCK-comparison-wps-qwen-volcano-v1",
         caseId: VOLCANO_CASE_ID,
         jobId: "MOCK-job-volcano-v1",
-        baselineRunId: "MOCK-run-wps-volcano-v1",
-        candidateRunId: "MOCK-run-qwen-volcano-v1",
-        baselineScorecardId: "MOCK-scorecard-wps-volcano-v1",
-        candidateScorecardId: "MOCK-scorecard-qwen-volcano-v1",
       },
       {
-        gapCardId: "MOCK-gap-wps-vs-doubao-volcano-v1",
+        recordType: "gap_card",
+        recordId: "MOCK-gap-wps-qwen-volcano-v1",
         caseId: VOLCANO_CASE_ID,
         jobId: "MOCK-job-volcano-v1",
-        baselineRunId: "MOCK-run-wps-volcano-v1",
-        candidateRunId: "MOCK-run-doubao-volcano-v1",
-        baselineScorecardId: "MOCK-scorecard-wps-volcano-v1",
-        candidateScorecardId: "MOCK-scorecard-doubao-volcano-v1",
+      },
+      {
+        recordType: "comparison",
+        recordId: "MOCK-comparison-wps-doubao-volcano-v1",
+        caseId: VOLCANO_CASE_ID,
+        jobId: "MOCK-job-volcano-v1",
+      },
+      {
+        recordType: "gap_card",
+        recordId: "MOCK-gap-wps-doubao-volcano-v1",
+        caseId: VOLCANO_CASE_ID,
+        jobId: "MOCK-job-volcano-v1",
       },
     ],
   );
@@ -326,23 +325,29 @@ test("payment, authentication, and human-wait states stay distinct and never ret
     {
       scenario: "payment_blocked" as const,
       status: "blocked",
+      jobStatus: "partial",
       terminalReason: "payment",
       blockReason: "payment",
       submissionEvidence: "not_submitted",
+      waitingReason: null,
     },
     {
       scenario: "authentication_blocked" as const,
       status: "blocked",
+      jobStatus: "partial",
       terminalReason: "authentication",
       blockReason: "authentication",
       submissionEvidence: "not_submitted",
+      waitingReason: null,
     },
     {
       scenario: "human_wait" as const,
       status: "waiting_for_human",
-      terminalReason: "human_wait",
+      jobStatus: "active",
+      terminalReason: null,
       blockReason: null,
       submissionEvidence: "submitted",
+      waitingReason: "human_intervention",
     },
   ];
 
@@ -367,7 +372,7 @@ test("payment, authentication, and human-wait states stay distinct and never ret
           parentRecordId === "MOCK-run-qwen-volcano-v1",
       );
 
-    assert.equal(outcome.job.status, "partial");
+    assert.equal(outcome.job.status, expected.jobStatus);
     assert.equal(qwenRecords.length, 2);
     assert.deepEqual(
       qwenRecords.map(
@@ -377,12 +382,14 @@ test("payment, authentication, and human-wait states stay distinct and never ret
           terminalReason,
           blockReason,
           submissionEvidence,
+          waitingReason,
         }) => ({
           recordType,
           status,
           terminalReason,
           blockReason,
           submissionEvidence,
+          waitingReason,
         }),
       ),
       [
@@ -392,6 +399,7 @@ test("payment, authentication, and human-wait states stay distinct and never ret
           terminalReason: expected.terminalReason,
           blockReason: expected.blockReason,
           submissionEvidence: null,
+          waitingReason: expected.waitingReason,
         },
         {
           recordType: "evaluation_attempt",
@@ -399,6 +407,7 @@ test("payment, authentication, and human-wait states stay distinct and never ret
           terminalReason: expected.terminalReason,
           blockReason: expected.blockReason,
           submissionEvidence: expected.submissionEvidence,
+          waitingReason: expected.waitingReason,
         },
       ],
     );
@@ -585,8 +594,23 @@ test("production rejects every Mock lineage even when every visible provenance l
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     },
   } as ArtifactScoreTableRecord;
+  const comparison = snapshot.productGapCardTable.find(
+    (record): record is ComparisonRecord =>
+      record.recordType === "comparison",
+  );
+  const gapCard = snapshot.productGapCardTable.find(
+    (record): record is ProductGapCardRecord =>
+      record.recordType === "gap_card",
+  );
+  assert.ok(comparison);
+  assert.ok(gapCard);
   const relabeledComparison = {
-    ...snapshot.productGapCardTable[0],
+    ...comparison,
+    ...productionLabel,
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+  } as ComparisonRecord;
+  const relabeledGapCard = {
+    ...gapCard,
     ...productionLabel,
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
   } as ProductGapCardRecord;
@@ -609,7 +633,11 @@ test("production rejects every Mock lineage even when every visible provenance l
     /production.*environment origin/i,
   );
   await assert.rejects(
-    productionFeishu.appendProductGapCard(relabeledComparison),
+    productionFeishu.appendComparison(relabeledComparison),
+    /production.*environment origin/i,
+  );
+  await assert.rejects(
+    productionFeishu.appendProductGapCard(relabeledGapCard),
     /production.*environment origin/i,
   );
   await assert.rejects(
@@ -635,4 +663,310 @@ test("production rejects every Mock lineage even when every visible provenance l
     }),
     /production.*environment origin/i,
   );
+});
+
+test("the command environment must match the projection environment before any adapter executes", async () => {
+  const mockAdapter = new MockWpsProductAdapter();
+  let executeCount = 0;
+  const productionLabeledAdapter: ProductAdapterPort = {
+    productPackage: {
+      ...mockAdapter.productPackage,
+      provenance: "PRODUCTION",
+      environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
+    },
+    async execute(command) {
+      executeCount += 1;
+      return mockAdapter.execute(command);
+    },
+  };
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu: new InMemoryFeishuProjection(),
+      productAdapters: [productionLabeledAdapter],
+    }).startBakeoffJob({
+      environment: "production",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /production.*test projection environment/i,
+  );
+  assert.equal(executeCount, 0);
+});
+
+test("an all-failed Bakeoff persists every failure and returns a MOCK failure report without captured output", async () => {
+  const wps = new MockWpsProductAdapter();
+  const timedOutWps: ProductAdapterPort = {
+    productPackage: wps.productPackage,
+    async execute() {
+      return {
+        terminalReason: "vendor_timeout",
+        blockReason: null,
+        submissionEvidence: "submitted",
+        elapsedMs: 1_800_000,
+        artifactCandidates: [],
+      };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      timedOutWps,
+      new MockQwenProductAdapter({ scenario: "quota_blocked" }),
+      new MockDoubaoProductAdapter({ scenario: "payment_blocked" }),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const projection = feishu.snapshot();
+
+  assert.equal(outcome.job.status, "failed");
+  assert.equal(outcome.artifact, null);
+  assert.equal(outcome.renderManifest, null);
+  assert.equal(outcome.scorecard, null);
+  assert.deepEqual(outcome.artifacts, []);
+  assert.equal(projection.caseTable.length, 1);
+  assert.deepEqual(
+    projection.runRecordTable
+      .filter(({ recordType }) => recordType === "vendor_run")
+      .map(({ status, terminalReason }) => ({ status, terminalReason })),
+    [
+      { status: "timed_out", terminalReason: "vendor_timeout" },
+      { status: "blocked", terminalReason: "quota" },
+      { status: "blocked", terminalReason: "payment" },
+    ],
+  );
+  assert.equal(
+    projection.runRecordTable.filter(
+      ({ recordType }) => recordType === "evaluation_attempt",
+    ).length,
+    3,
+  );
+  assert.deepEqual(outcome.report.artifactIds, []);
+  assert.match(outcome.report.title, /^MOCK/);
+  assert.match(outcome.report.markdown, /Job 状态：`failed`/);
+});
+
+test("Comparison and Gap Card are separate neutral lineage records without a permanent WPS baseline", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const records = feishu.snapshot().productGapCardTable;
+  const comparisons = records.filter(
+    (record): record is ComparisonRecord =>
+      record.recordType === "comparison",
+  );
+  const gapCards = records.filter(
+    (record): record is ProductGapCardRecord =>
+      record.recordType === "gap_card",
+  );
+
+  assert.deepEqual(
+    comparisons.map(
+      ({
+        comparisonId,
+        leftRunId,
+        rightRunId,
+        leftScorecardId,
+        rightScorecardId,
+      }) => ({
+        comparisonId,
+        leftRunId,
+        rightRunId,
+        leftScorecardId,
+        rightScorecardId,
+      }),
+    ),
+    [
+      {
+        comparisonId: "MOCK-comparison-wps-qwen-volcano-v1",
+        leftRunId: "MOCK-run-wps-volcano-v1",
+        rightRunId: "MOCK-run-qwen-volcano-v1",
+        leftScorecardId: "MOCK-scorecard-wps-volcano-v1",
+        rightScorecardId: "MOCK-scorecard-qwen-volcano-v1",
+      },
+      {
+        comparisonId: "MOCK-comparison-wps-doubao-volcano-v1",
+        leftRunId: "MOCK-run-wps-volcano-v1",
+        rightRunId: "MOCK-run-doubao-volcano-v1",
+        leftScorecardId: "MOCK-scorecard-wps-volcano-v1",
+        rightScorecardId: "MOCK-scorecard-doubao-volcano-v1",
+      },
+    ],
+  );
+  assert.deepEqual(
+    gapCards.map(({ gapCardId, comparisonId }) => ({
+      gapCardId,
+      comparisonId,
+    })),
+    [
+      {
+        gapCardId: "MOCK-gap-wps-qwen-volcano-v1",
+        comparisonId: "MOCK-comparison-wps-qwen-volcano-v1",
+      },
+      {
+        gapCardId: "MOCK-gap-wps-doubao-volcano-v1",
+        comparisonId: "MOCK-comparison-wps-doubao-volcano-v1",
+      },
+    ],
+  );
+
+  const competitorOnlyFeishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: competitorOnlyFeishu,
+    productAdapters: [
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const competitorComparison =
+    competitorOnlyFeishu
+      .snapshot()
+      .productGapCardTable.find(
+        (record): record is ComparisonRecord =>
+          record.recordType === "comparison",
+      );
+  assert.equal(
+    competitorComparison?.leftRunId,
+    "MOCK-run-qwen-volcano-v1",
+  );
+  assert.equal(
+    competitorComparison?.rightRunId,
+    "MOCK-run-doubao-volcano-v1",
+  );
+});
+
+test("the Job freezes its selected Runs and protocol while Attempts retain observable timing, action, and cost evidence", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter({ scenario: "human_wait" }),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const projection = feishu.snapshot();
+  const job = projection.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const qwenAttempt = projection.runRecordTable.find(
+    ({ recordType, parentRecordId }) =>
+      recordType === "evaluation_attempt" &&
+      parentRecordId === "MOCK-run-qwen-volcano-v1",
+  );
+
+  assert.deepEqual(job?.selectedRunIds, [
+    "MOCK-run-wps-volcano-v1",
+    "MOCK-run-qwen-volcano-v1",
+    "MOCK-run-doubao-volcano-v1",
+  ]);
+  assert.deepEqual(job?.protocolSnapshot, {
+    protocolId: "MOCK-query-default-cost-v1",
+    timeoutMs: 1_800_000,
+    retryPolicy: "one_if_provably_not_submitted",
+    resultSelectionPolicy: "first_policy_compliant_artifact",
+    cancellationPolicy: "independent_vendor_runs_continue",
+  });
+  assert.equal(job?.deadlineAt, "2026-01-01T00:30:00.000Z");
+  assert.equal(qwenAttempt?.vendorGenerationMs, 1);
+  assert.equal(qwenAttempt?.humanWaitMs, null);
+  assert.equal(qwenAttempt?.timingPausedAt, "2026-01-01T00:00:00.001Z");
+  assert.deepEqual(qwenAttempt?.manualActions, []);
+  assert.deepEqual(qwenAttempt?.costEvidence, {
+    classification: "unknown",
+    amount: null,
+    currency: null,
+  });
+  assert.deepEqual(qwenAttempt?.observableEvents, [
+    {
+      eventId: "MOCK-run-qwen-volcano-v1-attempt-1-event-1",
+      jobId: "MOCK-job-volcano-v1",
+      caseId: VOLCANO_CASE_ID,
+      runId: "MOCK-run-qwen-volcano-v1",
+      attemptId: "MOCK-run-qwen-volcano-v1-attempt-1",
+      attemptSeq: 1,
+      eventType: "waiting_for_human",
+      sourceAt: "2026-01-01T00:00:00.001Z",
+      observedAt: "2026-01-01T00:00:00.001Z",
+      writerId: "mock-runner@1",
+      evidenceRef: "mock://qwen/attempt-1",
+    },
+  ]);
+});
+
+test("the 30-minute wall-clock deadline aborts a hung adapter without trusting adapter-reported elapsed time", async () => {
+  const wps = new MockWpsProductAdapter();
+  let executeCount = 0;
+  let observedAbort = false;
+  const hungWps: ProductAdapterPort = {
+    productPackage: wps.productPackage,
+    execute(command) {
+      executeCount += 1;
+      command.signal.addEventListener("abort", () => {
+        observedAbort = true;
+      });
+      return new Promise(() => {});
+    },
+  };
+  let deadlineCall = 0;
+  const immediateDeadline: AttemptDeadlinePort = {
+    async run(operation, timeoutMs) {
+      deadlineCall += 1;
+      const controller = new AbortController();
+      if (deadlineCall === 1) {
+        void operation(controller.signal);
+        controller.abort();
+        return { timedOut: true, elapsedMs: timeoutMs };
+      }
+      return {
+        timedOut: false,
+        value: await operation(controller.signal),
+      };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      hungWps,
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+    attemptDeadline: immediateDeadline,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const wpsAttempt = feishu
+    .snapshot()
+    .runRecordTable.find(
+      ({ recordType, parentRecordId }) =>
+        recordType === "evaluation_attempt" &&
+        parentRecordId === "MOCK-run-wps-volcano-v1",
+    );
+
+  assert.equal(executeCount, 1);
+  assert.equal(observedAbort, true);
+  assert.equal(outcome.job.status, "partial");
+  assert.equal(wpsAttempt?.status, "timed_out");
+  assert.equal(wpsAttempt?.elapsedMs, 1_800_000);
+  assert.equal(wpsAttempt?.submissionEvidence, "unknown");
+  assert.equal(wpsAttempt?.terminalReason, "vendor_timeout");
 });

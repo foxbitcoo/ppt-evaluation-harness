@@ -8,9 +8,26 @@ import {
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   type Artifact,
+  type BakeoffJobOutcome,
+  type ArtifactScorecard,
+  type RenderManifest,
   type ProductAdapterPort,
   type ProductRunCommand,
 } from "../src/index.ts";
+
+type CapturedBakeoffOutcome = BakeoffJobOutcome & {
+  readonly artifact: Artifact;
+  readonly renderManifest: RenderManifest;
+  readonly scorecard: ArtifactScorecard;
+};
+
+function requireCaptured(
+  outcome: BakeoffJobOutcome,
+): asserts outcome is CapturedBakeoffOutcome {
+  assert.notEqual(outcome.artifact, null);
+  assert.notEqual(outcome.renderManifest, null);
+  assert.notEqual(outcome.scorecard, null);
+}
 
 function createFixedMockHarness(feishu: InMemoryFeishuProjection) {
   return createBakeoffHarness({
@@ -105,6 +122,8 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(firstOutcome);
+  requireCaptured(secondOutcome);
 
   assert.equal(firstOutcome.artifact.provenance, "MOCK");
   assert.equal(firstOutcome.artifact.filename, "MOCK-wps-volcano-16.pptx");
@@ -174,6 +193,8 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(firstOutcome);
+  requireCaptured(secondOutcome);
 
   assert.equal(firstOutcome.scorecard.provenance, "MOCK");
   assert.equal(firstOutcome.scorecard.artifactId, firstOutcome.artifact.artifactId);
@@ -234,6 +255,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(outcome);
   const projection = feishu.snapshot();
 
   assert.deepEqual(
@@ -299,6 +321,7 @@ test("the public product adapter port can be replaced without changing the Bakeo
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(outcome);
 
   assert.equal(
     feishu.snapshot().runRecordTable[1]?.product,
@@ -376,6 +399,8 @@ test("Artifact byte changes with a valid new hash drive new static renders and e
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(fixedOutcome);
+  requireCaptured(variantOutcome);
 
   assert.notEqual(variantOutcome.artifact.contentHash, fixedOutcome.artifact.contentHash);
   assert.notEqual(
