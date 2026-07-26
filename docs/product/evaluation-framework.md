@@ -1,7 +1,7 @@
 # AI PPT Evaluation Framework
 
 Status: Proposed — experimental, not yet calibrated  
-Version: 0.5  
+Version: 0.6  
 Updated: 2026-07-27
 
 ## 1. Purpose and claim boundary
@@ -32,12 +32,13 @@ LLM scoring or LLM Pairwise Judgment alone must never be described as “what us
 | Level | Minimum evidence | Allowed claim |
 |---|---|---|
 | Case sample | One Attempt for one Case × Product Package | “This captured output exhibited…” |
-| Exploratory comparison | A small declared set of Cases or fewer than 3 independent Attempts per cell | “In this pilot sample…” |
-| Stable case comparison | At least 3 independent, policy-compliant Runs per Case × Package, including failures | Case-level distribution, success rate, and uncertainty |
+| Exploratory comparison | A small declared set of Cases or Runs without a passed precision/stability rule | “In this pilot sample…” |
+| Replicated pilot | At least 3 independent, policy-compliant Runs per Case × Package, including failures | Replicated Case-level distribution and uncertainty, still exploratory |
+| Stable case comparison | A preregistered sampling/stopping plan whose declared precision or direction-stability criterion has been met | Stable Case-level finding with achieved uncertainty |
 | Suite comparison | A preregistered, scenario-stratified Benchmark Suite with repeat runs and calibrated Judges | Suite-level findings with confidence intervals |
 | User recommendation | Suite evidence plus segmented human preference and utility inputs | Recommendation for the declared user/scenario |
 
-Single-run MVP evidence cannot be promoted into a general vendor ranking.
+Single-run MVP evidence cannot be promoted into a general vendor ranking. Three Runs are a minimum replication check, not proof of stability. A Stable claim requires a preregistered maximum sample size and fixed-sample precision rule or valid sequential stopping rule; if the rule is not met, the result remains exploratory regardless of Run count.
 
 ## 2. Evaluation tracks
 
@@ -439,12 +440,15 @@ No eligible candidate, stale evidence, or insufficient coverage returns `NO_RECO
 |---|---|
 | PRD, ADR, schema, rubric, adapter spec, and task status | Private GitHub repository |
 | Run, Attempt, event, Artifact metadata, and evaluation records | Feishu Base, under append-only system-field rules |
+| Operational-ledger recovery copy | Versioned, access-controlled export outside Feishu; recovery-only, not a second writable authority |
 | Original PPT/cloud snapshot and derivatives | A primary Feishu attachment/drive copy plus a second controlled, recoverable copy, both hash-verified |
 | Local files and browser downloads | Disposable working cache, never authority |
 
 In Feishu, automated identity, hash, timing, and score fields are not manually overwritten. Human review, annotation, and adjudication are appended as immutable `ReviewEvent` / `AdjudicationEvent` records containing actor, timestamp, reason, prior reference, and decision. A convenient current-review status is a derived projection, never the only history. Every record carries stable external IDs, version fields, `created_at`, and `last_synced_at`.
 
 Upload is followed by read-back hash verification, and an existing blob is never replaced in place. Until retention-locked object storage exists, M0 keeps a second controlled recoverable copy outside the individual Base attachment entry. A hash without a recoverable blob is not an immutable Artifact.
+
+The append-only operational ledger is exported on a declared schedule to a versioned, access-controlled recovery store outside Feishu. Each export has a schema version, range/checkpoint, record count, content hash, and encryption/retention metadata. It is never edited as a parallel authority; it exists to restore stable IDs, events, manifests, and adjudication history if Base records are lost or corrupted.
 
 ### Scale target
 
@@ -492,9 +496,9 @@ Exit evidence:
 - every captured Artifact has a hash and provenance manifest;
 - duplicate submission, manual action, and failure classifications are auditable;
 - a partial bake-off report can be produced without treating missing vendors as zero quality.
-- for one declared supported Case, at least 3 supported Product Packages yield captured, openable Artifacts;
+- for one declared supported Case and protocol, at least 3 supported Product Packages yield captured, openable Artifacts: the current WPS Package and at least 2 competitor Packages;
 - at least one Package completes a second independent Run without one-off rescue.
-- a recovery drill deletes/ignores the disposable local cache and makes the primary copy unavailable, then reconstructs the complete Artifact package from stable IDs, manifests, and the second copy with all original and derivative hashes verified.
+- a recovery drill deletes/ignores the disposable local cache and treats both Feishu Base and the primary Artifact copy as unavailable, then restores the operational ledger, stable IDs, events, manifests, and complete Artifact package from the external ledger export and second blob copy; record counts and all original/derivative hashes must verify.
 
 Blocked or paid-only products remain valuable reachability evidence but do not count toward the three captured Artifacts.
 
@@ -511,7 +515,7 @@ Exit evidence:
 - scoring repeatability reaches the declared pilot threshold;
 - every score has page/source evidence and a reproducible input manifest;
 - WPS reviewers confirm that Gap Cards yield testable product hypotheses.
-- at least one Gap Card completes `finding -> diagnosis -> experiment -> result`.
+- at least one Gap Card from a compatible current-WPS-versus-competitor comparison completes `finding -> diagnosis -> experiment -> result`; a WPS-only regression comparison cannot satisfy this exit.
 
 ### M2 — Document Generation
 
@@ -558,7 +562,7 @@ Accepted:
 
 Accepted with modification:
 
-- repeated stable claims require at least 3 independent Runs, while retry Attempts remain nested recovery evidence;
+- 3 independent Runs establish only a replicated pilot; Stable claims additionally require the preregistered precision/stability rule, while retry Attempts remain nested recovery evidence;
 - a scenario weight profile may exist, but no reviewer-proposed 50/50 or previous 70/30 split is authoritative before calibration;
 - Feishu remains the temporary operational source for the current MVP because the working process already uses it; the scale architecture moves computation to a runtime database and immutable object store.
 
@@ -572,3 +576,5 @@ Version 0.3 additionally closes second-round ambiguities in vendor-visible instr
 Version 0.4 closes third-round boundaries in randomized time-block execution, holdout validity calibration, preregistered primary endpoints and multiplicity, tested Artifact recovery, and append-only human adjudication.
 
 Version 0.5 removes duplicated page-count/instruction scoring: the observation remains operational evidence and compliance belongs only to Task Success.
+
+Version 0.6 prevents three-Run pilots from being mislabeled stable, requires the short-term exits to contain WPS-versus-competitor evidence, and adds recoverable off-Feishu backup/restore of the operational ledger.
