@@ -12,6 +12,14 @@ _Avoid_: Industry ranking, neutral benchmark
 The long-term, user-facing evaluation that helps a user choose a PPT product for a particular presentation task.
 _Avoid_: Vendor harness, WPS regression test
 
+**Live Bake-off**:
+The short-term workflow that sends the same evaluation input to multiple selected products at run time, captures each result, and compares WPS AI PPT with those competitors.
+_Avoid_: Cached benchmark, historical ranking
+
+**Benchmark Corpus**:
+The accumulated set of versioned evaluation cases, configurations, traces, artifacts, scores, and human preferences used by the long-term PPT Selection Evaluation.
+_Avoid_: Live Bake-off, static leaderboard
+
 **Evaluation Run**:
 One execution of a fixed presentation request against one product configuration, including its trace, timing, configuration, and resulting artifact.
 _Avoid_: Vendor result, model score
