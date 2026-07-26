@@ -16,6 +16,10 @@ _Avoid_: Vendor harness, WPS regression test
 The short-term workflow that sends the same Evaluation Case to multiple selected products at run time and captures each result for later comparison.
 _Avoid_: Fixed baseline, cached benchmark, historical ranking
 
+**Bakeoff Job**:
+One user-triggered multi-product batch that freezes the selected Runs, shared protocol, deadline, and aggregate completion state.
+_Avoid_: Single vendor Attempt, leaderboard
+
 **Benchmark Corpus**:
 The accumulated set of versioned evaluation cases, configurations, traces, artifacts, scores, and human preferences used by the long-term PPT Selection Evaluation.
 _Avoid_: Live Bake-off, static leaderboard
@@ -33,7 +37,7 @@ A versioned description of the product experience actually tested, including tie
 _Avoid_: Vendor name alone, assumed default
 
 **Evaluation Case**:
-A versioned test input and its evaluation requirements. Each case belongs to exactly one Input Track so that only compatible runs are compared.
+A versioned test input and evaluation definition. It separates the vendor-visible input contract from evaluator-only reference material and belongs to exactly one Input Track.
 _Avoid_: Prompt string, scoring result
 
 **Query Generation Track**:
@@ -72,3 +76,7 @@ _Avoid_: Proven root cause, generic recommendation
 **Selection Utility**:
 A long-term, user/scenario-specific recommendation signal that combines Artifact Quality, Human Preference, and Operational Metrics through an explicit utility profile.
 _Avoid_: LLM aesthetic score, universal leaderboard
+
+**Claim Level**:
+The strength of statement permitted by the evidence, ranging from a single Case sample through a calibrated user recommendation. More Attempts inside one Run do not raise the Claim Level.
+_Avoid_: Confidence adjective, marketing label
