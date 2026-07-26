@@ -1,18 +1,42 @@
 import type { Artifact, EvaluationCaseRecord } from "./domain.ts";
+import type {
+  BlockReason,
+  SubmissionEvidence,
+  TerminalReason,
+} from "./domain.ts";
+import type { EnvironmentOrigin } from "./environment-origin.ts";
 
 export interface ProductPackageSnapshot {
   readonly packageId: string;
   readonly displayName: string;
   readonly adapterVersion: string;
+  readonly provenance: "MOCK" | "PRODUCTION";
+  readonly environmentOrigin: EnvironmentOrigin;
 }
 
 export interface ProductRunCommand {
   readonly jobId: string;
   readonly runId: string;
+  readonly attemptId: string;
+  readonly attemptSeq: number;
+  readonly timeoutMs: number;
   readonly evaluationCase: EvaluationCaseRecord;
+}
+
+export interface ArtifactCandidate {
+  readonly artifact: Artifact;
+  readonly policyCompliant: boolean;
+}
+
+export interface ProductAttemptResult {
+  readonly terminalReason: TerminalReason;
+  readonly blockReason: BlockReason | null;
+  readonly submissionEvidence: SubmissionEvidence;
+  readonly elapsedMs: number;
+  readonly artifactCandidates: readonly ArtifactCandidate[];
 }
 
 export interface ProductAdapterPort {
   readonly productPackage: ProductPackageSnapshot;
-  execute(command: ProductRunCommand): Promise<Artifact>;
+  execute(command: ProductRunCommand): Promise<Artifact | ProductAttemptResult>;
 }

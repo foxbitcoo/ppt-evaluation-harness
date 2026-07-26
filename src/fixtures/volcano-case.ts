@@ -1,10 +1,12 @@
 import type { EvaluationCaseRecord } from "../domain.ts";
+import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "../environment-origin.ts";
 
 export const VOLCANO_CASE_ID = "volcano-query-v1";
 
 export const VOLCANO_EVALUATION_CASE: EvaluationCaseRecord = Object.freeze({
   recordId: "MOCK-case-volcano-query-v1",
   provenance: "MOCK",
+  environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
   caseId: VOLCANO_CASE_ID,
   caseVersion: 1,
   track: "query_generation",

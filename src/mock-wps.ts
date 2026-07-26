@@ -5,12 +5,14 @@ import type {
   RenderManifest,
   StaticSlideRender,
 } from "./domain.ts";
+import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import {
   MOCK_WPS_VOLCANO_SLIDES,
   type MockSlideFixture,
 } from "./fixtures/mock-wps-deck.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import type {
+  ProductAttemptResult,
   ProductAdapterPort,
   ProductPackageSnapshot,
   ProductRunCommand,
@@ -322,13 +324,18 @@ function renderSlide(
   };
 }
 
-function captureMockWpsArtifact(runId: string): Artifact {
+function captureMockArtifact(
+  runId: string,
+  artifactId: string,
+  filename: string,
+): Artifact {
   const content = mockPptx();
   return {
-    artifactId: MOCK_SCENARIO.artifactId,
+    artifactId,
     runId,
     provenance: "MOCK",
-    filename: "MOCK-wps-volcano-16.pptx",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    filename,
     mimeType:
       "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     byteSize: content.byteLength,
@@ -339,7 +346,142 @@ function captureMockWpsArtifact(runId: string): Artifact {
   };
 }
 
-export function renderStaticArtifact(artifact: Artifact): RenderManifest {
+export type MockAdapterScenario =
+  | "success"
+  | "timeout"
+  | "quota_blocked"
+  | "payment_blocked"
+  | "authentication_blocked"
+  | "human_wait"
+  | "retry_then_success"
+  | "first_compliant_artifact"
+  | "repeat_not_submitted_failure"
+  | "submitted_technical_failure"
+  | "unknown_submission_failure";
+
+export interface MockAdapterOptions {
+  readonly scenario?: MockAdapterScenario;
+}
+
+function executeMockScenario(
+  scenario: MockAdapterScenario,
+  artifact: Artifact,
+  attemptSeq: number,
+): ProductAttemptResult {
+  if (scenario === "retry_then_success" && attemptSeq === 1) {
+    return {
+      terminalReason: "technical_failure",
+      blockReason: null,
+      submissionEvidence: "not_submitted",
+      elapsedMs: 1,
+      artifactCandidates: [],
+    };
+  }
+  const technicalFailureEvidence = {
+    repeat_not_submitted_failure: "not_submitted",
+    submitted_technical_failure: "submitted",
+    unknown_submission_failure: "unknown",
+  } as const;
+  const isTechnicalFailureScenario = (
+    value: MockAdapterScenario,
+  ): value is keyof typeof technicalFailureEvidence =>
+    Object.hasOwn(technicalFailureEvidence, value);
+  if (isTechnicalFailureScenario(scenario)) {
+    return {
+      terminalReason: "technical_failure",
+      blockReason: null,
+      submissionEvidence:
+        technicalFailureEvidence[scenario],
+      elapsedMs: 1,
+      artifactCandidates: [],
+    };
+  }
+  if (scenario === "first_compliant_artifact") {
+    return {
+      terminalReason: "success",
+      blockReason: null,
+      submissionEvidence: "submitted",
+      elapsedMs: 1,
+      artifactCandidates: [false, true, true].map(
+        (policyCompliant, index) => ({
+          artifact: {
+            ...artifact,
+            artifactId: `${artifact.artifactId}-candidate-${index + 1}`,
+            filename: artifact.filename.replace(
+              ".pptx",
+              `-candidate-${index + 1}.pptx`,
+            ),
+          },
+          policyCompliant,
+        }),
+      ),
+    };
+  }
+  const fixedOutcomes: Readonly<
+    Record<
+      Exclude<
+        MockAdapterScenario,
+        | "success"
+        | "retry_then_success"
+        | "first_compliant_artifact"
+        | keyof typeof technicalFailureEvidence
+      >,
+      Omit<ProductAttemptResult, "artifactCandidates">
+    >
+  > = {
+    timeout: {
+      terminalReason: "vendor_timeout",
+      blockReason: null,
+      submissionEvidence: "submitted",
+      elapsedMs: 30 * 60 * 1_000,
+    },
+    quota_blocked: {
+      terminalReason: "quota",
+      blockReason: "quota",
+      submissionEvidence: "not_submitted",
+      elapsedMs: 1,
+    },
+    payment_blocked: {
+      terminalReason: "payment",
+      blockReason: "payment",
+      submissionEvidence: "not_submitted",
+      elapsedMs: 1,
+    },
+    authentication_blocked: {
+      terminalReason: "authentication",
+      blockReason: "authentication",
+      submissionEvidence: "not_submitted",
+      elapsedMs: 1,
+    },
+    human_wait: {
+      terminalReason: "human_wait",
+      blockReason: null,
+      submissionEvidence: "submitted",
+      elapsedMs: 1,
+    },
+  };
+  if (
+    scenario !== "success" &&
+    scenario !== "retry_then_success"
+  ) {
+    return {
+      ...fixedOutcomes[scenario],
+      artifactCandidates: [],
+    };
+  }
+  return {
+    terminalReason: "success",
+    blockReason: null,
+    submissionEvidence: "submitted",
+    elapsedMs: 1,
+    artifactCandidates: [{ artifact, policyCompliant: true }],
+  };
+}
+
+export function renderStaticArtifact(
+  artifact: Artifact,
+  renderManifestId: string = MOCK_SCENARIO.renderManifestId,
+): RenderManifest {
   const slideFixtures = slidesFromArtifact(artifact);
   const slides = slideFixtures.map((slide, index) =>
     renderSlide(slide, index + 1),
@@ -353,9 +495,10 @@ export function renderStaticArtifact(artifact: Artifact): RenderManifest {
     })),
   });
   return {
-    renderManifestId: MOCK_SCENARIO.renderManifestId,
+    renderManifestId,
     artifactId: artifact.artifactId,
     provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     renderer: "mock-static-svg@1",
     pageCount: slides.length,
     contentHash: sha256(manifestPayload),
@@ -368,12 +511,82 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
     packageId: "MOCK-wps-package-v1",
     displayName: "Mock WPS AI PPT",
     adapterVersion: "mock-wps@1",
+    provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
   });
 
   async execute(command: ProductRunCommand): Promise<Artifact> {
     if (command.evaluationCase.targetPageCount !== 16) {
       throw new Error("Mock WPS fixture supports only the frozen 16-page Case");
     }
-    return captureMockWpsArtifact(command.runId);
+    return captureMockArtifact(
+      command.runId,
+      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].artifactId,
+      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].filename,
+    );
+  }
+}
+
+export class MockQwenProductAdapter implements ProductAdapterPort {
+  readonly #scenario: MockAdapterScenario;
+
+  readonly productPackage: ProductPackageSnapshot = Object.freeze({
+    packageId: "MOCK-qwen-package-v1",
+    displayName: "Mock Qwen PPT",
+    adapterVersion: "mock-qwen@1",
+    provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+  });
+
+  constructor(options: MockAdapterOptions = {}) {
+    this.#scenario = options.scenario ?? "success";
+  }
+
+  async execute(command: ProductRunCommand): Promise<ProductAttemptResult> {
+    if (command.evaluationCase.targetPageCount !== 16) {
+      throw new Error("Mock Qwen fixture supports only the frozen 16-page Case");
+    }
+    return executeMockScenario(
+      this.#scenario,
+      captureMockArtifact(
+        command.runId,
+        MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].artifactId,
+        MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].filename,
+      ),
+      command.attemptSeq,
+    );
+  }
+}
+
+export class MockDoubaoProductAdapter implements ProductAdapterPort {
+  readonly #scenario: MockAdapterScenario;
+
+  readonly productPackage: ProductPackageSnapshot = Object.freeze({
+    packageId: "MOCK-doubao-package-v1",
+    displayName: "Mock Doubao PPT",
+    adapterVersion: "mock-doubao@1",
+    provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+  });
+
+  constructor(options: MockAdapterOptions = {}) {
+    this.#scenario = options.scenario ?? "success";
+  }
+
+  async execute(command: ProductRunCommand): Promise<ProductAttemptResult> {
+    if (command.evaluationCase.targetPageCount !== 16) {
+      throw new Error(
+        "Mock Doubao fixture supports only the frozen 16-page Case",
+      );
+    }
+    return executeMockScenario(
+      this.#scenario,
+      captureMockArtifact(
+        command.runId,
+        MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].artifactId,
+        MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].filename,
+      ),
+      command.attemptSeq,
+    );
   }
 }

@@ -19,7 +19,7 @@ function createFixedMockHarness(feishu: InMemoryFeishuProjection) {
   });
 }
 
-test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK parent and WPS Run records", async () => {
+test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK parent, WPS Run, and Attempt records", async () => {
   const feishu = new InMemoryFeishuProjection();
   const harness = createFixedMockHarness(feishu);
 
@@ -35,6 +35,10 @@ test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK paren
   assert.deepEqual(projection.caseTable[0], {
     recordId: "MOCK-case-volcano-query-v1",
     provenance: "MOCK",
+    environmentOrigin: {
+      originId: "test:mock-bakeoff-v1",
+      environment: "test",
+    },
     caseId: VOLCANO_CASE_ID,
     caseVersion: 1,
     track: "query_generation",
@@ -70,6 +74,15 @@ test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK paren
         recordType: "vendor_run",
         jobId: "MOCK-job-volcano-v1",
         parentRecordId: "MOCK-job-volcano-v1",
+        product: "Mock WPS AI PPT",
+        status: "completed",
+        provenance: "MOCK",
+      },
+      {
+        recordId: "MOCK-run-wps-volcano-v1-attempt-1",
+        recordType: "evaluation_attempt",
+        jobId: "MOCK-job-volcano-v1",
+        parentRecordId: "MOCK-run-wps-volcano-v1",
         product: "Mock WPS AI PPT",
         status: "completed",
         provenance: "MOCK",
@@ -235,7 +248,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
     ],
   );
   assert.equal(projection.caseTable.length, 1);
-  assert.equal(projection.runRecordTable.length, 2);
+  assert.equal(projection.runRecordTable.length, 3);
   assert.equal(projection.artifactScoreTable.length, 1);
   assert.deepEqual(projection.productGapCardTable, []);
 
@@ -264,6 +277,7 @@ test("the public product adapter port can be replaced without changing the Bakeo
   const fixedMockAdapter = new MockWpsProductAdapter();
   const replacementAdapter: ProductAdapterPort = {
     productPackage: {
+      ...fixedMockAdapter.productPackage,
       packageId: "MOCK-replacement-package-v1",
       displayName: "Replacement Playwright-ready WPS Adapter",
       adapterVersion: "replacement-test@1",

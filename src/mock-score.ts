@@ -5,11 +5,13 @@ import type {
   RenderManifest,
   ScoreValue,
 } from "./domain.ts";
+import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 
 export interface ScoreContext {
   readonly jobId: string;
   readonly runId: string;
+  readonly scorecardId?: string;
 }
 
 function boundedScore(passedChecks: number, totalChecks: number): ScoreValue {
@@ -135,11 +137,12 @@ export function scoreRenderedArtifact(
     throw new Error("Render manifest does not belong to the captured Artifact");
   }
   return {
-    scorecardId: MOCK_SCENARIO.scorecardId,
+    scorecardId: context.scorecardId ?? MOCK_SCENARIO.scorecardId,
     artifactId: artifact.artifactId,
     runId: context.runId,
     jobId: context.jobId,
     provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     rubricVersion: "query-six-dimension-v1",
     evaluationInputManifest: {
       artifactHash: artifact.contentHash,
@@ -147,6 +150,23 @@ export function scoreRenderedArtifact(
       renderer: renderManifest.renderer,
     },
     dimensions: scoreDimensions(renderManifest),
+    deliveryQualityGates: [
+      {
+        gate: "artifact_captured_and_openable",
+        status: "PASS",
+        effect: "exclude_from_quality",
+      },
+      {
+        gate: "sufficient_faithful_visual_input",
+        status: "PASS",
+        effect: "exclude_from_quality",
+      },
+      {
+        gate: "required_delivery_export_format",
+        status: "PASS",
+        effect: "score_normally_with_flag",
+      },
+    ],
     createdAt: MOCK_SCENARIO.fixedTime,
   };
 }
