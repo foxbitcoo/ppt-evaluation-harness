@@ -40,6 +40,18 @@ _Avoid_: Open-ended topic generation, Query Generation Track
 A report-time projection that compares any two or more compatible Evaluation Runs. It has no permanently designated baseline; A and B are selected dynamically.
 _Avoid_: Stored baseline score, vendor ranking
 
+**Artifact Scorecard**:
+A rubric-versioned, independently produced quality assessment persisted against one Artifact. It enables dynamic Comparison Views without re-evaluating every A/B combination.
+_Avoid_: Pairwise result, operational telemetry
+
+**Pairwise Judgment**:
+A blind, relative preference judgment between two compatible Artifacts, used as supplementary evidence for subjective visual dimensions.
+_Avoid_: Primary score, permanent ranking
+
+**Operational Metrics**:
+Observed delivery facts such as generation time, cost, editability, page count, manual actions, and export format. They are displayed beside quality but are not part of the Artifact Scorecard.
+_Avoid_: Quality score, aesthetic judgment
+
 **Artifact**:
 The presentation output delivered by an Evaluation Run, such as a PPTX file, editable cloud deck, HTML presentation, or image-based deck.
 _Avoid_: Screenshot, completion signal
