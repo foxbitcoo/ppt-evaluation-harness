@@ -542,8 +542,25 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
     };
     observableEvents: Array<{ eventType: string }>;
     render: {
+      contactSheetHash: string;
+      fidelityStatus: string;
       outcome: string;
       pageCount: number;
+      staticSlideHashes: string[];
+      visualAssessment: string;
+    };
+    productionHarness: {
+      checkpointCount: number;
+      derivativeCount: number;
+      environment: string;
+      provenance: string;
+      protocolId: string;
+      specCommitSha: string;
+      status: string;
+    };
+    productPackage: {
+      accountIdentityObservation: string;
+      commercialPlanObservation: string;
     };
   };
 
@@ -552,6 +569,37 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
   assert.equal(fixture.artifact.pageCount, 16);
   assert.equal(fixture.render.pageCount, 16);
   assert.equal(fixture.render.outcome, "degraded");
+  assert.equal(fixture.render.fidelityStatus, "degraded");
+  assert.equal(fixture.render.visualAssessment, "NOT_ASSESSABLE");
+  assert.equal(fixture.render.staticSlideHashes.length, 16);
+  assert.match(fixture.render.contactSheetHash, /^sha256:[a-f0-9]{64}$/);
+  assert.deepEqual(
+    {
+      environment: fixture.productionHarness.environment,
+      status: fixture.productionHarness.status,
+      provenance: fixture.productionHarness.provenance,
+      protocolId: fixture.productionHarness.protocolId,
+      checkpointCount: fixture.productionHarness.checkpointCount,
+      derivativeCount: fixture.productionHarness.derivativeCount,
+    },
+    {
+      environment: "production",
+      status: "completed",
+      provenance: "PRODUCTION",
+      protocolId: "production-query-default-cost-v1",
+      checkpointCount: 6,
+      derivativeCount: 33,
+    },
+  );
+  assert.equal(fixture.productionHarness.specCommitSha.length, 40);
+  assert.equal(
+    fixture.productPackage.accountIdentityObservation,
+    "unknown",
+  );
+  assert.equal(
+    fixture.productPackage.commercialPlanObservation,
+    "unknown",
+  );
   assert.equal(
     fixture.artifact.contentHash,
     "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
@@ -574,7 +622,7 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
   );
   assert.doesNotMatch(
     fixtureText,
-    /cookie|authorization|bearer|token|password|localstorage|sessionstorage|\/Users\/|\/tmp\/|account(?:Id|Name|Email)/i,
+    /cookie|authorization|bearer|token|password|localstorage|sessionstorage|\/Users\/|\/tmp\/|"account(?:Id|Name|Email)"\s*:/i,
   );
 });
 

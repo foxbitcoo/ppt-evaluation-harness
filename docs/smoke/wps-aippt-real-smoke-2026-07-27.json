@@ -7,6 +7,8 @@
   "productPackage": {
     "productUrl": "https://aippt.wps.cn/aippt/",
     "accountScope": "current_authenticated_account",
+    "accountIdentityObservation": "unknown",
+    "commercialPlanObservation": "unknown",
     "packageSelection": "best_available_zero_incremental_cost",
     "incrementalCost": 0,
     "mode": "professional",
@@ -86,13 +88,51 @@
     "zipValidation": "passed",
     "contentHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86"
   },
+  "productionHarness": {
+    "jobId": "production-job-volcano-wps-v1",
+    "environment": "production",
+    "status": "completed",
+    "provenance": "PRODUCTION",
+    "protocolId": "production-query-default-cost-v1",
+    "specCommitSha": "b38313c8f9c95498c7b975707bb88dbda08511bc",
+    "runSpecificationHash": "sha256:e500ae739293eb8110933b7e1c79cb52471080aa500e640c478886f21d1128d8",
+    "adapterSpecificationHash": "sha256:b7526f6d0f63ddc696526d545e00223820a7acd1e64cce6b65e05d9efda53b99",
+    "runnerCodeHash": "sha256:4f3dfff201e7b2f9bbfb53d5ec31271ca3cce436fcf670eb7d8a87c42e93dee8",
+    "checkpointCount": 6,
+    "artifactPackageManifestHash": "sha256:df1df97acd822cee59497e015683d51f92eff2deebb4513c6dac8061a7fc6d1c",
+    "artifactIdentityHash": "sha256:ba6fe24e7b26d078b0b568d92f3672f53481f66b9c64adf091d70a2e1b1f0cee",
+    "derivativeCount": 33
+  },
   "render": {
     "pipeline": "libreoffice-impress+pdftoppm",
     "pageCount": 16,
     "outcome": "degraded",
+    "fidelityStatus": "degraded",
+    "visualAssessment": "NOT_ASSESSABLE",
+    "faithfulVisualGate": "CONDITIONAL",
+    "renderManifestHash": "sha256:b723f09da5f0c4891b2ad5b472be0536494581e77f16bfbf3ad25e3cd370ebae",
     "pdfHash": "sha256:b0830a9511dad88d9f10dda45d17f4b8a6e18f5bd9c9f8b0a358d35c16d2208a",
     "firstPageHash": "sha256:63a682a8955c6b1ebdc14c12f5a685d63e998b0be453721ee8dc6a73474b27e2",
     "lastPageHash": "sha256:2be2d6cc60a1b54fa05a00e5c2e5389effee6584aefc192c28c404b176d68392",
+    "contactSheetHash": "sha256:58f9ad604fdeb9d2f1a5e7e50c8bb5a6e14cebcbda67c90aafed494a8bb363fc",
+    "staticSlideHashes": [
+      "sha256:63a682a8955c6b1ebdc14c12f5a685d63e998b0be453721ee8dc6a73474b27e2",
+      "sha256:9ccb185960046661186447d70a3b0c4214f6387d3dd597e2e2f4eca85414fc91",
+      "sha256:58827602760b34a4c439ea5985e852b20a1fdcda3929326689d7459355800349",
+      "sha256:a5405533eeb0ddb00bed981e6e9460272cabbb98c2235bec98bd78085b01621a",
+      "sha256:92f8c6435a5b19e646a50ca4d8dd5af27ac253d31428add6abcdf0680bba9438",
+      "sha256:9de5c13063058191348bb7944d3a5d657c5b7cb2481771fecb2104b3e488b853",
+      "sha256:6f5baf0a0ad3836e687110062b0b5aa62cbe2fdf65cb416ca1907a52cfc4b3dd",
+      "sha256:b8e21655e2fa25e5c95b100d9da4c285c1aefbb01ecff76d811d255bc1a52649",
+      "sha256:3d59e9f144f9c08133eefa5ae0e88f0901b718acad99dabdf2330eb24908ab54",
+      "sha256:da058f792eff7accf76bb6360e167a900c060ee9b36ac4a9793235863eb9c3df",
+      "sha256:5d496e980214f61c6ad25cc33fe8c1df9cb79cdcaf428b0a8ed5f43a4bff8c19",
+      "sha256:8c2b0d6979528905f3894a62a1e22fa7afada5805faf23e520d8749b0043d1c4",
+      "sha256:3a80a88a58bdf41237abaca34f3987f96e3e6cfa3a7ea3c0652820a46534fa3b",
+      "sha256:8281af2b61788b6ee0f0991dfe916b1f651bc5b116cc09eb7e8e0e1127f5755d",
+      "sha256:6954433ec37f514a38ee3f60f7415039af8e7f5c7ece6f58632966c9460f5326",
+      "sha256:2be2d6cc60a1b54fa05a00e5c2e5389effee6584aefc192c28c404b176d68392"
+    ],
     "fidelityNote": "The native WPS editor view was readable, but the local static renderer substituted or omitted Chinese glyphs."
   },
   "security": {
@@ -102,6 +142,14 @@
     "paymentActions": 0,
     "captchaActions": 0,
     "newPaidPlanActions": 0
+  },
+  "packageValidation": {
+    "boundedZipLimits": "passed",
+    "localHeaderAndCrcValidation": "passed",
+    "opcContentTypesValidation": "passed",
+    "opcRelationshipValidation": "passed",
+    "macroAndEmbeddedActiveContentRejection": "passed",
+    "externalRelationshipRejection": "passed"
   },
   "uncertainty": [
     "The visible account identity and exact commercial plan name were intentionally not captured.",
