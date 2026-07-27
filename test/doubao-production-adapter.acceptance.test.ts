@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   DoubaoProductionProductAdapter,
-  DoubaoProductionReplayAdapter,
+  DOUBAO_VOLCANO_REAL_CAPTURE_ID,
   InMemoryAttemptCheckpointStore,
   InMemoryFeishuProjection,
   MockWpsProductAdapter,
@@ -646,7 +646,68 @@ test("the harness retries once only after proven non-submission and never retrie
   );
 });
 
-test("public real-provider replay binds production lineage and durable checkpoints without browser rendering", async () => {
+test("the public replay factory rejects an unregistered self-minted real-provider capture", async () => {
+  const driver = completeDoubaoDriver();
+  const packageObservation = await driver.inspectCurrentPackage({
+    jobId: "unregistered",
+    runId: "unregistered",
+    attemptId: "unregistered",
+    attemptSeq: 1,
+    signal: new AbortController().signal,
+  });
+  const submission = await driver.submitFrozenQuery({
+    jobId: "unregistered",
+    runId: "unregistered",
+    attemptId: "unregistered",
+    attemptSeq: 1,
+    signal: new AbortController().signal,
+    vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+    requestedPageCount: 16,
+    networking: "enabled",
+  });
+  assert.equal(submission.status, "submitted");
+  const generation = await driver.waitForGeneration({
+    jobId: "unregistered",
+    runId: "unregistered",
+    attemptId: "unregistered",
+    attemptSeq: 1,
+    signal: new AbortController().signal,
+    vendorTaskId: submission.vendorTaskId,
+    timeoutMs: 30 * 60 * 1_000,
+  });
+  assert.equal(generation.status, "generated");
+  const artifact = await driver.exportPresentation({
+    jobId: "unregistered",
+    runId: "unregistered",
+    attemptId: "unregistered",
+    attemptSeq: 1,
+    signal: new AbortController().signal,
+    vendorTaskId: submission.vendorTaskId,
+  });
+  assert.equal(artifact.status, "exported");
+
+  assert.throws(
+    () =>
+      createDoubaoRealProviderReplayPackage({
+        captureId: "self-minted-unregistered-capture",
+        renderedPages: Array.from({ length: 16 }, (_, index) => ({
+          pageNumber: index + 1,
+          filename: `slide-${index + 1}.png`,
+          mimeType: "image/png" as const,
+          content: new TextEncoder().encode(`forged-slide-${index + 1}`),
+        })),
+        captures: [{
+          packageObservation,
+          submission,
+          generation,
+          artifact,
+        }],
+      }),
+    /registered immutable capture receipt/i,
+  );
+});
+
+test("a known capture ID cannot bless forged artifact, trace, or render bytes", async () => {
   const pptx = await knownGoodPptxBytes();
   const complete = completeDoubaoDriver();
   const packageObservation =
@@ -678,66 +739,37 @@ test("public real-provider replay binds production lineage and durable checkpoin
     timeoutMs: 30 * 60 * 1_000,
   });
   assert.equal(generation.status, "generated");
-  const replay = createDoubaoRealProviderReplayPackage({
-    captures: [{
-      packageObservation,
-      submission: {
-        ...submission,
-        vendorTaskId: "task_doubao_retained_20260727",
-      },
-      generation,
-      artifact: {
-        status: "exported",
-        observedAt: "2026-07-27T06:04:20.000Z",
-        filename: "doubao-volcano-16.pptx",
-        mimeType:
-          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        pageCount: 16,
-        content: pptx,
-        evidenceRef: "download://doubao/retained-real-pptx",
-        manualActions: [],
-      },
-    }],
-  });
-  const checkpoints = new InMemoryAttemptCheckpointStore();
-  const adapter = new DoubaoProductionReplayAdapter();
-  const execute = resolveHarnessProductAdapterExecutor(
-    adapter.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      adapter.executionConfigurationPackage,
-    ),
-    {
-      doubaoBrowserDriver: replay,
-      attemptCheckpointStore: checkpoints,
-    },
-  );
-  const result = await execute({
-    jobId: "job-doubao-replay",
-    runId: "run-doubao-replay",
-    attemptId: "attempt-doubao-replay-1",
-    attemptSeq: 1,
-    timeoutMs: 30 * 60 * 1_000,
-    signal: new AbortController().signal,
-    evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
-  });
-  assert.ok(!("content" in result));
-  const attempt = result as ProductAttemptResult;
-
-  assert.equal(attempt.terminalReason, "success");
-  assert.equal(
-    attempt.artifactCandidates[0]?.artifact.provenance,
-    "PRODUCTION_REPLAY",
-  );
-  assert.equal(
-    attempt.artifactCandidates[0]?.productionExecutionEvidence
-      ?.captureSource,
-    "REAL_PROVIDER_CAPTURE",
-  );
-  assert.ok(checkpoints.snapshot().length >= 4);
-  assert.ok(
-    checkpoints.snapshot().every(
-      ({ sourceUrl }) => sourceUrl === "https://www.doubao.com/",
-    ),
+  assert.throws(
+    () =>
+      createDoubaoRealProviderReplayPackage({
+        captureId: DOUBAO_VOLCANO_REAL_CAPTURE_ID,
+        renderedPages: Array.from({ length: 16 }, (_, index) => ({
+          pageNumber: index + 1,
+          filename: `slide-${index + 1}.png`,
+          mimeType: "image/png" as const,
+          content: new TextEncoder().encode(`forged-slide-${index + 1}`),
+        })),
+        captures: [{
+          packageObservation,
+          submission: {
+            ...submission,
+            vendorTaskId: "task_doubao_retained_20260727",
+          },
+          generation,
+          artifact: {
+            status: "exported",
+            observedAt: "2026-07-27T06:04:20.000Z",
+            filename: "doubao-volcano-16.pptx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            pageCount: 16,
+            content: pptx,
+            evidenceRef: "download://doubao/retained-real-pptx",
+            manualActions: [],
+          },
+        }],
+      }),
+    /registered immutable capture receipt/i,
   );
 });
 
@@ -1040,6 +1072,32 @@ test("the production boundary fails closed when observable configuration contain
     ),
     /sensitive URL parameters/i,
   );
+});
+
+test("the production boundary rejects credential key-value material hidden in a URL fragment", async () => {
+  const complete = completeDoubaoDriver();
+  for (const fragment of [
+    "access_token=secret-value",
+    "session_token=secret-session",
+    "authorization=Bearer%20secret-bearer",
+  ]) {
+    await assert.rejects(
+      executeWithDriver(
+        {
+          ...complete,
+          async inspectCurrentPackage(command) {
+            return {
+              ...(await complete.inspectCurrentPackage(command)),
+              sourceUrl:
+                `https://www.doubao.com/chat/ppt-observed#${fragment}`,
+            };
+          },
+        },
+        `attempt-doubao-unsafe-fragment-${fragment.length}`,
+      ),
+      /sensitive URL fragment|not secret-safe/i,
+    );
+  }
 });
 
 test("the production boundary rejects hidden-reasoning text in observable manual-action evidence", async () => {

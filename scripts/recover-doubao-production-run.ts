@@ -77,9 +77,26 @@ const manifestIdentity = JSON.parse(
   new TextDecoder("utf-8", { fatal: true }).decode(manifest),
 ) as {
   readonly artifact?: {
+    readonly artifactId?: string;
     readonly contentHash?: string;
     readonly provenance?: string;
   };
+  readonly renderManifestHash?: string;
+  readonly derivatives?: readonly {
+    readonly derivativeId?: string;
+    readonly derivativeType?:
+      | "static_slide"
+      | "extracted_text"
+      | "contact_sheet";
+    readonly pageNumber?: number | null;
+    readonly contentHash?: string;
+  }[];
+  readonly payloadLocations?: readonly {
+    readonly storeId?: string;
+    readonly key?: string;
+    readonly contentHash?: string;
+    readonly copyRole?: string;
+  }[];
   readonly productionExecutionEvidence?: {
     readonly executionMode?: string;
     readonly captureSource?: string;
@@ -97,6 +114,103 @@ const runSpecificationBundle = JSON.parse(
   };
 };
 const originalHash = hash(original);
+const artifactId = manifestIdentity.artifact?.artifactId;
+const derivatives = manifestIdentity.derivatives;
+const payloadLocations = manifestIdentity.payloadLocations;
+if (
+  artifactId === undefined ||
+  manifestIdentity.renderManifestHash === undefined ||
+  derivatives === undefined ||
+  derivatives.length !== 33 ||
+  payloadLocations === undefined
+) {
+  throw new Error(
+    "Durable Doubao recovery render manifest or 33-derivative lineage is incomplete",
+  );
+}
+const secondaryLocation = (
+  key: string,
+  contentHash: string,
+) => {
+  const matches = payloadLocations.filter(
+    (location) =>
+      location.copyRole === "secondary" &&
+      location.storeId === artifactStoreId &&
+      location.key === key &&
+      location.contentHash === contentHash,
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Durable Doubao recovery derivative location is missing or ambiguous: ${key}`,
+    );
+  }
+  return matches[0]!;
+};
+const renderManifestLocation = secondaryLocation(
+  `artifacts/${artifactId}/render-manifest`,
+  manifestIdentity.renderManifestHash,
+);
+const derivativeLocations = derivatives.map((lineage) => {
+  let suffix: string;
+  if (
+    lineage.derivativeType === "static_slide" &&
+    lineage.pageNumber !== null &&
+    lineage.pageNumber !== undefined
+  ) {
+    suffix = `static-slide-${lineage.pageNumber}`;
+  } else if (
+    lineage.derivativeType === "extracted_text" &&
+    lineage.pageNumber !== null &&
+    lineage.pageNumber !== undefined
+  ) {
+    suffix = `extracted-text-${lineage.pageNumber}`;
+  } else if (lineage.derivativeType === "contact_sheet") {
+    suffix = "contact-sheet";
+  } else {
+    throw new Error(
+      `Durable Doubao recovery derivative lineage is invalid: ${lineage.derivativeId ?? "unknown"}`,
+    );
+  }
+  if (
+    lineage.derivativeId === undefined ||
+    lineage.contentHash === undefined
+  ) {
+    throw new Error("Durable Doubao recovery derivative lineage is incomplete");
+  }
+  return {
+    lineage,
+    location: secondaryLocation(
+      `artifacts/${artifactId}/derivatives/${suffix}`,
+      lineage.contentHash,
+    ),
+  };
+});
+const [renderManifest, recoveredDerivatives] = await Promise.all([
+  artifactStore.read(renderManifestLocation.key!),
+  Promise.all(
+    derivativeLocations.map(async ({ lineage, location }) => ({
+      derivativeId: lineage.derivativeId!,
+      expectedHash: lineage.contentHash!,
+      content: await artifactStore.read(location.key!),
+    })),
+  ),
+]);
+if (
+  renderManifest === null ||
+  hash(renderManifest) !== manifestIdentity.renderManifestHash
+) {
+  throw new Error("Durable Doubao recovery render manifest hash mismatch");
+}
+for (const derivative of recoveredDerivatives) {
+  if (
+    derivative.content === null ||
+    hash(derivative.content) !== derivative.expectedHash
+  ) {
+    throw new Error(
+      `Durable Doubao recovery derivative is missing or hash-mismatched: ${derivative.derivativeId}`,
+    );
+  }
+}
 if (
   manifestIdentity.artifact?.contentHash !== originalHash ||
   manifestIdentity.productionExecutionEvidence?.executionMode !==
@@ -127,6 +241,23 @@ process.stdout.write(
     },
     manifestHash: hash(manifest),
     originalHash,
+    renderManifestHash: hash(renderManifest),
+    derivativeCount: derivatives.length,
+    recoveredDerivativeCount: recoveredDerivatives.length,
+    derivativeSetHash: hash(
+      new TextEncoder().encode(
+        JSON.stringify(
+          recoveredDerivatives
+            .map(({ derivativeId, expectedHash }) => ({
+              derivativeId,
+              contentHash: expectedHash,
+            }))
+            .sort((left, right) =>
+              left.derivativeId.localeCompare(right.derivativeId),
+            ),
+        ),
+      ),
+    ),
     runSpecificationHash: hash(runSpecification),
     checkpointCount: checkpoints.length,
     browserDriverId:

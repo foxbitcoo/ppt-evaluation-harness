@@ -19,6 +19,7 @@ import type {
   ProductPackageSnapshot,
 } from "./product-adapter.ts";
 import type { WpsAiPptBrowserDriverEvidence } from "./wps-aippt-driver.ts";
+import { canonicalJsonBytes } from "./run-specification.ts";
 import {
   validatedOpenXmlPresentationSlideNames,
 } from "./wps-aippt.ts";
@@ -31,6 +32,8 @@ export const DOUBAO_PRODUCTION_SCENARIO =
   "volcano-16-current-account-zero-cost-network-on";
 export const DOUBAO_PRODUCTION_REPLAY_SCENARIO =
   "volcano-16-real-provider-replay";
+export const DOUBAO_VOLCANO_REAL_CAPTURE_ID =
+  "doubao-volcano-20260727-1845";
 const PPTX_MIME_TYPE =
   "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const MAX_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -338,6 +341,7 @@ export interface DoubaoBrowserDriverPort {
   readonly browserProfileDigest?: typeof DOUBAO_BROWSER_PROFILE_DIGEST;
   readonly implementationPackage?: ProductAdapterImplementationPackage;
   readonly configurationPackage?: ProductAdapterImplementationPackage;
+  readonly captureReceipt?: DoubaoRealProviderCaptureReceipt;
   inspectCurrentPackage(
     command: DoubaoBrowserOperationCommand,
   ): Promise<DoubaoPackageObservation>;
@@ -388,6 +392,30 @@ export interface DoubaoRealProviderCapture {
   >;
 }
 
+export interface DoubaoRealProviderCaptureReceipt {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly traceDigest: `sha256:${string}`;
+  readonly renderDigest: `sha256:${string}`;
+}
+
+const HARNESS_OWNED_DOUBAO_CAPTURE_RECEIPTS =
+  new Map<string, DoubaoRealProviderCaptureReceipt>([
+    [
+      DOUBAO_VOLCANO_REAL_CAPTURE_ID,
+      Object.freeze({
+        captureId: DOUBAO_VOLCANO_REAL_CAPTURE_ID,
+        artifactContentHash:
+          "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+        traceDigest:
+          "sha256:088d839e1a4abecd326622fbe334e640ef93996c27e59ccfecec3588216c0226",
+        renderDigest:
+          "sha256:8f9453b0cf3b88525d2ad69d7f0d854efd24cc7e86108fcafb82727912b46c3f",
+      }),
+    ],
+  ]);
+const registeredReplayDrivers = new WeakSet<object>();
+
 function cloneValue<T>(value: T): T {
   if (value instanceof Uint8Array) return Uint8Array.from(value) as T;
   if (Array.isArray(value)) {
@@ -404,16 +432,81 @@ function cloneValue<T>(value: T): T {
   return value;
 }
 
+function captureTraceDigest(
+  capture: DoubaoRealProviderCapture,
+): `sha256:${string}` {
+  const { content, ...artifactMetadata } = capture.artifact;
+  return sha256(
+    canonicalJsonBytes({
+      packageObservation: capture.packageObservation,
+      submission: capture.submission,
+      generation: capture.generation,
+      artifact: {
+        ...artifactMetadata,
+        contentHash: sha256(content),
+      },
+    }),
+  );
+}
+
+function capturedRenderDigest(
+  pages: readonly DoubaoRenderedPage[],
+): `sha256:${string}` {
+  if (
+    pages.length !== 16 ||
+    new Set(pages.map(({ pageNumber }) => pageNumber)).size !== 16 ||
+    pages.some(
+      ({ pageNumber, filename, mimeType, content }) =>
+        pageNumber < 1 ||
+        pageNumber > 16 ||
+        filename !== `slide-${pageNumber}.png` ||
+        mimeType !== "image/png" ||
+        content.byteLength === 0,
+    )
+  ) {
+    throw new Error(
+      "Doubao registered immutable capture receipt requires 16 retained PNG renders",
+    );
+  }
+  return sha256(
+    canonicalJsonBytes(
+      [...pages]
+        .sort((left, right) => left.pageNumber - right.pageNumber)
+        .map(({ pageNumber, filename, mimeType, content }) => ({
+          pageNumber,
+          filename,
+          mimeType,
+          contentHash: sha256(content),
+        })),
+    ),
+  );
+}
+
 export function createDoubaoRealProviderReplayPackage(input: {
+  readonly captureId: string;
+  readonly renderedPages: readonly DoubaoRenderedPage[];
   readonly captures: readonly DoubaoRealProviderCapture[];
   readonly reconciliations?: readonly DoubaoTaskReconciliationEvidence[];
 }): DoubaoBrowserDriverPort {
   if (
-    input.captures.length === 0 &&
-    (input.reconciliations?.length ?? 0) === 0
+    input.captures.length !== 1
   ) {
     throw new Error(
-      "Doubao replay ingest requires retained real-provider evidence",
+      "Doubao registered immutable capture receipt requires one retained real-provider capture",
+    );
+  }
+  const receipt =
+    HARNESS_OWNED_DOUBAO_CAPTURE_RECEIPTS.get(input.captureId);
+  const capture = input.captures[0]!;
+  if (
+    receipt === undefined ||
+    sha256(capture.artifact.content) !==
+      receipt.artifactContentHash ||
+    captureTraceDigest(capture) !== receipt.traceDigest ||
+    capturedRenderDigest(input.renderedPages) !== receipt.renderDigest
+  ) {
+    throw new Error(
+      "Doubao replay requires a registered immutable capture receipt",
     );
   }
   const captures = input.captures.map((capture) =>
@@ -431,7 +524,7 @@ export function createDoubaoRealProviderReplayPackage(input: {
     }
     return capture;
   };
-  return Object.freeze({
+  const driver = Object.freeze({
     driverId: "doubao-real-provider-replay",
     provenance: "PRODUCTION_REPLAY",
     captureSource: "REAL_PROVIDER_CAPTURE",
@@ -439,6 +532,7 @@ export function createDoubaoRealProviderReplayPackage(input: {
     browserProfileDigest: DOUBAO_BROWSER_PROFILE_DIGEST,
     implementationPackage: configuredDriverImplementationPackage(),
     configurationPackage: configuredDriverConfigurationPackage(),
+    captureReceipt: Object.freeze(cloneValue(receipt)),
     async inspectCurrentPackage(command: DoubaoBrowserOperationCommand) {
       return cloneValue(captureFor(command.attemptSeq).packageObservation);
     },
@@ -469,6 +563,8 @@ export function createDoubaoRealProviderReplayPackage(input: {
       return cloneValue(evidence);
     },
   });
+  registeredReplayDrivers.add(driver);
+  return driver;
 }
 
 function assertDriverPackage(
@@ -508,6 +604,11 @@ export function registeredDoubaoBrowserDriverEvidence(
     driver.provenance === "PRODUCTION_REPLAY" ||
     driver.captureSource === "REAL_PROVIDER_CAPTURE"
   ) {
+    if (!registeredReplayDrivers.has(driver)) {
+      throw new Error(
+        "Doubao replay requires a registered immutable capture receipt",
+      );
+    }
     assertDriverPackage(
       driver.implementationPackage,
       configuredDriverImplementationPackage(),
@@ -537,6 +638,7 @@ export function registeredDoubaoBrowserDriverEvidence(
       browserProfileDigest: driver.browserProfileDigest,
       implementationDigest: driver.implementationPackage!.contentHash,
       configurationDigest: driver.configurationPackage!.contentHash,
+      captureReceipt: Object.freeze(cloneValue(driver.captureReceipt!)),
     });
   }
   return Object.freeze({
@@ -609,6 +711,20 @@ function sanitizedDoubaoUrl(value: string, field: string): string {
     if (/token|auth|session|cookie|password|key/i.test(key)) {
       throw new Error(`Doubao ${field} contains sensitive URL parameters`);
     }
+  }
+  let fragment: string;
+  try {
+    fragment = decodeURIComponent(url.hash.slice(1).replace(/\+/g, "%20"));
+  } catch {
+    fragment = url.hash.slice(1);
+  }
+  if (
+    /(?:^|[&;])(?:[^&;=]*(?:token|auth|session|cookie|password|key)[^&;=]*)\s*=/i.test(
+      fragment,
+    ) ||
+    /bearer(?:\s+|%20)[a-z0-9._~-]+/i.test(fragment)
+  ) {
+    throw new Error(`Doubao ${field} contains sensitive URL fragment`);
   }
   return `${url.origin}/`;
 }

@@ -210,6 +210,12 @@ export interface WpsAiPptBrowserDriverEvidence {
   readonly browserProfileDigest: `sha256:${string}`;
   readonly implementationDigest: `sha256:${string}`;
   readonly configurationDigest: `sha256:${string}`;
+  readonly captureReceipt?: {
+    readonly captureId: string;
+    readonly artifactContentHash: `sha256:${string}`;
+    readonly traceDigest: `sha256:${string}`;
+    readonly renderDigest: `sha256:${string}`;
+  };
 }
 
 const HARNESS_OWNED_PRODUCTION_DRIVER_EVIDENCE:

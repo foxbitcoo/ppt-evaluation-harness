@@ -8,6 +8,7 @@ import sharp from "sharp";
 
 import {
   BUILD_IDENTITY,
+  DOUBAO_VOLCANO_REAL_CAPTURE_ID,
   DoubaoProductionReplayAdapter,
   InMemoryEgressAuthorizationAudit,
   InMemoryFeishuProjection,
@@ -57,6 +58,19 @@ const registry = await registerDurableRoots({
 });
 const pptx = Uint8Array.from(await readFile(pptxPath));
 const artifactContentHash = sha256(pptx);
+const retainedRenderedPages = await Promise.all(
+  Array.from({ length: 16 }, async (_, index) => {
+    const pageNumber = index + 1;
+    return Object.freeze({
+      pageNumber,
+      filename: `slide-${pageNumber}.png`,
+      mimeType: "image/png" as const,
+      content: Uint8Array.from(
+        await readFile(join(slidesDirectory, `slide-${pageNumber}.png`)),
+      ),
+    });
+  }),
+);
 const tombstones = new InMemoryTombstoneLedger(
   "doubao-real-provider-replay-tombstones-v1",
 );
@@ -183,7 +197,11 @@ const outcome = await createBakeoffHarness({
   feishu,
   productAdapter: new DoubaoProductionReplayAdapter(),
   doubaoBrowserDriver:
-    createDoubaoRealProviderReplayPackage({ captures: [capture] }),
+    createDoubaoRealProviderReplayPackage({
+      captureId: DOUBAO_VOLCANO_REAL_CAPTURE_ID,
+      renderedPages: retainedRenderedPages,
+      captures: [capture],
+    }),
   egressAuthorization: authorization,
   egressAudit,
   payloadInventory,

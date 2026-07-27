@@ -401,6 +401,20 @@ function mutateStoredZipEntryText(
   return copy;
 }
 
+function renameStoredZipEntry(
+  content: Uint8Array,
+  from: string,
+  to: string,
+): Uint8Array {
+  assert.equal(Buffer.byteLength(from), Buffer.byteLength(to));
+  const copy = Uint8Array.from(content);
+  const offsets = storedZipEntryOffsets(copy, from);
+  const encoded = new TextEncoder().encode(to);
+  copy.set(encoded, offsets.centralOffset + 46);
+  copy.set(encoded, offsets.localOffset + 30);
+  return copy;
+}
+
 function storedZipEntryText(
   content: Uint8Array,
   entryName: string,
@@ -742,7 +756,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:afae65254c1dad9d5fecf479fa645dc11af1c5bc29c8abd99fcc1f5bd87602b4",
+        "sha256:12f1d6103b02f20a873922de6a7e77fab87dcebb6087195505b93ce54ea96632",
       sourceArchiveEntryCount: 37,
     },
   );
@@ -1168,6 +1182,119 @@ test("the WPS adapter decodes XML entities before rejecting external relationshi
       evaluationCase: VOLCANO_EVALUATION_CASE,
     }),
     /external relationship.*forbidden/i,
+  );
+});
+
+test("the OPC validator rejects ActiveX and OLE relationship types even when their targets are internal", async () => {
+  const originalType =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+  const activeType = "urn:activeX/oleObject".padEnd(
+    originalType.length,
+    "x",
+  );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "_rels/.rels",
+    originalType,
+    activeType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-relationship",
+      runId: "run-wps-activex-relationship",
+      attemptId: "attempt-wps-activex-relationship-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*relationship/i,
+  );
+});
+
+test("the OPC validator rejects ActiveX content types on otherwise nonessential package parts", async () => {
+  const originalType =
+    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+  const activeType = "application/vnd.ms-office.activeX+xml".padEnd(
+    originalType.length,
+    "x",
+  );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "[Content_Types].xml",
+    originalType,
+    activeType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-content-type",
+      runId: "run-wps-activex-content-type",
+      attemptId: "attempt-wps-activex-content-type-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*content type/i,
+  );
+});
+
+test("the OPC validator rejects a ppt/activeX package part before resolving slide relationships", async () => {
+  const corrupted = renameStoredZipEntry(
+    await knownGoodPptxBytes(),
+    "ppt/slides/slide1.xml",
+    "ppt/activeX/payload01",
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-part",
+      runId: "run-wps-activex-part",
+      attemptId: "attempt-wps-activex-part-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*package part/i,
   );
 });
 

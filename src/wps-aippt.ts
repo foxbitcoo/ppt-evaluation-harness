@@ -777,12 +777,25 @@ export function validatedOpenXmlPresentationSlideNames(
     entries.some(({ name }) =>
       /(?:^|\/)(?:vbaproject\.bin|vbaData\.xml)$/i.test(name),
     ) ||
-    entries.some(({ name }) => /^ppt\/embeddings\//i.test(name))
+    entries.some(({ name }) =>
+      /^ppt\/(?:activeX|embeddings|oleObjects|controls)\//i.test(name),
+    )
   ) {
-    throw new Error("WPS Artifact OPC package contains active content");
+    throw new Error(
+      "WPS Artifact OPC active content package part is forbidden",
+    );
   }
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const contentTypes = decoder.decode(byName.get("[Content_Types].xml"));
+  if (
+    /(?:activeX|oleObject|ms-office\.(?:activeX|oleObject)|vnd\.ms-office\.(?:activeX|oleObject))/i.test(
+      contentTypes,
+    )
+  ) {
+    throw new Error(
+      "WPS Artifact OPC active content content type is forbidden",
+    );
+  }
   if (
     !contentTypes.includes(
       "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
@@ -793,6 +806,21 @@ export function validatedOpenXmlPresentationSlideNames(
   }
   for (const entry of entries.filter(({ name }) => /\.rels$/i.test(name))) {
     const relationships = parseRelationships(decoder.decode(entry.content));
+    if (
+      relationships.some(
+        ({ type, target }) =>
+          /(?:activeX|oleObject|relationships\/(?:package|control))(?:$|\/)/i.test(
+            type,
+          ) ||
+          /(?:^|\/)(?:activeX|embeddings|oleObjects?)(?:\/|$)/i.test(
+            target,
+          ),
+      )
+    ) {
+      throw new Error(
+        "WPS Artifact OPC active content relationship is forbidden",
+      );
+    }
     if (
       relationships.some(
         ({ target, targetMode }) =>
