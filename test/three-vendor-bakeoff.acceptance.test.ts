@@ -13,6 +13,7 @@ import {
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   createComparisonReportService,
+  sha256Bytes,
   type ArtifactScoreTableRecord,
   type AttemptDeadlinePort,
   type ComparisonRecord,
@@ -48,6 +49,17 @@ function deterministicDeadline(
       };
     },
   };
+}
+
+function testExecutionConfigurationPackage(mode: string) {
+  const content = new TextEncoder().encode(
+    JSON.stringify({ mode }),
+  );
+  return {
+    packageName: `test-execution-configuration:${mode}`,
+    contentHash: sha256Bytes(content),
+    content,
+  } as const;
 }
 
 test("one test Bakeoff Job creates stable WPS, Qwen, and Doubao child Runs", async () => {
@@ -687,6 +699,8 @@ test("production rejects every Mock lineage even when every visible provenance l
   const mockAdapter = new MockWpsProductAdapter();
   const relabeledAdapter: ProductAdapterPort = {
     implementationPackage: mockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      mockAdapter.executionConfigurationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
       provenance: "PRODUCTION",
@@ -710,6 +724,8 @@ test("the command environment must match the projection environment before any a
   let executeCount = 0;
   const productionLabeledAdapter: ProductAdapterPort = {
     implementationPackage: mockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("production-labeled"),
     productPackage: {
       ...mockAdapter.productPackage,
       provenance: "PRODUCTION",
@@ -944,6 +960,8 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
   let observedAbort = false;
   const hungWps: ProductAdapterPort = {
     implementationPackage: wps.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("hung"),
     productPackage: wps.productPackage,
     execute(command) {
       executeCount += 1;
@@ -1005,6 +1023,8 @@ test("a thrown adapter error becomes a persisted technical failure with unknown 
   const qwen = new MockQwenProductAdapter();
   const throwingQwen: ProductAdapterPort = {
     implementationPackage: qwen.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("throwing"),
     productPackage: qwen.productPackage,
     async execute() {
       throw new Error("simulated adapter crash");
@@ -1061,6 +1081,8 @@ test("the selected adapter set is defensively frozen before any adapter can muta
   const selectedAdapters: ProductAdapterPort[] = [];
   const mutatingWps: ProductAdapterPort = {
     implementationPackage: wps.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("mutating-selected-array"),
     productPackage: wps.productPackage,
     async execute(command) {
       selectedAdapters.push(new MockDoubaoProductAdapter());
@@ -1140,6 +1162,8 @@ test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", asyn
   const wps = new MockWpsProductAdapter();
   const inheritedKeyAdapter: ProductAdapterPort = {
     implementationPackage: wps.implementationPackage,
+    executionConfigurationPackage:
+      wps.executionConfigurationPackage,
     productPackage: {
       ...wps.productPackage,
       packageId: "__proto__",
@@ -1174,6 +1198,8 @@ test("measured deadline time overrides a successful adapter's self-reported elap
   const wps = new MockWpsProductAdapter();
   const inflatedElapsedAdapter: ProductAdapterPort = {
     implementationPackage: wps.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("inflated-elapsed"),
     productPackage: wps.productPackage,
     async execute(command) {
       const artifact = await wps.execute(command);
@@ -1273,6 +1299,8 @@ test("a settled Bakeoff rejects a changed execute entrypoint even when the calle
   let firstCalls = 0;
   const firstAdapter: ProductAdapterPort = {
     implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      delegate.executionConfigurationPackage,
     productPackage: delegate.productPackage,
     async execute(command) {
       firstCalls += 1;
@@ -1290,6 +1318,8 @@ test("a settled Bakeoff rejects a changed execute entrypoint even when the calle
   let changedCalls = 0;
   const changedAdapter: ProductAdapterPort = {
     implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      delegate.executionConfigurationPackage,
     productPackage: delegate.productPackage,
     async execute() {
       changedCalls += 1;
@@ -1311,17 +1341,106 @@ test("a settled Bakeoff rejects a changed execute entrypoint even when the calle
   assert.equal(changedCalls, 0);
 });
 
+test("a selected adapter executes the frozen function even when the caller mutates the adapter after start", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let originalCalls = 0;
+  let replacementCalls = 0;
+  const mutableAdapter = {
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("frozen-function"),
+    productPackage: delegate.productPackage,
+    async execute(command: Parameters<ProductAdapterPort["execute"]>[0]) {
+      originalCalls += 1;
+      return delegate.execute(command);
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  const pending = createBakeoffHarness({
+    feishu,
+    productAdapters: [mutableAdapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  mutableAdapter.execute = async () => {
+    replacementCalls += 1;
+    throw new Error("replacement execute must not run");
+  };
+
+  const outcome = await pending;
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(originalCalls, 1);
+  assert.equal(replacementCalls, 0);
+});
+
+test("a settled Bakeoff rejects identical execute source with changed declared closure configuration", async () => {
+  const delegate = new MockWpsProductAdapter();
+  const calls = { first: 0, changed: 0 };
+  const makeAdapter = (
+    mode: "success" | "failure",
+    executionConfigurationPackage:
+      ReturnType<typeof testExecutionConfigurationPackage>,
+  ) => ({
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage,
+    productPackage: delegate.productPackage,
+    async execute(command: Parameters<ProductAdapterPort["execute"]>[0]) {
+      calls[mode === "success" ? "first" : "changed"] += 1;
+      if (mode === "failure") {
+        throw new Error("changed closure configuration must not replay");
+      }
+      return delegate.execute(command);
+    },
+  });
+  const first = makeAdapter(
+    "success",
+    testExecutionConfigurationPackage("success"),
+  );
+  const changed = makeAdapter(
+    "failure",
+    testExecutionConfigurationPackage("failure"),
+  );
+  assert.equal(first.execute.toString(), changed.execute.toString());
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [first],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [changed],
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /identity conflict|protocol mismatch/i,
+  );
+  assert.equal(calls.first, 1);
+  assert.equal(calls.changed, 0);
+});
+
 test("package metadata and derived Run IDs are snapshotted before any adapter executes", async () => {
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();
   const mutableQwenPackage = { ...qwen.productPackage };
   const mutableQwen: ProductAdapterPort = {
     implementationPackage: qwen.implementationPackage,
+    executionConfigurationPackage:
+      qwen.executionConfigurationPackage,
     productPackage: mutableQwenPackage,
     execute: (command) => qwen.execute(command),
   };
   const mutatingWps: ProductAdapterPort = {
     implementationPackage: wps.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("mutating-package-metadata"),
     productPackage: wps.productPackage,
     async execute(command) {
       mutableQwenPackage.packageId = "MUTATED-package-id";
@@ -1354,6 +1473,8 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
   const duplicateArtifactAdapters: ProductAdapterPort[] = [
     {
       implementationPackage: wps.implementationPackage,
+      executionConfigurationPackage:
+        wps.executionConfigurationPackage,
       productPackage: {
         ...wps.productPackage,
         packageId: "custom-package-a",
@@ -1363,6 +1484,8 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
     },
     {
       implementationPackage: wps.implementationPackage,
+      executionConfigurationPackage:
+        wps.executionConfigurationPackage,
       productPackage: {
         ...wps.productPackage,
         packageId: "custom-package-b",

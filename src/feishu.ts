@@ -241,6 +241,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #expiredCaseIds = new Set<string>();
   readonly #expiredJobCaseIds = new Map<string, Set<string>>();
   #projectionTail: Promise<void> = Promise.resolve();
+  #mutationVersion = 0;
   readonly #clock: ClockPort;
   readonly targetEnvironment: "test" | "production";
   readonly egressDestination: EgressDestinationMetadata;
@@ -307,9 +308,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     );
     if (existingIndex === -1) {
       this.#caseTable.push(record);
+      this.#mutationVersion += 1;
       return;
     }
     this.#caseTable[existingIndex] = record;
+    this.#mutationVersion += 1;
   }
 
   async appendRunRecord(record: RunRecord): Promise<void> {
@@ -330,6 +333,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#runRecordTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async linkReportToBakeoffJob(
@@ -357,6 +361,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
             ],
           }),
     };
+    this.#mutationVersion += 1;
   }
 
   async appendArtifactScore(record: ArtifactScoreTableRecord): Promise<void> {
@@ -391,6 +396,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#artifactScoreTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async appendAdjudicationEvent(
@@ -460,6 +466,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#adjudicationEventTable.push(
       cloneWithEnvironmentOrigin(record),
     );
+    this.#mutationVersion += 1;
   }
 
   async listAdjudicationEvents(
@@ -520,6 +527,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       );
     }
     this.#reviewEventTable.push(cloneWithEnvironmentOrigin(record));
+    this.#mutationVersion += 1;
   }
 
   async listReviewEvents(
@@ -581,6 +589,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#capturedArtifactTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async appendComparison(record: ComparisonRecord): Promise<void> {
@@ -600,6 +609,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#productGapCardTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async appendProductGapCard(record: ProductGapCardRecord): Promise<void> {
@@ -617,6 +627,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#productGapCardTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async loadProductGapCard(
@@ -694,6 +705,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#gapCardWorkflowEventTable.push(
       cloneWithEnvironmentOrigin(record),
     );
+    this.#mutationVersion += 1;
   }
 
   async listProductGapCardWorkflowEvents(
@@ -756,6 +768,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     const stored = cloneWithEnvironmentOrigin(record);
     this.#githubIssueDeliveryReservationTable.push(stored);
+    this.#mutationVersion += 1;
     return {
       ...structuredClone(stored),
       environmentOrigin: stored.environmentOrigin,
@@ -849,6 +862,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#githubIssueLinkEventTable.push(
       cloneWithEnvironmentOrigin(record),
     );
+    this.#mutationVersion += 1;
   }
 
   async listGitHubIssueLinkEvents(
@@ -878,6 +892,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return structuredClone(existing);
     }
     this.#reports.push(report);
+    this.#mutationVersion += 1;
     return structuredClone(report);
   }
 
@@ -1016,6 +1031,18 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       const evaluationCase = snapshot.caseTable.find(
         ({ caseId }) => caseId === job?.caseId,
       );
+      const batchGapCards = new Map(
+        snapshot.productGapCardTable.flatMap((record) =>
+          record.recordType === "gap_card"
+            ? [[record.gapCardId, record] as const]
+            : [],
+        ),
+      );
+      const joblessGapCardRows = [
+        ...snapshot.gapCardWorkflowEventTable,
+        ...snapshot.githubIssueDeliveryReservationTable,
+        ...snapshot.githubIssueLinkEventTable,
+      ];
       const payloadHash = snapshotHash(snapshot);
       const expectedContentFields = [
         "case_table",
@@ -1039,6 +1066,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         ) ||
         snapshot.runRecordTable.some(
           ({ caseId }) => caseId !== job.caseId,
+        ) ||
+        joblessGapCardRows.some(
+          ({ gapCardId }) =>
+            batchGapCards.get(gapCardId)?.jobId !== jobId,
         ) ||
         !isDeepStrictEqual(authorization.request, {
           requestId: `operational-ledger-projection:${jobId}:${payloadHash}`,
@@ -1067,54 +1098,65 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         authorization,
         this.#clock,
       );
-      const working = new InMemoryFeishuProjection({
-        targetEnvironment: this.targetEnvironment,
-        egressDestination: this.egressDestination,
-      });
-      working.#replaceSnapshot(this.snapshot());
-      for (const record of snapshot.caseTable) {
-        await working.upsertCase(record);
-      }
-      for (const record of snapshot.runRecordTable) {
-        await working.appendRunRecord(record);
-      }
-      for (const record of snapshot.capturedArtifactTable) {
-        await working.appendCapturedArtifact(record);
-      }
-      for (const record of snapshot.artifactScoreTable) {
-        await working.appendArtifactScore(record);
-      }
-      for (const record of snapshot.adjudicationEventTable) {
-        await working.appendAdjudicationEvent(record);
-      }
-      for (const record of snapshot.reviewEventTable) {
-        await working.appendReviewEvent(record);
-      }
-      for (const record of snapshot.productGapCardTable) {
-        if (record.recordType === "comparison") {
-          await working.appendComparison(record);
-        } else {
-          await working.appendProductGapCard(record);
+      while (true) {
+        const observedMutationVersion = this.#mutationVersion;
+        const working = new InMemoryFeishuProjection({
+          targetEnvironment: this.targetEnvironment,
+          egressDestination: this.egressDestination,
+        });
+        working.#replaceSnapshot(this.snapshot());
+        for (const record of snapshot.caseTable) {
+          await working.upsertCase(record);
         }
-      }
-      for (const record of snapshot.gapCardWorkflowEventTable) {
-        await working.appendProductGapCardWorkflowEvent(record);
-      }
-      for (const record of snapshot.githubIssueDeliveryReservationTable) {
-        await working.reserveGitHubIssueDelivery(record);
-      }
-      for (const record of snapshot.githubIssueLinkEventTable) {
-        await working.appendGitHubIssueLinkEvent(record);
-      }
-      for (const report of snapshot.reports) {
-        const created = await working.createReport(report);
-        if (!isDeepStrictEqual(created, report)) {
-          throw new Error(
-            `Operational ledger projection report mismatch: ${report.reportId}`,
-          );
+        for (const record of snapshot.runRecordTable) {
+          await working.appendRunRecord(record);
         }
+        for (const record of snapshot.capturedArtifactTable) {
+          await working.appendCapturedArtifact(record);
+        }
+        for (const record of snapshot.artifactScoreTable) {
+          await working.appendArtifactScore(record);
+        }
+        for (const record of snapshot.adjudicationEventTable) {
+          await working.appendAdjudicationEvent(record);
+        }
+        for (const record of snapshot.reviewEventTable) {
+          await working.appendReviewEvent(record);
+        }
+        for (const record of snapshot.productGapCardTable) {
+          if (record.recordType === "comparison") {
+            await working.appendComparison(record);
+          } else {
+            await working.appendProductGapCard(record);
+          }
+        }
+        for (const record of snapshot.gapCardWorkflowEventTable) {
+          await working.appendProductGapCardWorkflowEvent(record);
+        }
+        for (const record of snapshot.githubIssueDeliveryReservationTable) {
+          await working.reserveGitHubIssueDelivery(record);
+        }
+        for (const record of snapshot.githubIssueLinkEventTable) {
+          await working.appendGitHubIssueLinkEvent(record);
+        }
+        for (const report of snapshot.reports) {
+          const created = await working.createReport(report);
+          if (!isDeepStrictEqual(created, report)) {
+            throw new Error(
+              `Operational ledger projection report mismatch: ${report.reportId}`,
+            );
+          }
+        }
+        if (this.#mutationVersion !== observedMutationVersion) {
+          continue;
+        }
+        assertApprovedEgressAuthorizationCurrent(
+          authorization,
+          this.#clock,
+        );
+        this.#replaceSnapshot(working.snapshot());
+        return;
       }
-      this.#replaceSnapshot(working.snapshot());
     });
   }
 
@@ -1142,6 +1184,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     );
     replace(this.#productGapCardTable, snapshot.productGapCardTable);
     replace(this.#reports, snapshot.reports);
+    this.#mutationVersion += 1;
   }
 
   async scrubPayloadsForJob(jobId: string): Promise<void> {
@@ -1193,6 +1236,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
             (run) => run.caseId === record.caseId,
           ),
       );
+      this.#mutationVersion += 1;
     });
   }
 

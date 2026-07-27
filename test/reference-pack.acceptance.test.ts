@@ -232,6 +232,8 @@ test("one Bakeoff Job shares one frozen automatic pack across three scorecards w
     new MockDoubaoProductAdapter(),
   ].map((adapter) => ({
     implementationPackage: adapter.implementationPackage,
+    executionConfigurationPackage:
+      adapter.executionConfigurationPackage,
     productPackage: adapter.productPackage,
     async execute(command: Parameters<typeof adapter.execute>[0]) {
       observedVendorPrompts.push(command.evaluationCase.vendorPrompt);

@@ -396,18 +396,31 @@ function bakeoffJobIdentity(
     protocol: bakeoffProtocolSnapshot(
       command.referencePackMode ?? "automatic",
     ),
-    selections: selections.map(({ adapter, productPackage, runId }) => ({
-      runId,
-      adapter: dependencyIdentity(adapter),
-      packageId: productPackage.packageId,
-      vendorId: productPackage.vendorId,
-      displayName: productPackage.displayName,
-      adapterVersion: productPackage.adapterVersion,
-      provenance: productPackage.provenance,
-      environmentOriginId: productPackage.environmentOrigin.originId,
-      environment: productPackage.environmentOrigin.environment,
-      egressDestination: productPackage.egressDestination,
-    })),
+    selections: selections.map(
+      ({
+        executionConfigurationPackage,
+        executionEntrypointDigest,
+        implementationPackage,
+        productPackage,
+        runId,
+      }) => ({
+        runId,
+        packageId: productPackage.packageId,
+        vendorId: productPackage.vendorId,
+        displayName: productPackage.displayName,
+        adapterVersion: productPackage.adapterVersion,
+        provenance: productPackage.provenance,
+        environmentOriginId: productPackage.environmentOrigin.originId,
+        environment: productPackage.environmentOrigin.environment,
+        egressDestination: productPackage.egressDestination,
+        ...adapterImplementationEvidence(
+          implementationPackage,
+          executionEntrypointDigest,
+          executionConfigurationPackage,
+          productPackage.packageId,
+        ),
+      }),
+    ),
     dependencies: {
       attemptDeadline: dependencyIdentity(dependencies.attemptDeadline),
       referencePackStore: dependencyIdentity(
@@ -483,8 +496,9 @@ interface CapturedVendorResult {
 }
 
 interface SelectedProductAdapter {
-  readonly adapter: ProductAdapterPort;
+  readonly execute: ProductAdapterPort["execute"];
   readonly executionEntrypointDigest: `sha256:${string}`;
+  readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
@@ -519,12 +533,24 @@ function snapshotProductSelections(
             adapter.implementationPackage.content,
           ),
         });
+      const executionConfigurationPackage =
+        Object.freeze<ProductAdapterImplementationPackage>({
+          packageName:
+            adapter.executionConfigurationPackage.packageName,
+          contentHash:
+            adapter.executionConfigurationPackage.contentHash,
+          content: Uint8Array.from(
+            adapter.executionConfigurationPackage.content,
+          ),
+        });
+      const selectedExecute = adapter.execute;
       const executionEntrypointDigest = sha256Bytes(
-        new TextEncoder().encode(adapter.execute.toString()),
+        new TextEncoder().encode(selectedExecute.toString()),
       );
       return Object.freeze({
-        adapter,
+        execute: selectedExecute.bind(adapter),
         executionEntrypointDigest,
+        executionConfigurationPackage,
         implementationPackage,
         productPackage,
         runId: runIdForPackage(productPackage.packageId),
@@ -536,20 +562,30 @@ function snapshotProductSelections(
 function adapterImplementationEvidence(
   implementationPackage: ProductAdapterImplementationPackage,
   executionEntrypointDigest: `sha256:${string}`,
+  executionConfigurationPackage: ProductAdapterImplementationPackage,
   productPackageId: string,
 ): {
   readonly implementationDigest: `sha256:${string}`;
   readonly executionEntrypointDigest: `sha256:${string}`;
+  readonly executionConfigurationDigest: `sha256:${string}`;
+  readonly executionConfigurationPackageName: string;
+  readonly executionConfigurationPackageByteSize: number;
   readonly implementationPackageName: string;
   readonly implementationPackageByteSize: number;
 } {
   const implementationDigest = sha256Bytes(
     implementationPackage.content,
   );
+  const executionConfigurationDigest = sha256Bytes(
+    executionConfigurationPackage.content,
+  );
   if (
     implementationDigest !==
       implementationPackage.contentHash ||
-    implementationPackage.packageName.trim().length === 0
+    implementationPackage.packageName.trim().length === 0 ||
+    executionConfigurationDigest !==
+      executionConfigurationPackage.contentHash ||
+    executionConfigurationPackage.packageName.trim().length === 0
   ) {
     throw new Error(
       `Adapter implementation package is invalid: ${productPackageId}`,
@@ -558,6 +594,11 @@ function adapterImplementationEvidence(
   return {
     implementationDigest,
     executionEntrypointDigest,
+    executionConfigurationDigest,
+    executionConfigurationPackageName:
+      executionConfigurationPackage.packageName,
+    executionConfigurationPackageByteSize:
+      executionConfigurationPackage.content.byteLength,
     implementationPackageName:
       implementationPackage.packageName,
     implementationPackageByteSize:
@@ -661,6 +702,7 @@ function replayedBakeoffOutcome(
             ...adapterImplementationEvidence(
               selection.implementationPackage,
               selection.executionEntrypointDigest,
+              selection.executionConfigurationPackage,
               selection.productPackage.packageId,
             ),
           }),
@@ -965,7 +1007,7 @@ async function executeVendor(
   judgeDestination: EgressDestinationMetadata,
   onReferencePackUse: (evaluationAttemptId: string) => void,
 ): Promise<CapturedVendorResult> {
-  const { adapter, productPackage, runId } = selection;
+  const { execute, productPackage, runId } = selection;
   const scenario = KNOWN_VENDOR_SCENARIOS.get(productPackage.packageId);
   const attempts: RunRecord[] = [];
   let retryOfAttemptId: string | null = null;
@@ -1031,7 +1073,7 @@ async function executeVendor(
       try {
         const deadlineResult = await attemptDeadline.run(
           (signal) =>
-            adapter.execute({
+            execute({
               jobId: MOCK_SCENARIO.jobId,
               runId,
               attemptId,
@@ -1518,6 +1560,7 @@ export function createBakeoffHarness({
           selections.map(async ({
             implementationPackage,
             executionEntrypointDigest,
+            executionConfigurationPackage,
             productPackage,
             runId,
           }) => {
@@ -1532,6 +1575,8 @@ export function createBakeoffHarness({
                 implementationPackage,
               adapterExecutionEntrypointDigest:
                 executionEntrypointDigest,
+              adapterExecutionConfigurationPackage:
+                executionConfigurationPackage,
             });
             return [runId, reference] as const;
           }),

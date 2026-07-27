@@ -318,6 +318,8 @@ test("the public product adapter port can be replaced without changing the Bakeo
   const fixedMockAdapter = new MockWpsProductAdapter();
   const replacementAdapter: ProductAdapterPort = {
     implementationPackage: fixedMockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      fixedMockAdapter.executionConfigurationPackage,
     productPackage: {
       ...fixedMockAdapter.productPackage,
       packageId: "MOCK-replacement-package-v1",
@@ -361,6 +363,8 @@ test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match it
   const fixedMockAdapter = new MockWpsProductAdapter();
   const tamperingAdapter: ProductAdapterPort = {
     implementationPackage: fixedMockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      fixedMockAdapter.executionConfigurationPackage,
     productPackage: fixedMockAdapter.productPackage,
     async execute(command: ProductRunCommand): Promise<Artifact> {
       const artifact = await fixedMockAdapter.execute(command);
@@ -390,6 +394,8 @@ test("Artifact byte changes with a valid new hash drive new static renders and e
   const fixedMockAdapter = new MockWpsProductAdapter();
   const variantAdapter: ProductAdapterPort = {
     implementationPackage: fixedMockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      fixedMockAdapter.executionConfigurationPackage,
     productPackage: {
       ...fixedMockAdapter.productPackage,
       packageId: "MOCK-content-variant-package-v1",

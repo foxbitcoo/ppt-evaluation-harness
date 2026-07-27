@@ -358,6 +358,8 @@ test("default WPS-centered views follow stable vendor identity across package ve
     packageId: string,
   ): ProductAdapterPort => ({
     implementationPackage: adapter.implementationPackage,
+    executionConfigurationPackage:
+      adapter.executionConfigurationPackage,
     productPackage: {
       ...adapter.productPackage,
       packageId,
@@ -572,6 +574,8 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting audi
     new MockDoubaoProductAdapter(),
   ].map((adapter) => ({
     implementationPackage: adapter.implementationPackage,
+    executionConfigurationPackage:
+      adapter.executionConfigurationPackage,
     productPackage: adapter.productPackage,
     async execute(command) {
       adapterExecutions += 1;
@@ -670,6 +674,8 @@ test("concurrent starts for one stable Bakeoff Job share one vendor execution", 
     new MockDoubaoProductAdapter(),
   ].map((adapter) => ({
     implementationPackage: adapter.implementationPackage,
+    executionConfigurationPackage:
+      adapter.executionConfigurationPackage,
     productPackage: adapter.productPackage,
     async execute(command) {
       adapterExecutions += 1;

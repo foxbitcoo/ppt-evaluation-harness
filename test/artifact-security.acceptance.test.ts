@@ -7,6 +7,8 @@ import {
   InMemoryEgressAuthorizationAudit,
   InMemoryPayloadInventory,
   InMemoryFeishuProjection,
+  MockDoubaoProductAdapter,
+  MockQwenProductAdapter,
   MockWpsProductAdapter,
   VOLCANO_CASE_ID,
   createArtifactVault,
@@ -63,6 +65,48 @@ const APPROVED_EGRESS: EgressAuthorizationPort = {
     };
   },
 };
+
+async function authorizeProjectionSnapshot(
+  target: InMemoryFeishuProjection,
+  snapshot: ReturnType<InMemoryFeishuProjection["snapshot"]>,
+  jobId: string,
+  evaluationCase:
+    ReturnType<InMemoryFeishuProjection["snapshot"]>["caseTable"][number],
+) {
+  const payloadHash = sha256Bytes(canonicalJsonBytes(snapshot));
+  return requireEgressAuthorization(
+    APPROVED_EGRESS,
+    {
+      requestId: `operational-ledger-projection:${jobId}:${payloadHash}`,
+      jobId,
+      runId: null,
+      attemptId: null,
+      dataClassification: evaluationCase.dataClassification,
+      sourceOwner: evaluationCase.sourceOwner,
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: target.egressDestination.targetService,
+      targetAccount: target.egressDestination.targetAccount,
+      targetRegion: target.egressDestination.targetRegion,
+      subprocessors: target.egressDestination.subprocessors,
+      contentFields: [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ],
+      payloadHash,
+      requiredRedactions: [],
+    },
+  );
+}
 
 test("egress authorization evaluates expiry against an injected call-boundary clock and binds the exact payload hash", async () => {
   const observedRequests: unknown[] = [];
@@ -950,6 +994,8 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
   const adapter: ProductAdapterPort = {
     implementationPackage:
       testAdapterImplementationPackage("denied-vendor-adapter-test"),
+    executionConfigurationPackage:
+      testAdapterImplementationPackage("denied-vendor-execution-test"),
     productPackage: {
       packageId: "MOCK-denied-vendor-package-v1",
       vendorId: "denied-vendor",
@@ -1193,6 +1239,8 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
           implementationPackage: testAdapterImplementationPackage(
             "changed-adapter-implementation-test",
           ),
+          executionConfigurationPackage:
+            changedAdapterDelegate.executionConfigurationPackage,
           productPackage: changedAdapterDelegate.productPackage,
           execute: (command) => changedAdapterDelegate.execute(command),
         },
@@ -1509,6 +1557,55 @@ test("a Job B projection commit cannot restore Job A rows scrubbed by a concurre
   );
 });
 
+test("an authorized projection commit preserves a concurrent public ledger mutation", async () => {
+  const target = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: target,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = target.snapshot();
+  const job = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const evaluationCase = snapshot.caseTable[0];
+  const existingReport = snapshot.reports[0];
+  assert.ok(job);
+  assert.ok(evaluationCase);
+  assert.ok(existingReport);
+  const authorization = await authorizeProjectionSnapshot(
+    target,
+    snapshot,
+    job.jobId,
+    evaluationCase,
+  );
+  const pendingCommit = target.commitAuthorizedSnapshot(
+    snapshot,
+    authorization,
+  );
+  await Promise.resolve();
+  const { url: _discardedUrl, ...draft } = existingReport;
+  await target.createReport({
+    ...draft,
+    reportId: "concurrent-report-other-job",
+    jobId: "other-job",
+    title: "Concurrent report from another Job",
+  });
+  await pendingCommit;
+
+  assert.equal(
+    target
+      .snapshot()
+      .reports.some(
+        ({ reportId }) =>
+          reportId === "concurrent-report-other-job",
+      ),
+    true,
+  );
+});
+
 test("Feishu projection rejects a one-Job batch containing an unrelated Case outside that Job authorization", async () => {
   const source = new InMemoryFeishuProjection();
   await createBakeoffHarness({
@@ -1586,6 +1683,96 @@ test("Feishu projection rejects a one-Job batch containing an unrelated Case out
     /Case.*scope|authorization mismatch|batch.*Case/i,
   );
   assert.deepEqual(target.snapshot().caseTable, []);
+});
+
+test("Feishu projection rejects Job B authorization carrying a workflow row for Job A Gap Card", async () => {
+  const target = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: target,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const seeded = target.snapshot();
+  const caseA = seeded.caseTable[0];
+  const jobA = seeded.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const gapCardA = seeded.productGapCardTable.find(
+    ({ recordType }) => recordType === "gap_card",
+  );
+  assert.ok(caseA);
+  assert.ok(jobA);
+  if (gapCardA?.recordType !== "gap_card") {
+    throw new Error("Expected Job A Product Gap Card");
+  }
+  const caseB = {
+    ...caseA,
+    recordId: "case-record-workflow-job-b",
+    caseId: "case-workflow-job-b",
+    title: "Workflow Job B Case",
+  };
+  const jobB = {
+    ...jobA,
+    recordId: "job-record-workflow-b",
+    jobId: "job-workflow-b",
+    caseId: caseB.caseId,
+    selectedRunIds: [],
+  };
+  const crossJobWorkflowEvent = {
+    recordType: "gap_card_workflow_event" as const,
+    schemaVersion: "gap-card-workflow-event-v1" as const,
+    workflowEventId: "workflow-event-job-b-for-job-a-card",
+    gapCardId: gapCardA.gapCardId,
+    decision: "rejected" as const,
+    actorId: "reviewer-b",
+    occurredAt: "2026-07-27T09:00:00.000Z",
+    createdAt: "2026-07-27T09:00:00.000Z",
+    lastSyncedAt: "2026-07-27T09:00:00.000Z",
+    reason: "must not cross Job ownership",
+    priorWorkflowEventId: null,
+    provenance: gapCardA.provenance,
+    environmentOrigin: gapCardA.environmentOrigin,
+  };
+  const snapshotB = {
+    caseTable: [caseB],
+    runRecordTable: [jobB],
+    capturedArtifactTable: [],
+    artifactScoreTable: [],
+    adjudicationEventTable: [],
+    reviewEventTable: [],
+    gapCardWorkflowEventTable: [crossJobWorkflowEvent],
+    githubIssueDeliveryReservationTable: [],
+    githubIssueLinkEventTable: [],
+    productGapCardTable: [],
+    reports: [],
+  };
+  const authorizationB = await authorizeProjectionSnapshot(
+    target,
+    snapshotB,
+    jobB.jobId,
+    caseB,
+  );
+
+  await assert.rejects(
+    target.commitAuthorizedSnapshot(snapshotB, authorizationB),
+    /Gap Card.*Job|authorization mismatch|ownership/i,
+  );
+  assert.equal(
+    target
+      .snapshot()
+      .gapCardWorkflowEventTable.some(
+        ({ workflowEventId }) =>
+          workflowEventId ===
+          crossJobWorkflowEvent.workflowEventId,
+      ),
+    false,
+  );
 });
 
 test("Feishu projection rejects a runtime-denied authorization even when destination and payload hash match", async () => {
@@ -1690,6 +1877,8 @@ test("a tombstone racing a long vendor run prevents the final Feishu projection 
   const adapter: ProductAdapterPort = {
     implementationPackage:
       testAdapterImplementationPackage("delayed-adapter-test"),
+    executionConfigurationPackage:
+      delegate.executionConfigurationPackage,
     productPackage: delegate.productPackage,
     async execute(command) {
       signalStarted();

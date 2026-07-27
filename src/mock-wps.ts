@@ -58,6 +58,22 @@ function configuredMockAdapterImplementationPackage(
   });
 }
 
+function mockAdapterExecutionConfigurationPackage(
+  adapterName: string,
+  configuration: unknown,
+): ProductAdapterImplementationPackage {
+  const content = textEncoder.encode(
+    JSON.stringify({ adapterName, configuration }),
+  );
+  return Object.freeze({
+    packageName: `mock-execution-configuration#${adapterName}`,
+    contentHash: `sha256:${createHash("sha256")
+      .update(content)
+      .digest("hex")}`,
+    content,
+  });
+}
+
 interface ZipEntry {
   readonly name: string;
   readonly content: Uint8Array;
@@ -641,6 +657,11 @@ export function renderStaticArtifact(
 
 export class MockWpsProductAdapter implements ProductAdapterPort {
   readonly implementationPackage = MOCK_ADAPTER_IMPLEMENTATION_PACKAGE;
+  readonly executionConfigurationPackage =
+    mockAdapterExecutionConfigurationPackage(
+      "MockWpsProductAdapter",
+      { scenario: "success" },
+    );
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
     packageId: "MOCK-wps-package-v1",
     vendorId: "wps",
@@ -670,6 +691,8 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
 
 export class MockQwenProductAdapter implements ProductAdapterPort {
   readonly implementationPackage: ProductAdapterImplementationPackage;
+  readonly executionConfigurationPackage:
+    ProductAdapterImplementationPackage;
   readonly #scenario: MockAdapterScenario;
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
@@ -691,6 +714,11 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
     this.#scenario = options.scenario ?? "success";
     this.implementationPackage =
       configuredMockAdapterImplementationPackage(
+        "MockQwenProductAdapter",
+        { scenario: this.#scenario },
+      );
+    this.executionConfigurationPackage =
+      mockAdapterExecutionConfigurationPackage(
         "MockQwenProductAdapter",
         { scenario: this.#scenario },
       );
@@ -716,6 +744,8 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
 
 export class MockDoubaoProductAdapter implements ProductAdapterPort {
   readonly implementationPackage: ProductAdapterImplementationPackage;
+  readonly executionConfigurationPackage:
+    ProductAdapterImplementationPackage;
   readonly #scenario: MockAdapterScenario;
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
@@ -737,6 +767,11 @@ export class MockDoubaoProductAdapter implements ProductAdapterPort {
     this.#scenario = options.scenario ?? "success";
     this.implementationPackage =
       configuredMockAdapterImplementationPackage(
+        "MockDoubaoProductAdapter",
+        { scenario: this.#scenario },
+      );
+    this.executionConfigurationPackage =
+      mockAdapterExecutionConfigurationPackage(
         "MockDoubaoProductAdapter",
         { scenario: this.#scenario },
       );

@@ -65,6 +65,9 @@ export interface RunSpecificationBundle {
     readonly egressDestination: ProductPackageSnapshot["egressDestination"];
     readonly implementationDigest: `sha256:${string}`;
     readonly executionEntrypointDigest: `sha256:${string}`;
+    readonly executionConfigurationDigest: `sha256:${string}`;
+    readonly executionConfigurationPackageName: string;
+    readonly executionConfigurationPackageByteSize: number;
     readonly implementationPackageName: string;
     readonly implementationPackageByteSize: number;
   };
@@ -135,6 +138,8 @@ export interface CaptureRunSpecificationCommand {
   readonly protocolSnapshot: BakeoffProtocolSnapshot;
   readonly adapterImplementationPackage: ProductAdapterImplementationPackage;
   readonly adapterExecutionEntrypointDigest: `sha256:${string}`;
+  readonly adapterExecutionConfigurationPackage:
+    ProductAdapterImplementationPackage;
 }
 
 export interface RunSpecificationVault {
@@ -283,10 +288,15 @@ export function createRunSpecificationVault({
         command.adapterImplementationPackage.packageName.trim().length ===
           0 ||
         sha256Bytes(command.adapterImplementationPackage.content) !==
-          command.adapterImplementationPackage.contentHash
+          command.adapterImplementationPackage.contentHash ||
+        command.adapterExecutionConfigurationPackage.packageName.trim()
+          .length === 0 ||
+        sha256Bytes(
+          command.adapterExecutionConfigurationPackage.content,
+        ) !== command.adapterExecutionConfigurationPackage.contentHash
       ) {
         throw new Error(
-          "Run specification requires an exact adapter implementation package",
+          "Run specification requires exact adapter implementation and execution configuration packages",
         );
       }
       const bundleWithoutReferences = Object.freeze({
@@ -314,6 +324,12 @@ export function createRunSpecificationVault({
             command.adapterImplementationPackage.contentHash,
           executionEntrypointDigest:
             command.adapterExecutionEntrypointDigest,
+          executionConfigurationDigest:
+            command.adapterExecutionConfigurationPackage.contentHash,
+          executionConfigurationPackageName:
+            command.adapterExecutionConfigurationPackage.packageName,
+          executionConfigurationPackageByteSize:
+            command.adapterExecutionConfigurationPackage.content.byteLength,
           implementationPackageName:
             command.adapterImplementationPackage.packageName,
           implementationPackageByteSize:
