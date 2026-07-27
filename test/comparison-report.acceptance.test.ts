@@ -722,6 +722,50 @@ test("concurrent starts reject a conflicting selected Product Package set", asyn
   assert.equal(feishu.snapshot().runRecordTable.length, 7);
 });
 
+test("an in-flight Bakeoff uses one frozen normalized command snapshot", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const adapters: readonly ProductAdapterPort[] = [
+    new MockWpsProductAdapter(),
+    new MockQwenProductAdapter(),
+    new MockDoubaoProductAdapter(),
+  ];
+  const harness = createBakeoffHarness({
+    feishu,
+    productAdapters: adapters,
+  });
+  const mutableCommand: {
+    environment: "test";
+    caseId: typeof VOLCANO_CASE_ID;
+    referencePackMode: "automatic" | "off";
+  } = {
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+    referencePackMode: "automatic",
+  };
+
+  const firstStart = harness.startBakeoffJob(mutableCommand);
+  mutableCommand.referencePackMode = "off";
+  const secondStart = harness.startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+    referencePackMode: "automatic",
+  });
+  const [first, second] = await Promise.all([firstStart, secondStart]);
+
+  assert.equal(first.report.reportId, second.report.reportId);
+  for (const scorecard of first.scorecards) {
+    const factual = scorecard.dimensions.find(
+      ({ dimension }) =>
+        dimension === "factual_accuracy_and_content_quality",
+    );
+    assert.equal(factual?.assessmentStatus, "ASSESSED");
+    assert.notEqual(
+      scorecard.evaluationInputManifest.referencePackHash,
+      null,
+    );
+  }
+});
+
 test("compatibility fingerprint equality is independent of object key insertion order", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({

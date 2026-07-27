@@ -168,6 +168,16 @@ function dependencyIdentity(dependency: object | undefined): string | null {
   return created;
 }
 
+function snapshotBakeoffCommand(
+  command: StartBakeoffJobCommand,
+): Readonly<StartBakeoffJobCommand> {
+  return Object.freeze({
+    environment: command.environment,
+    caseId: command.caseId,
+    referencePackMode: command.referencePackMode ?? "automatic",
+  });
+}
+
 function bakeoffJobIdentity(
   command: StartBakeoffJobCommand,
   selections: readonly SelectedProductAdapter[],
@@ -1180,20 +1190,25 @@ export function createBakeoffHarness({
   };
   return {
     startBakeoffJob(command) {
+      const commandSnapshot = snapshotBakeoffCommand(command);
       const selections = snapshotProductSelections(
         selectedProductAdapters,
       );
-      const jobIdentity = bakeoffJobIdentity(command, selections, {
-        attemptDeadline,
-        referencePackStore,
-        referencePackGenerator,
-        judge,
-      });
+      const jobIdentity = bakeoffJobIdentity(
+        commandSnapshot,
+        selections,
+        {
+          attemptDeadline,
+          referencePackStore,
+          referencePackGenerator,
+          judge,
+        },
+      );
       return coalesceBakeoffJob(
         feishu,
         MOCK_SCENARIO.jobId,
         jobIdentity,
-        () => executor.startBakeoffJob(command, selections),
+        () => executor.startBakeoffJob(commandSnapshot, selections),
       );
     },
   };
