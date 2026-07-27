@@ -2,6 +2,9 @@
 
 Status: `COMPLETED_WITH_RENDER_WARNINGS`
 
+Public harness replay status:
+`OBSERVED_REAL_PROVIDER_REPLAY_INGEST_RECOVERED`
+
 Issue: `#10`
 
 Browser: existing signed-in user Google Chrome session only
@@ -12,6 +15,30 @@ This record contains observations from one production Attempt. It does not
 promote the product output to a quality baseline, and it does not expose
 cookies, authorization data, personal identifiers, browser storage, or hidden
 reasoning.
+
+## Exact-current public replay
+
+On `2026-07-28`, the retained provider PPTX and the same 16 PNGs were ingested
+through the public `DoubaoProductionReplayAdapter` as
+`PRODUCTION_REPLAY` / `REAL_PROVIDER_CAPTURE`. No browser rerun occurred.
+
+- The OPC validator opened the real PPTX, validated its ZIP records,
+  relationships, inactive-content policy, and 16 slide parts.
+- The authorized safe-raster path decoded and normalized every real PNG,
+  generated a 4×4 contact sheet, and kept capture, rendering, fidelity, and
+  scoring as separate states.
+- The dual-copy `ArtifactVault` recovered the exact original hash and all 33
+  derivatives.
+- The `RunSpecification` retained the allowlisted Doubao driver runtime,
+  configuration digest, browser-profile digest, replay provenance, and capture
+  source.
+- Four durable Attempt checkpoints were recovered. The cross-process profile
+  lock and the recovery CLI were both exercised.
+- The retained slide 9 clipping and slides 2–16 overflow warnings remain
+  degraded-fidelity notes. Submit count is 1 and retry count is 0.
+
+Machine-readable evidence:
+`docs/smoke/doubao-real-provider-replay-2026-07-28.json`.
 
 ## Fixed protocol
 

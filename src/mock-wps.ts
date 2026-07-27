@@ -12,6 +12,7 @@ import {
 } from "./environment-origin.ts";
 import {
   DOUBAO_PRODUCTION_ADAPTER_KIND,
+  DOUBAO_PRODUCTION_REPLAY_SCENARIO,
   DOUBAO_PRODUCTION_SCENARIO,
   resolveDoubaoProductionExecutor,
   type DoubaoBrowserDriverPort,
@@ -854,7 +855,11 @@ export function resolveHarnessProductAdapterExecutor(
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
   if (adapterKind === DOUBAO_PRODUCTION_ADAPTER_KIND) {
-    if (executionConfiguration.scenario !== DOUBAO_PRODUCTION_SCENARIO) {
+    if (
+      executionConfiguration.scenario !== DOUBAO_PRODUCTION_SCENARIO &&
+      executionConfiguration.scenario !==
+        DOUBAO_PRODUCTION_REPLAY_SCENARIO
+    ) {
       throw new Error(
         `Product Adapter scenario is not registered: ${adapterKind}:${executionConfiguration.scenario}`,
       );
@@ -862,6 +867,11 @@ export function resolveHarnessProductAdapterExecutor(
     return resolveDoubaoProductionExecutor(
       implementationPackage,
       dependencies.doubaoBrowserDriver,
+      dependencies.attemptCheckpointStore,
+      executionConfiguration.scenario ===
+        DOUBAO_PRODUCTION_REPLAY_SCENARIO
+        ? "replay"
+        : "live",
     );
   }
   if (adapterKind === "wps-aippt-browser") {

@@ -1,19 +1,26 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   DoubaoProductionProductAdapter,
+  DoubaoProductionReplayAdapter,
+  InMemoryAttemptCheckpointStore,
   InMemoryFeishuProjection,
+  MockWpsProductAdapter,
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
+  PRODUCTION_VOLCANO_EVALUATION_CASE,
   VOLCANO_EVALUATION_CASE,
   createBakeoffHarness,
+  createDoubaoRealProviderReplayPackage,
   parseAdapterExecutionConfiguration,
   resolveHarnessProductAdapterExecutor,
   type DoubaoBrowserDriverPort,
   type ProductAttemptResult,
   type ProductAdapterPort,
 } from "../src/index.ts";
+import { createFailedSafeRasterManifest } from "../src/safe-raster.ts";
 
 type CallerExecutionKeys = Extract<
   keyof ProductAdapterPort,
@@ -23,12 +30,34 @@ const productAdapterPortStaysPureData:
   CallerExecutionKeys extends never ? true : false = true;
 void productAdapterPortStaysPureData;
 
+async function knownGoodPptxBytes(): Promise<Uint8Array> {
+  const mock = new MockWpsProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    mock.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      mock.executionConfigurationPackage,
+    ),
+  );
+  const artifact = await execute({
+    jobId: "doubao-pptx-fixture-job",
+    runId: "doubao-pptx-fixture-run",
+    attemptId: "doubao-pptx-fixture-attempt",
+    attemptSeq: 1,
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  });
+  assert.ok("content" in artifact);
+  return artifact.content;
+}
+
 function completeDoubaoDriver(): DoubaoBrowserDriverPort {
   return {
     async inspectCurrentPackage() {
       return {
         observedAt: "2026-07-27T06:00:00.000Z",
-        sourceUrl: "https://www.doubao.com/chat/ppt-observed",
+        sourceUrl:
+          "https://www.doubao.com/chat/ppt-observed#private-fragment",
         accountEvidence: "current_account_signed_in",
         planName: "免费版",
         modelName: "豆包当前账号最佳可用模型",
@@ -68,9 +97,7 @@ function completeDoubaoDriver(): DoubaoBrowserDriverPort {
         mimeType:
           "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         pageCount: 16,
-        content: new TextEncoder().encode(
-          "PK\u0003\u0004fake-doubao-pptx",
-        ),
+        content: await knownGoodPptxBytes(),
         evidenceRef: "download://doubao/doubao-volcano-16.pptx",
         manualActions: ["点击导出 PPTX"],
       };
@@ -95,6 +122,7 @@ function completeDoubaoDriver(): DoubaoBrowserDriverPort {
 async function executeWithDriver(
   driver: DoubaoBrowserDriverPort,
   attemptId: string,
+  controller = new AbortController(),
 ): Promise<ProductAttemptResult> {
   const adapter = new DoubaoProductionProductAdapter();
   const executor = resolveHarnessProductAdapterExecutor(
@@ -110,7 +138,7 @@ async function executeWithDriver(
     attemptId,
     attemptSeq: 1,
     timeoutMs: 30 * 60 * 1_000,
-    signal: new AbortController().signal,
+    signal: controller.signal,
     evaluationCase: VOLCANO_EVALUATION_CASE,
   });
   assert.ok(!("content" in execution));
@@ -134,7 +162,7 @@ test("the Doubao production adapter declares the frozen zero-incremental-cost 16
     purchasePolicy: "no_incremental_charge",
     requestedPageCount: 16,
   });
-  assert.equal(adapter.productPackage.provenance, "PRODUCTION");
+  assert.equal(adapter.productPackage.provenance, "LIVE_PRODUCTION");
   assert.equal(
     adapter.productPackage.environmentOrigin.environment,
     "production",
@@ -159,6 +187,29 @@ test("the Doubao production adapter declares the frozen zero-incremental-cost 16
   );
 });
 
+test("LIVE_PRODUCTION fails closed when the trusted Doubao executable is not embedded", async () => {
+  const adapter = new DoubaoProductionProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-doubao-live-unavailable",
+      runId: "run-doubao-live-unavailable",
+      attemptId: "attempt-doubao-live-unavailable-1",
+      attemptSeq: 1,
+      timeoutMs: 30 * 60 * 1_000,
+      signal: new AbortController().signal,
+      evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+    }),
+    /trusted live Doubao bridge executable is unavailable/i,
+  );
+});
+
 test("each Doubao adapter owns an isolated recoverable implementation package snapshot", () => {
   const first = new DoubaoProductionProductAdapter();
   const second = new DoubaoProductionProductAdapter();
@@ -178,9 +229,7 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
   let submittedPageCount: number | null = null;
   let submittedNetworking: string | null = null;
   let generationTimeoutMs: number | null = null;
-  const artifactContent = new TextEncoder().encode(
-    "PK\u0003\u0004fake-doubao-pptx",
-  );
+  const artifactContent = await knownGoodPptxBytes();
   const driver: DoubaoBrowserDriverPort = {
     async inspectCurrentPackage() {
       return {
@@ -277,13 +326,10 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
   assert.equal(result.terminalReason, "success");
   assert.equal(result.submissionEvidence, "submitted");
   assert.equal(result.artifactCandidates.length, 1);
-  assert.equal(artifact?.provenance, "PRODUCTION");
-  assert.equal(artifact?.environmentOrigin, PRODUCTION_ENVIRONMENT_ORIGIN);
+  assert.equal(artifact?.provenance, "MOCK");
+  assert.equal(artifact?.environmentOrigin, MOCK_TEST_ENVIRONMENT_ORIGIN);
   assert.equal(artifact?.pageCount, 16);
-  assert.equal(
-    artifact?.contentHash,
-    "sha256:7610a36690f081bfea8618c6450c2b939aa9769f224b05f629de7fc66c531236",
-  );
+  assert.match(artifact?.contentHash ?? "", /^sha256:[a-f0-9]{64}$/);
   assert.equal(result.captureEvidence?.staticRenders.length, 16);
   assert.deepEqual(
     result.captureEvidence?.staticRenders.map(({ pageNumber }) => pageNumber),
@@ -300,7 +346,7 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
     "点击导出 PPTX",
   ]);
   assert.deepEqual(result.observedConfiguration, {
-    sourceUrl: "https://www.doubao.com/chat/ppt-observed",
+    sourceUrl: "https://www.doubao.com/",
     accountEvidence: "current_account_signed_in",
     planName: "免费版",
     modelName: "豆包当前账号最佳可用模型",
@@ -375,7 +421,7 @@ test("a package that needs new payment is blocked before submission with observa
   assert.deepEqual(result.artifactCandidates, []);
 });
 
-test("an incomplete static render remains a submitted technical capture failure and never becomes an Artifact", async () => {
+test("an incomplete static render cannot discard the already exported PPTX", async () => {
   const complete = completeDoubaoDriver();
   const result = await executeWithDriver(
     {
@@ -392,9 +438,9 @@ test("an incomplete static render remains a submitted technical capture failure 
     "attempt-doubao-incomplete-render",
   );
 
-  assert.equal(result.terminalReason, "technical_failure");
+  assert.equal(result.terminalReason, "success");
   assert.equal(result.submissionEvidence, "submitted");
-  assert.deepEqual(result.artifactCandidates, []);
+  assert.equal(result.artifactCandidates.length, 1);
   assert.equal(result.captureEvidence, undefined);
   assert.deepEqual(
     result.observableEvents?.map(({ eventType }) => eventType),
@@ -408,7 +454,34 @@ test("an incomplete static render remains a submitted technical capture failure 
   );
 });
 
-test("a generated preview with the wrong page count stays a submitted failure without export or retry", async () => {
+test("a failed raster manifest keeps original Artifact lineage and marks fidelity unknown", async () => {
+  const result = await executeWithDriver(
+    completeDoubaoDriver(),
+    "attempt-doubao-failed-render-manifest",
+  );
+  const artifact = result.artifactCandidates[0]?.artifact;
+  assert.ok(artifact);
+  const manifest = createFailedSafeRasterManifest({
+    artifact,
+    renderer: "authorized-safe-raster@1",
+    rendererAuthorizationDecisionId: "decision-render-failed",
+    failure: new Error(
+      "render input missing under /Users/redacted/private-file",
+    ),
+    renderManifestId: `${artifact.artifactId}-render`,
+  });
+
+  assert.equal(manifest.artifactId, artifact.artifactId);
+  assert.equal(manifest.renderOutcome, "failed");
+  assert.deepEqual(manifest.slides, []);
+  assert.equal(manifest.fidelity.status, "unknown");
+  assert.doesNotMatch(
+    JSON.stringify(manifest),
+    /\/Users\/|private-file/,
+  );
+});
+
+test("a generated preview page deviation remains task success and proceeds to export", async () => {
   const complete = completeDoubaoDriver();
   const result = await executeWithDriver(
     {
@@ -421,23 +494,17 @@ test("a generated preview with the wrong page count stays a submitted failure wi
           previewPageCount: 15,
         };
       },
-      async exportPresentation() {
-        throw new Error("wrong-page preview must stop before export");
-      },
     },
     "attempt-doubao-wrong-preview-pages",
   );
 
-  assert.equal(result.terminalReason, "technical_failure");
+  assert.equal(result.terminalReason, "success");
   assert.equal(result.submissionEvidence, "submitted");
-  assert.deepEqual(result.artifactCandidates, []);
-  assert.deepEqual(
-    result.observableEvents?.map(({ eventType }) => eventType),
-    [
-      "preflight_observed",
-      "query_submitted",
-      "generation_failed",
-    ],
+  assert.equal(result.artifactCandidates.length, 1);
+  assert.ok(
+    result.manualActions?.includes(
+      "page-count-deviation: preview=15 requested=16",
+    ),
   );
 });
 
@@ -565,7 +632,7 @@ test("the harness retries once only after proven non-submission and never retrie
   assert.deepEqual(
     attempts[1]?.productConfigurationEvidence,
     {
-      sourceUrl: "https://www.doubao.com/chat/ppt-observed",
+      sourceUrl: "https://www.doubao.com/",
       accountEvidence: "current_account_signed_in",
       planName: "免费版",
       modelName: "豆包当前账号最佳可用模型",
@@ -576,6 +643,216 @@ test("the harness retries once only after proven non-submission and never retrie
       incrementalChargeRequired: false,
     },
   );
+});
+
+test("public real-provider replay binds production lineage and durable checkpoints without browser rendering", async () => {
+  const pptx = await knownGoodPptxBytes();
+  const complete = completeDoubaoDriver();
+  const packageObservation =
+    await complete.inspectCurrentPackage({
+      jobId: "fixture",
+      runId: "fixture",
+      attemptId: "fixture",
+      attemptSeq: 1,
+      signal: new AbortController().signal,
+    });
+  const submission = await complete.submitFrozenQuery({
+    jobId: "fixture",
+    runId: "fixture",
+    attemptId: "fixture",
+    attemptSeq: 1,
+    signal: new AbortController().signal,
+    vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+    requestedPageCount: 16,
+    networking: "enabled",
+  });
+  assert.equal(submission.status, "submitted");
+  const generation = await complete.waitForGeneration({
+    jobId: "fixture",
+    runId: "fixture",
+    attemptId: "fixture",
+    attemptSeq: 1,
+    signal: new AbortController().signal,
+    vendorTaskId: "task_doubao_retained_20260727",
+    timeoutMs: 30 * 60 * 1_000,
+  });
+  assert.equal(generation.status, "generated");
+  const replay = createDoubaoRealProviderReplayPackage({
+    captures: [{
+      packageObservation,
+      submission: {
+        ...submission,
+        vendorTaskId: "task_doubao_retained_20260727",
+      },
+      generation,
+      artifact: {
+        status: "exported",
+        observedAt: "2026-07-27T06:04:20.000Z",
+        filename: "doubao-volcano-16.pptx",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        pageCount: 16,
+        content: pptx,
+        evidenceRef: "download://doubao/retained-real-pptx",
+        manualActions: [],
+      },
+    }],
+  });
+  const checkpoints = new InMemoryAttemptCheckpointStore();
+  const adapter = new DoubaoProductionReplayAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      doubaoBrowserDriver: replay,
+      attemptCheckpointStore: checkpoints,
+    },
+  );
+  const result = await execute({
+    jobId: "job-doubao-replay",
+    runId: "run-doubao-replay",
+    attemptId: "attempt-doubao-replay-1",
+    attemptSeq: 1,
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+    evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+  });
+  assert.ok(!("content" in result));
+  const attempt = result as ProductAttemptResult;
+
+  assert.equal(attempt.terminalReason, "success");
+  assert.equal(
+    attempt.artifactCandidates[0]?.artifact.provenance,
+    "PRODUCTION_REPLAY",
+  );
+  assert.equal(
+    attempt.artifactCandidates[0]?.productionExecutionEvidence
+      ?.captureSource,
+    "REAL_PROVIDER_CAPTURE",
+  );
+  assert.ok(checkpoints.snapshot().length >= 4);
+  assert.ok(
+    checkpoints.snapshot().every(
+      ({ sourceUrl }) => sourceUrl === "https://www.doubao.com/",
+    ),
+  );
+});
+
+test("the exact-current public Doubao replay fixture records durable recovery and retained render warnings", () => {
+  const text = readFileSync(
+    new URL(
+      "../docs/smoke/doubao-real-provider-replay-2026-07-28.json",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const fixture = JSON.parse(text) as {
+    readonly status: string;
+    readonly execution: {
+      readonly submitCount: number;
+      readonly retryCount: number;
+      readonly executionMode: string;
+      readonly captureSource: string;
+    };
+    readonly artifact: {
+      readonly contentHash: string;
+      readonly byteSize: number;
+      readonly pageCount: number;
+    };
+    readonly render: {
+      readonly staticSlideHashes: readonly string[];
+      readonly contactSheetHash: string;
+      readonly warnings: readonly string[];
+    };
+    readonly recovery: {
+      readonly derivativeCount: number;
+      readonly recoveredDerivativeCount: number;
+      readonly checkpointCount: number;
+      readonly browserDriverEvidence: {
+        readonly driverId: string;
+        readonly provenance: string;
+      };
+      readonly recoveryCliExecuted: boolean;
+    };
+  };
+
+  assert.equal(
+    fixture.status,
+    "observed_real_provider_replay_ingest_recovered",
+  );
+  assert.deepEqual(fixture.execution, {
+    publicHarnessReplayIngest: true,
+    liveAutomatedRun: false,
+    browserRerun: false,
+    captureSource: "REAL_PROVIDER_CAPTURE",
+    executionMode: "PRODUCTION_REPLAY",
+    submitCount: 1,
+    retryCount: 0,
+  });
+  assert.deepEqual(fixture.artifact, {
+    contentHash:
+      "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    byteSize: 5_184_523,
+    pageCount: 16,
+    provenance: "PRODUCTION_REPLAY",
+  });
+  assert.equal(fixture.render.staticSlideHashes.length, 16);
+  assert.match(
+    fixture.render.contactSheetHash,
+    /^sha256:[a-f0-9]{64}$/,
+  );
+  assert.deepEqual(fixture.render.warnings, [
+    "slide 9 title clipping observed in retained render",
+    "overflow checker warning retained for slides 2-16",
+    "no quality retry was performed",
+  ]);
+  assert.equal(fixture.recovery.derivativeCount, 33);
+  assert.equal(fixture.recovery.recoveredDerivativeCount, 33);
+  assert.equal(fixture.recovery.checkpointCount, 4);
+  assert.deepEqual(fixture.recovery.browserDriverEvidence, {
+    browserProfileDigest:
+      "sha256:c6e451e70a930e80e799843cd8b1576d2bcaf47eb59c33ea1767e009fd599222",
+    captureSource: "REAL_PROVIDER_CAPTURE",
+    configurationDigest:
+      "sha256:b79c9b95ad7e8180ee67ff1cc5554f604ec748871e71cc8da2b3334cd5310f7b",
+    driverId: "doubao-real-provider-replay",
+    driverVersion: "doubao-harness-browser-bridge@2",
+    implementationDigest:
+      "sha256:95973b0c7da786d8c733dba2e14d88c1494f174a4bf53072f1a698585b68016e",
+    provenance: "PRODUCTION_REPLAY",
+  });
+  assert.equal(fixture.recovery.recoveryCliExecuted, true);
+  assert.doesNotMatch(
+    text,
+    /cookie|authorization|bearer|token|password|localstorage|sessionstorage|\/Users\/|\/tmp\//i,
+  );
+});
+
+test("an aborted submitted task is checkpointed and never proceeds to export", async () => {
+  const complete = completeDoubaoDriver();
+  const controller = new AbortController();
+  let exportCount = 0;
+  const result = await executeWithDriver(
+    {
+      ...complete,
+      async waitForGeneration(command) {
+        const generated = await complete.waitForGeneration(command);
+        controller.abort();
+        return generated;
+      },
+      async exportPresentation(command) {
+        exportCount += 1;
+        return complete.exportPresentation(command);
+      },
+    },
+    "attempt-doubao-aborted",
+    controller,
+  );
+
+  assert.equal(result.terminalReason, "task_state_unknown");
+  assert.equal(exportCount, 0);
 });
 
 test("the production boundary fails closed when observable configuration contains session-like URL material", async () => {

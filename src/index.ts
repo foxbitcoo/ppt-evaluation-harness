@@ -198,10 +198,17 @@ export {
 export {
   DOUBAO_PRODUCTION_ADAPTER_KIND,
   DOUBAO_PRODUCTION_ADAPTER_VERSION,
+  DOUBAO_BROWSER_DRIVER_VERSION,
+  DOUBAO_BROWSER_PROFILE_DIGEST,
   DOUBAO_PRODUCTION_IMPLEMENTATION_PACKAGE,
   DOUBAO_PRODUCTION_EXECUTION_CONFIGURATION_PACKAGE,
+  DOUBAO_PRODUCTION_REPLAY_EXECUTION_CONFIGURATION_PACKAGE,
+  DOUBAO_PRODUCTION_REPLAY_SCENARIO,
   DOUBAO_PRODUCTION_SCENARIO,
   DoubaoProductionProductAdapter,
+  DoubaoProductionReplayAdapter,
+  createDoubaoRealProviderReplayPackage,
+  registeredDoubaoBrowserDriverEvidence,
   resolveDoubaoProductionExecutor,
   type DoubaoBrowserDriverPort,
   type DoubaoExportObservation,
@@ -209,11 +216,14 @@ export {
   type DoubaoGenerationObservation,
   type DoubaoPackageObservation,
   type DoubaoRenderedPage,
+  type DoubaoRealProviderCapture,
   type DoubaoRenderObservation,
   type DoubaoRenderPresentationCommand,
   type DoubaoSubmissionObservation,
   type DoubaoSubmitQueryCommand,
   type DoubaoWaitForGenerationCommand,
+  type DoubaoTaskReconciliationEvidence,
+  type DoubaoTaskReconciliationQuery,
 } from "./doubao-production-adapter.ts";
 export { resolveHarnessProductAdapterExecutor } from "./mock-wps.ts";
 export {

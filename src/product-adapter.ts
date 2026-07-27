@@ -187,7 +187,7 @@ export interface StaticRenderEvidence {
 export interface ProductArtifactCaptureEvidence {
   readonly renderer: string;
   readonly artifactContentHash: `sha256:${string}`;
-  readonly artifactPageCount: 16;
+  readonly artifactPageCount: number;
   readonly staticRenders: readonly StaticRenderEvidence[];
 }
 

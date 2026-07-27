@@ -574,18 +574,46 @@ function validatedZipEntries(content: Uint8Array): readonly ValidatedZipEntry[] 
     );
     const compressedStart = localNameEnd + localExtraLength;
     const compressedEnd = compressedStart + compressedSize;
+    const usesDataDescriptor = (flags & 0x8) !== 0;
     if (
       localFlags !== flags ||
-      (flags & 0x8) !== 0 ||
       localMethod !== compressionMethod ||
-      localCrc !== expectedCrc ||
-      localCompressedSize !== compressedSize ||
-      localUncompressedSize !== uncompressedSize ||
+      (!usesDataDescriptor && localCrc !== expectedCrc) ||
+      (!usesDataDescriptor &&
+        localCompressedSize !== compressedSize) ||
+      (!usesDataDescriptor &&
+        localUncompressedSize !== uncompressedSize) ||
+      (usesDataDescriptor &&
+        localCrc !== 0 &&
+        localCrc !== expectedCrc) ||
+      (usesDataDescriptor &&
+        localCompressedSize !== 0 &&
+        localCompressedSize !== compressedSize) ||
+      (usesDataDescriptor &&
+        localUncompressedSize !== 0 &&
+        localUncompressedSize !== uncompressedSize) ||
       localName !== name ||
       compressedEnd > content.byteLength ||
       compressedEnd > offset
     ) {
       throw new Error(`WPS Artifact local ZIP header mismatch: ${name}`);
+    }
+    if (usesDataDescriptor) {
+      const descriptorHasSignature =
+        compressedEnd + 16 <= offset &&
+        view.getUint32(compressedEnd, true) === 0x08074b50;
+      const descriptorStart =
+        compressedEnd + (descriptorHasSignature ? 4 : 0);
+      if (
+        descriptorStart + 12 > offset ||
+        view.getUint32(descriptorStart, true) !== expectedCrc ||
+        view.getUint32(descriptorStart + 4, true) !== compressedSize ||
+        view.getUint32(descriptorStart + 8, true) !== uncompressedSize
+      ) {
+        throw new Error(
+          `WPS Artifact ZIP data descriptor mismatch: ${name}`,
+        );
+      }
     }
     const compressed = content.subarray(compressedStart, compressedEnd);
     let uncompressed: Uint8Array;
@@ -731,7 +759,7 @@ function parsePresentationSlideIds(
   return Object.freeze(slideIds);
 }
 
-function validatedOpcSlideNames(
+export function validatedOpenXmlPresentationSlideNames(
   content: Uint8Array,
 ): readonly string[] {
   const entries = validatedZipEntries(content);
@@ -793,11 +821,13 @@ function validatedOpcSlideNames(
     decoder.decode(byName.get("ppt/presentation.xml")),
   );
   if (
-    presentationSlideIds.length !== 16 ||
-    new Set(presentationSlideIds.map(({ id }) => id)).size !== 16 ||
+    presentationSlideIds.length === 0 ||
+    presentationSlideIds.length > 200 ||
+    new Set(presentationSlideIds.map(({ id }) => id)).size !==
+      presentationSlideIds.length ||
     new Set(
       presentationSlideIds.map(({ relationshipId }) => relationshipId),
-    ).size !== 16 ||
+    ).size !== presentationSlideIds.length ||
     presentationSlideIds.some(
       ({ relationshipId }) => !byRelationshipId.has(relationshipId),
     )
@@ -817,13 +847,13 @@ function validatedOpcSlideNames(
     return `ppt/slides/${match[1]}`;
   });
   if (
-    slideRelationships.length !== 16 ||
-    slideTargets.length !== 16 ||
-    new Set(slideTargets).size !== 16 ||
+    slideRelationships.length !== presentationSlideIds.length ||
+    slideTargets.length !== presentationSlideIds.length ||
+    new Set(slideTargets).size !== slideTargets.length ||
     slideTargets.some((name) => !byName.has(name))
   ) {
     throw new Error(
-      "WPS Artifact OPC presentation relationships do not resolve exactly 16 slides",
+      "WPS Artifact OPC presentation slide IDs do not resolve through relationships",
     );
   }
   return Object.freeze(slideTargets);
@@ -841,7 +871,8 @@ function assertOpenableSixteenPagePptx(
   ) {
     throw new Error("WPS Artifact metadata is invalid");
   }
-  const slideNames = validatedOpcSlideNames(artifact.content);
+  const slideNames =
+    validatedOpenXmlPresentationSlideNames(artifact.content);
   if (slideNames.length !== 16) {
     throw new Error(
       `WPS Artifact page count mismatch: expected 16, found ${slideNames.length}`,

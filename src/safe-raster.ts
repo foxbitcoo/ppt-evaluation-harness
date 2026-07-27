@@ -67,6 +67,7 @@ function assertSafePng(content: Uint8Array, label: string): void {
     "cHRM",
     "gAMA",
     "sRGB",
+    "sBIT",
     "pHYs",
     "tRNS",
   ]);
@@ -230,6 +231,75 @@ export async function createAuthorizedSafeRasterManifest(input: {
     ...withoutHash,
     contentHash: calculateRenderManifestHash(
       artifact.contentHash,
+      withoutHash,
+    ),
+  });
+}
+
+export function createFailedSafeRasterManifest(input: {
+  readonly artifact: Artifact;
+  readonly renderer: string;
+  readonly rendererAuthorizationDecisionId: string;
+  readonly failure: unknown;
+  readonly renderManifestId: string;
+}): RenderManifest {
+  const message =
+    input.failure instanceof Error
+      ? input.failure.message
+      : "unknown rasterization failure";
+  const safeMessage = message
+    .replace(
+      /(?:\/Users\/|\/tmp\/)[^\s<>"']+/g,
+      "[local-path-redacted]",
+    )
+    .replace(
+      /(?:cookie|authorization|bearer|token|password)[^\s<>"']*/gi,
+      "[secret-redacted]",
+    )
+    .slice(0, 240);
+  const contactSheet = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">',
+    '<rect width="1280" height="720" fill="#fff"/>',
+    '<text x="40" y="80" font-size="28" fill="#111">',
+    "Static rendering failed; original artifact retained.",
+    "</text>",
+    "</svg>",
+  ].join("");
+  const withoutHash: Omit<RenderManifest, "contentHash"> = {
+    renderManifestId: input.renderManifestId,
+    artifactId: input.artifact.artifactId,
+    provenance: input.artifact.provenance,
+    environmentOrigin: input.artifact.environmentOrigin,
+    renderer: input.renderer,
+    rendererAuthorizationDecisionId:
+      input.rendererAuthorizationDecisionId,
+    renderOutcome: "failed",
+    fidelity: Object.freeze({
+      status: "unknown",
+      notes: Object.freeze([
+        `render failed: ${safeMessage}`,
+      ]),
+    }),
+    pageCount: input.artifact.pageCount,
+    renderPolicy: {
+      fontPack: "unavailable",
+      resolution: "unavailable",
+      colorProfile: "unavailable",
+      animationPolicy: "first_frame",
+      externalAssetPolicy: "network_disabled",
+    },
+    slides: Object.freeze([]),
+    contactSheet: Object.freeze({
+      filename: "render-failed.svg",
+      mimeType: "image/svg+xml",
+      content: contactSheet,
+      contentHash: sha256(new TextEncoder().encode(contactSheet)),
+    }),
+  };
+  return Object.freeze({
+    ...withoutHash,
+    contentHash: calculateRenderManifestHash(
+      input.artifact.contentHash,
       withoutHash,
     ),
   });

@@ -553,7 +553,9 @@ export function createArtifactVault({
       if (
         renderManifest.artifactId !== artifact.artifactId ||
         renderManifest.pageCount !== artifact.pageCount ||
-        renderManifest.slides.length !== artifact.pageCount
+        (renderManifest.renderOutcome === "failed"
+          ? renderManifest.slides.length !== 0
+          : renderManifest.slides.length !== artifact.pageCount)
       ) {
         throw new Error("Artifact package contains inconsistent lineage");
       }
