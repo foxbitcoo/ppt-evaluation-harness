@@ -502,6 +502,36 @@ function snapshotProductSelections(
   );
 }
 
+function adapterImplementationDigest(
+  adapter: ProductAdapterPort,
+): `sha256:${string}` {
+  const prototype = Object.getPrototypeOf(adapter) as object | null;
+  const prototypeMethods =
+    prototype === null
+      ? []
+      : Object.getOwnPropertyNames(prototype)
+          .filter((name) => name !== "constructor")
+          .map((name) => {
+            const value = Reflect.get(prototype, name) as unknown;
+            return typeof value === "function"
+              ? { name, source: value.toString() }
+              : null;
+          })
+          .filter(
+            (
+              entry,
+            ): entry is { readonly name: string; readonly source: string } =>
+              entry !== null,
+          );
+  return sha256Bytes(
+    canonicalJsonBytes({
+      constructorSource: adapter.constructor.toString(),
+      executeSource: adapter.execute.toString(),
+      prototypeMethods,
+    }),
+  );
+}
+
 function replayedBakeoffOutcome(
   command: StartBakeoffJobCommand,
   selections: readonly SelectedProductAdapter[],
@@ -585,7 +615,21 @@ function replayedBakeoffOutcome(
       run.specificationReference?.specCommitSha !== specCommitSha ||
       run.specificationReference.versionReferences
         .productPackageContentHash !==
-        sha256Bytes(canonicalJsonBytes(selection.productPackage))
+        sha256Bytes(canonicalJsonBytes(selection.productPackage)) ||
+      run.specificationReference.versionReferences
+        .adapterSpecificationHash !==
+        sha256Bytes(
+          canonicalJsonBytes({
+            packageId: selection.productPackage.packageId,
+            adapterVersion: selection.productPackage.adapterVersion,
+            vendorId: selection.productPackage.vendorId,
+            egressDestination:
+              selection.productPackage.egressDestination,
+            implementationDigest: adapterImplementationDigest(
+              selection.adapter,
+            ),
+          }),
+        )
     ) {
       throw new Error(
         `Bakeoff Job identity conflict: ${source.job.recordId}`,
@@ -1306,13 +1350,14 @@ export function createBakeoffHarness({
   const judgeDestination =
     configuredJudgeDestination ?? MOCK_JUDGE_DESTINATION;
   const securityContextHash = sha256Json({
-    clock: dependencyIdentity(clock),
-    payloadInventory: dependencyIdentity(payloadInventory),
-    tombstones: dependencyIdentity(tombstones),
+    schemaVersion: "bakeoff-security-context-v2",
+    clockId: clock.clockId ?? "trusted-call-boundary-clock-v1",
+    payloadInventoryId: payloadInventory.inventoryId,
+    tombstoneLedgerId: tombstones.ledgerId,
+    authorizationAuditId: egressAudit.auditId,
     rendererDestination,
     judgeDestination,
     projectionDestination: feishu.egressDestination,
-    egressAudit: dependencyIdentity(egressAudit),
   });
   const artifactVault =
     configuredArtifactVault ??
@@ -1422,7 +1467,7 @@ export function createBakeoffHarness({
         RunSpecificationReference
       >(
         await Promise.all(
-          selections.map(async ({ productPackage, runId }) => {
+          selections.map(async ({ adapter, productPackage, runId }) => {
             const reference = await runSpecificationVault.capture({
               jobId: MOCK_SCENARIO.jobId,
               runId,
@@ -1430,6 +1475,8 @@ export function createBakeoffHarness({
               evaluationCase: VOLCANO_EVALUATION_CASE,
               productPackage,
               protocolSnapshot,
+              adapterImplementationDigest:
+                adapterImplementationDigest(adapter),
             });
             return [runId, reference] as const;
           }),
@@ -1710,7 +1757,7 @@ export function createBakeoffHarness({
         targetEnvironment: feishu.targetEnvironment,
         egressDestination: feishu.egressDestination,
       });
-      await writeProjection(stagedProjection);
+      const report = await writeProjection(stagedProjection);
       const projectionBatch = stagedProjection.snapshot();
       const projectionBatchHash = sha256Bytes(
         canonicalJsonBytes(projectionBatch),
@@ -1749,17 +1796,12 @@ export function createBakeoffHarness({
         clock,
       );
       await egressAudit.append(projectionAuthorization);
-      const report = await writeProjection(feishu);
-      if (
-        "snapshot" in feishu &&
-        typeof feishu.snapshot === "function" &&
-        sha256Bytes(canonicalJsonBytes(feishu.snapshot())) !==
-          projectionBatchHash
-      ) {
-        throw new Error(
-          "Operational ledger projection write batch mismatch",
-        );
-      }
+      await tombstones.runIfActive(MOCK_SCENARIO.jobId, () =>
+        feishu.commitAuthorizedSnapshot(
+          projectionBatch,
+          projectionAuthorization,
+        ),
+      );
 
       return {
         job: {

@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -344,11 +343,14 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
   const tombstones = new InMemoryTombstoneLedger();
   const primary = new InMemoryImmutableBlobStore("primary", tombstones);
   const secondary = new InMemoryImmutableBlobStore("secondary", tombstones);
+  const durableJournal = new InMemoryArtifactCaptureJournal();
   let journalUnavailable = true;
   const observedAttemptIds: string[] = [];
   const captureJournal: ArtifactCaptureJournalPort = {
+    beginAttempt: (input) => durableJournal.beginAttempt(input),
     async append(event) {
       observedAttemptIds.push(event.captureAttemptId);
+      await durableJournal.append(event);
       if (
         journalUnavailable &&
         (
@@ -360,7 +362,7 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
       }
     },
   };
-  const vault = createArtifactVault({
+  const createVault = () => createArtifactVault({
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
@@ -369,7 +371,7 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
   });
 
   await assert.rejects(
-    vault.capture({
+    createVault().capture({
       jobId: "job-journal-failure",
       dataClassification: "public_or_synthetic",
       sourceOwner: "evaluation-owner",
@@ -381,7 +383,7 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
   assert.deepEqual(primary.listKeys(), []);
   assert.deepEqual(secondary.listKeys(), []);
   journalUnavailable = false;
-  const retried = await vault.capture({
+  const retried = await createVault().capture({
     jobId: "job-journal-failure",
     dataClassification: "public_or_synthetic",
     sourceOwner: "evaluation-owner",
@@ -393,6 +395,48 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
     [...new Set(observedAttemptIds)].map((id) => id.split(":").at(-1)),
     ["1", "2"],
   );
+});
+
+test("ArtifactVault deletes a blob committed before a lost upload acknowledgement", async () => {
+  const tombstones = new InMemoryTombstoneLedger();
+  const primaryDelegate = new InMemoryImmutableBlobStore(
+    "primary",
+    tombstones,
+  );
+  const secondary = new InMemoryImmutableBlobStore("secondary", tombstones);
+  let loseAcknowledgement = true;
+  const primary: ImmutableBlobStorePort = {
+    storeId: primaryDelegate.storeId,
+    egressDestination: primaryDelegate.egressDestination,
+    async putImmutable(key, content, context) {
+      await primaryDelegate.putImmutable(key, content, context);
+      if (loseAcknowledgement) {
+        loseAcknowledgement = false;
+        throw new Error("upload acknowledgement lost");
+      }
+    },
+    read: (key) => primaryDelegate.read(key),
+    delete: (key) => primaryDelegate.delete(key),
+  };
+
+  await assert.rejects(
+    createArtifactVault({
+      primary,
+      secondary,
+      egressAuthorization: APPROVED_EGRESS,
+      captureJournal: new InMemoryArtifactCaptureJournal(),
+      payloadInventory: new InMemoryPayloadInventory(tombstones),
+    }).capture({
+      jobId: "job-lost-ack",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
+      artifact: fixtureArtifact(),
+      renderManifest: fixtureRenderManifest(),
+    }),
+    /acknowledgement lost/i,
+  );
+  assert.deepEqual(primaryDelegate.listKeys(), []);
+  assert.deepEqual(secondary.listKeys(), []);
 });
 
 test("Bakeoff fails closed before a vendor call when its call-boundary egress authorization is denied", async () => {
@@ -463,8 +507,9 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
   const primary = new InMemoryImmutableBlobStore("primary");
   const secondary = new InMemoryImmutableBlobStore("secondary");
   const recovery = new InMemoryImmutableBlobStore("recovery");
+  const tombstones = new InMemoryTombstoneLedger();
   const payloadInventory = new InMemoryPayloadInventory(
-    new InMemoryTombstoneLedger(),
+    tombstones,
   );
   const purposes: string[] = [];
   const authorizationRequests: Parameters<
@@ -594,6 +639,45 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
       )?.request.payloadHash,
     projectionRequest.payloadHash,
   );
+  const replayed = await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockWpsProductAdapter()],
+    egressAuthorization: authorization,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+    artifactVault,
+    runSpecificationVault,
+    payloadInventory: new InMemoryPayloadInventory(
+      new InMemoryTombstoneLedger(),
+    ),
+    tombstones: new InMemoryTombstoneLedger(),
+    specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  assert.equal(replayed.job.status, "completed");
+  const changedAdapterDelegate = new MockWpsProductAdapter();
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [
+        {
+          productPackage: changedAdapterDelegate.productPackage,
+          execute: (command) => changedAdapterDelegate.execute(command),
+        },
+      ],
+      egressAuthorization: authorization,
+      egressAudit,
+      artifactVault,
+      runSpecificationVault,
+      payloadInventory,
+      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /identity conflict/i,
+  );
   await assert.rejects(
     createBakeoffHarness({
       feishu,
@@ -656,14 +740,122 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         canonicalJsonBytes(specification.estimatorSnapshot),
       ),
       runnerCode: sha256Bytes(
-        readFileSync(new URL("../src/bakeoff.ts", import.meta.url)),
+        canonicalJsonBytes(specification.runnerCodeEvidence.files),
       ),
-      runnerImage: sha256Bytes(readFileSync(process.execPath)),
+      runnerImage: sha256Bytes(
+        canonicalJsonBytes(
+          specification.runnerImageEvidence.runtimePackageManifest,
+        ),
+      ),
       environment: sha256Bytes(
         canonicalJsonBytes(specification.environmentEvidence),
       ),
     },
   );
+  assert.ok(
+    [
+      "src/artifact-vault.ts",
+      "src/bakeoff.ts",
+      "src/ledger-recovery.ts",
+      "src/retention.ts",
+      "package-lock.json",
+    ].every((path) =>
+      specification.runnerCodeEvidence.files.some(
+        (entry) => entry.path === path,
+      ),
+    ),
+  );
+  assert.match(
+    specification.adapterSpecification.implementationDigest,
+    /^sha256:[a-f0-9]{64}$/,
+  );
+});
+
+test("Feishu projection commits one authorized canonical batch without rewriting unrelated history", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await feishu.createReport({
+    reportId: "unrelated-report",
+    provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    title: "Unrelated",
+    jobId: "unrelated-job",
+    runIds: [],
+    artifactIds: [],
+    claimLevel: "case_sample",
+    markdown: "unrelated",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.equal(outcome.job.status, "completed");
+  assert.deepEqual(
+    feishu.snapshot().reports.map(({ reportId }) => reportId).sort(),
+    ["MOCK-report-volcano-v1", "unrelated-report"],
+  );
+});
+
+test("a tombstone racing a long vendor run prevents the final Feishu projection from resurrecting payloads", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let releaseVendor = () => {};
+  let signalStarted = () => {};
+  const started = new Promise<void>((resolve) => {
+    signalStarted = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseVendor = resolve;
+  });
+  const adapter: ProductAdapterPort = {
+    productPackage: delegate.productPackage,
+    async execute(command) {
+      signalStarted();
+      await release;
+      return delegate.execute(command);
+    },
+  };
+  const tombstones = new InMemoryTombstoneLedger();
+  const inventory = new InMemoryPayloadInventory(tombstones);
+  const feishu = new InMemoryFeishuProjection();
+  const pending = createBakeoffHarness({
+    feishu,
+    productAdapters: [adapter],
+    egressAuthorization: APPROVED_EGRESS,
+    tombstones,
+    payloadInventory: inventory,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  await started;
+  await tombstones.append({
+    schemaVersion: "retention-tombstone-v1",
+    tombstoneId: "tombstone-racing-job",
+    jobId: "MOCK-job-volcano-v1",
+    subjectIds: [],
+    expiredAt: "2026-01-01T00:00:00.000Z",
+    payloadLocations: await inventory.list("MOCK-job-volcano-v1"),
+  });
+  releaseVendor();
+
+  await assert.rejects(pending, /tombstoned/i);
+  assert.deepEqual(feishu.snapshot(), {
+    caseTable: [],
+    runRecordTable: [],
+    capturedArtifactTable: [],
+    artifactScoreTable: [],
+    adjudicationEventTable: [],
+    reviewEventTable: [],
+    gapCardWorkflowEventTable: [],
+    githubIssueDeliveryReservationTable: [],
+    githubIssueLinkEventTable: [],
+    productGapCardTable: [],
+    reports: [],
+  });
 });
 
 test("a recovery rehearsal rebuilds a complete hash-validated Job from the external ledger export, Run specs, and secondary Artifact copy only", async () => {
@@ -709,6 +901,10 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     reason: "Recovery export must preserve append-only adjudication history.",
     priorAdjudicationEventId: null,
   });
+  let recoveryNow = "2026-01-01T00:19:00.000Z";
+  const recoveryClock: ClockPort = {
+    now: () => recoveryNow,
+  };
   const recoveryService = createOperationalLedgerRecoveryService({
     recoveryStore: recovery,
     artifactVault,
@@ -716,6 +912,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     tombstones,
     egressAuthorization: APPROVED_EGRESS,
     payloadInventory,
+    clock: recoveryClock,
   });
   const snapshot = feishu.snapshot();
   const adjudication = snapshot.adjudicationEventTable[0];
@@ -812,6 +1009,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       tombstones,
       egressAuthorization: APPROVED_EGRESS,
       payloadInventory,
+      clock: recoveryClock,
     }).rehearse({
       exportReference: exported,
       rehearsedAt: "2026-01-01T00:19:00.000Z",
@@ -819,6 +1017,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     /run specification.*lineage.*case/i,
   );
 
+  recoveryNow = "2026-01-01T00:20:00.000Z";
   const rehearsal = await recoveryService.rehearse({
     exportReference: exported,
     rehearsedAt: "2026-01-01T00:20:00.000Z",
@@ -861,6 +1060,17 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       ],
     },
   );
+  await assert.rejects(
+    recoveryService.rehearse({
+      exportReference: {
+        ...exported,
+        retentionExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+      rehearsedAt: recoveryNow,
+    }),
+    /export lineage mismatch/i,
+  );
+  recoveryNow = exported.retentionExpiresAt;
   await assert.rejects(
     recoveryService.rehearse({
       exportReference: exported,
@@ -925,8 +1135,10 @@ test("retention expiry tombstones and deletes every controlled payload class whi
   const vendorRun = feishu
     .snapshot()
     .runRecordTable.find(({ recordType }) => recordType === "vendor_run");
+  const expiredCapture = feishu.snapshot().capturedArtifactTable[0];
   assert.ok(vendorRun?.artifactPackageManifest);
   assert.ok(vendorRun.specificationReference);
+  assert.ok(expiredCapture);
   const quarantineContent = new TextEncoder().encode("quarantine-redaction");
   const quarantineHash =
     "sha256:6522847fd9c23d726ae26793b8ba71fefab67ca748608141e2b80236d35a4cf8" as const;
@@ -988,8 +1200,23 @@ test("retention expiry tombstones and deletes every controlled payload class whi
       deletionEvidence: 75,
     },
   );
-  assert.equal(feishu.snapshot().capturedArtifactTable.length, 0);
-  assert.equal(feishu.snapshot().artifactScoreTable.length, 0);
+  assert.deepEqual(feishu.snapshot(), {
+    caseTable: [],
+    runRecordTable: [],
+    capturedArtifactTable: [],
+    artifactScoreTable: [],
+    adjudicationEventTable: [],
+    reviewEventTable: [],
+    gapCardWorkflowEventTable: [],
+    githubIssueDeliveryReservationTable: [],
+    githubIssueLinkEventTable: [],
+    productGapCardTable: [],
+    reports: [],
+  });
+  await assert.rejects(
+    feishu.appendCapturedArtifact(expiredCapture),
+    /tombstoned.*projection write/i,
+  );
   await assert.rejects(
     createBakeoffHarness({
       feishu,

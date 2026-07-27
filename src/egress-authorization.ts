@@ -47,10 +47,12 @@ export type EgressAuthorizationRequestInput = Omit<
 >;
 
 export interface ClockPort {
+  readonly clockId?: string;
   now(): string;
 }
 
 export const SYSTEM_CLOCK: ClockPort = Object.freeze({
+  clockId: "system-clock",
   now: () => new Date().toISOString(),
 });
 
@@ -84,13 +86,19 @@ export interface EgressAuthorizationPort {
 }
 
 export interface EgressAuthorizationAuditPort {
+  readonly auditId: string;
   append(decision: ApprovedEgressAuthorization): Promise<void>;
 }
 
 export class InMemoryEgressAuthorizationAudit
   implements EgressAuthorizationAuditPort
 {
+  readonly auditId: string;
   readonly #decisions: ApprovedEgressAuthorization[] = [];
+
+  constructor(auditId = "in-memory-egress-authorization-audit") {
+    this.auditId = auditId;
+  }
 
   async append(decision: ApprovedEgressAuthorization): Promise<void> {
     const existing = this.#decisions.find(

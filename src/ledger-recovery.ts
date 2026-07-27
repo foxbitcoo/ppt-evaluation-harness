@@ -24,9 +24,15 @@ import type {
   RetentionPayloadLocation,
 } from "./artifact-vault.ts";
 import type { FeishuProjectionSnapshot } from "./feishu.ts";
-import type { EgressAuthorizationPort } from "./egress-authorization.ts";
-import type { ApprovedEgressAuthorization } from "./egress-authorization.ts";
-import { requireEgressAuthorization } from "./egress-authorization.ts";
+import type {
+  ApprovedEgressAuthorization,
+  ClockPort,
+  EgressAuthorizationPort,
+} from "./egress-authorization.ts";
+import {
+  requireEgressAuthorization,
+  SYSTEM_CLOCK,
+} from "./egress-authorization.ts";
 import type {
   RunSpecificationBundle,
   RunSpecificationVault,
@@ -170,6 +176,7 @@ export interface OperationalLedgerRecoveryServiceDependencies {
   readonly tombstones: TombstoneLedgerPort;
   readonly egressAuthorization?: EgressAuthorizationPort;
   readonly payloadInventory: PayloadInventoryPort;
+  readonly clock?: ClockPort;
 }
 
 function uniqueStableIds(ids: readonly string[], label: string): void {
@@ -545,6 +552,7 @@ export function createOperationalLedgerRecoveryService({
   tombstones,
   egressAuthorization,
   payloadInventory,
+  clock = SYSTEM_CLOCK,
 }: OperationalLedgerRecoveryServiceDependencies): OperationalLedgerRecoveryService {
   return {
     async exportLedger(command) {
@@ -691,25 +699,18 @@ export function createOperationalLedgerRecoveryService({
     },
 
     async rehearse({ exportReference, rehearsedAt }) {
-      const tombstone = await tombstones.findByJobId(
-        exportReference.jobId,
-      );
-      if (tombstone !== null) {
+      if (
+        (await tombstones.findByJobId(exportReference.jobId)) !== null
+      ) {
         throw new Error(
           `Recovery blocked: Job ${exportReference.jobId} is tombstoned and cannot be resurrected`,
         );
       }
-      const rehearsalTime = Date.parse(rehearsedAt);
-      const retentionExpiry = Date.parse(
-        exportReference.retentionExpiresAt,
-      );
-      if (
-        !Number.isFinite(rehearsalTime) ||
-        !Number.isFinite(retentionExpiry) ||
-        rehearsalTime >= retentionExpiry
-      ) {
+      return tombstones.runIfActive(exportReference.jobId, async () => {
+      const trustedRehearsedAt = clock.now();
+      if (rehearsedAt !== trustedRehearsedAt) {
         throw new Error(
-          `Recovery blocked: export ${exportReference.exportId} is expired`,
+          "Recovery rehearsal timestamp does not match the trusted clock",
         );
       }
       if (exportReference.storeId !== recoveryStore.storeId) {
@@ -749,6 +750,10 @@ export function createOperationalLedgerRecoveryService({
         ledger.exportId !== exportReference.exportId ||
         ledger.jobId !== exportReference.jobId ||
         ledger.checkpoint !== exportReference.checkpoint ||
+        ledger.createdAt !== exportReference.createdAt ||
+        ledger.encryption !== exportReference.encryption ||
+        ledger.retentionExpiresAt !==
+          exportReference.retentionExpiresAt ||
         ledger.recordCount !== exportReference.recordCount ||
         ledger.recordCount !==
           ledger.cases.length +
@@ -769,6 +774,17 @@ export function createOperationalLedgerRecoveryService({
           "Operational ledger recovery export lineage mismatch",
         );
       }
+      const rehearsalTime = Date.parse(trustedRehearsedAt);
+      const retentionExpiry = Date.parse(ledger.retentionExpiresAt);
+      if (
+        !Number.isFinite(rehearsalTime) ||
+        !Number.isFinite(retentionExpiry) ||
+        rehearsalTime >= retentionExpiry
+      ) {
+        throw new Error(
+          `Recovery blocked: export ${exportReference.exportId} is expired`,
+        );
+      }
       const job = ledger.runRecords.find(
         ({ recordType }) => recordType === "bakeoff_job",
       );
@@ -778,6 +794,43 @@ export function createOperationalLedgerRecoveryService({
         job.selectedRunIds.length === 0
       ) {
         throw new Error("Recovered Bakeoff Job is incomplete");
+      }
+      const evaluationCase = ledger.cases.find(
+        ({ caseId }) => caseId === job.caseId,
+      );
+      const authorizationRequest =
+        exportReference.egressAuthorization.request;
+      if (
+        evaluationCase === undefined ||
+        authorizationRequest.requestId !==
+          `operational-ledger-export:${exportReference.exportId}:${exportReference.contentHash}` ||
+        authorizationRequest.jobId !== exportReference.jobId ||
+        authorizationRequest.runId !== null ||
+        authorizationRequest.attemptId !== null ||
+        authorizationRequest.dataClassification !==
+          evaluationCase.dataClassification ||
+        authorizationRequest.sourceOwner !== evaluationCase.sourceOwner ||
+        authorizationRequest.targetKind !== "storage" ||
+        !isDeepStrictEqual(authorizationRequest.contentFields, [
+          "cases",
+          "run_records",
+          "attempt_events",
+          "artifact_manifests",
+          "scorecards",
+          "adjudication_history",
+          "review_history",
+          "gap_card_workflow_history",
+          "github_issue_delivery_reservations",
+          "github_issue_link_history",
+          "comparisons",
+          "product_gap_cards",
+          "reports",
+        ]) ||
+        authorizationRequest.requiredRedactions.length !== 0
+      ) {
+        throw new Error(
+          "Operational ledger recovery export authorization mismatch",
+        );
       }
       const vendorRuns = ledger.runRecords.filter(
         ({ recordType }) => recordType === "vendor_run",
@@ -952,7 +1005,7 @@ export function createOperationalLedgerRecoveryService({
         rehearsalId: `recovery-rehearsal:${exportReference.exportId}`,
         complete: true,
         jobId: ledger.jobId,
-        rehearsedAt,
+        rehearsedAt: trustedRehearsedAt,
         recordCount: ledger.recordCount,
         recoveredJob: {
           job,
@@ -980,6 +1033,7 @@ export function createOperationalLedgerRecoveryService({
           "secondary_artifact_copy",
         ],
       };
+      });
     },
 
     retentionLocation(reference) {

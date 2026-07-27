@@ -21,6 +21,7 @@ export interface ImmutableBlobWriteContext {
 
 export interface JobTombstoneLookupPort {
   findByJobId(jobId: string): Promise<unknown | null>;
+  runIfActive<T>(jobId: string, operation: () => Promise<T>): Promise<T>;
 }
 
 export interface ImmutableBlobStorePort {
@@ -52,6 +53,11 @@ export interface ArtifactCaptureJournalEvent {
 }
 
 export interface ArtifactCaptureJournalPort {
+  beginAttempt(input: {
+    readonly jobId: string;
+    readonly artifactId: string;
+    readonly detail: string;
+  }): Promise<string>;
   append(event: ArtifactCaptureJournalEvent): Promise<void>;
 }
 
@@ -59,6 +65,30 @@ export class InMemoryArtifactCaptureJournal
   implements ArtifactCaptureJournalPort
 {
   readonly #events: ArtifactCaptureJournalEvent[] = [];
+  readonly #attemptCounts = new Map<string, number>();
+
+  async beginAttempt(input: {
+    readonly jobId: string;
+    readonly artifactId: string;
+    readonly detail: string;
+  }): Promise<string> {
+    const identity = `${input.jobId}\u0000${input.artifactId}`;
+    const attemptNumber = (this.#attemptCounts.get(identity) ?? 0) + 1;
+    this.#attemptCounts.set(identity, attemptNumber);
+    const captureAttemptId =
+      `artifact-capture-attempt:${input.jobId}:${input.artifactId}:${attemptNumber}`;
+    await this.append({
+      eventId: `${captureAttemptId}:started`,
+      captureAttemptId,
+      jobId: input.jobId,
+      artifactId: input.artifactId,
+      eventType: "started",
+      storeId: null,
+      key: null,
+      detail: input.detail,
+    });
+    return captureAttemptId;
+  }
 
   async append(event: ArtifactCaptureJournalEvent): Promise<void> {
     const existing = this.#events.find(
@@ -123,14 +153,7 @@ export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
         `Immutable blob write context hash mismatch: ${this.storeId}/${key}`,
       );
     }
-    if (
-      this.tombstones !== undefined &&
-      (await this.tombstones.findByJobId(context.jobId)) !== null
-    ) {
-      throw new Error(
-        `Tombstoned Job ${context.jobId} blocked immutable blob write`,
-      );
-    }
+    const write = async () => {
     const existing = this.#blobs.get(key);
     if (existing !== undefined) {
       if (!isDeepStrictEqual(existing, content)) {
@@ -139,6 +162,25 @@ export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
       return;
     }
     this.#blobs.set(key, Uint8Array.from(content));
+    };
+    if (this.tombstones === undefined) {
+      await write();
+      return;
+    }
+    try {
+      await this.tombstones.runIfActive(context.jobId, write);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /Tombstoned Job/i.test(error.message)
+      ) {
+        throw new Error(
+          `Tombstoned Job ${context.jobId} blocked immutable blob write`,
+          { cause: error },
+        );
+      }
+      throw error;
+    }
   }
 
   async read(key: string): Promise<Uint8Array | null> {
@@ -344,7 +386,6 @@ export function createArtifactVault({
   if (primary.storeId === secondary.storeId) {
     throw new Error("ArtifactVault requires two distinct controlled stores");
   }
-  const attemptCounts = new Map<string, number>();
   return {
     async capture(command) {
       const { artifact, renderManifest } = command;
@@ -531,19 +572,9 @@ export function createArtifactVault({
           copyRole: planned.copyRole,
         });
       }
-      const attemptIdentity = `${command.jobId}\u0000${artifact.artifactId}`;
-      const attemptNumber = (attemptCounts.get(attemptIdentity) ?? 0) + 1;
-      attemptCounts.set(attemptIdentity, attemptNumber);
-      const captureAttemptId =
-        `artifact-capture-attempt:${command.jobId}:${artifact.artifactId}:${attemptNumber}`;
-      await captureJournal.append({
-        eventId: `${captureAttemptId}:started`,
-        captureAttemptId,
+      const captureAttemptId = await captureJournal.beginAttempt({
         jobId: command.jobId,
         artifactId: artifact.artifactId,
-        eventType: "started",
-        storeId: null,
-        key: null,
         detail: `planned:${writePlan.length}`,
       });
       await payloadInventory.register(command.jobId, payloadLocations);
@@ -555,11 +586,11 @@ export function createArtifactVault({
             `${planned.store.storeId}\u0000${planned.key}`;
           const before = await planned.store.read(planned.key);
           if (before === null) {
+            createdLocations.add(locationIdentity);
             await planned.store.putImmutable(planned.key, planned.content, {
               jobId: command.jobId,
               contentHash: planned.contentHash,
             });
-            createdLocations.add(locationIdentity);
           } else if (sha256(before) !== planned.contentHash) {
             throw new Error(
               `Immutable blob conflict: ${planned.store.storeId}/${planned.key}`,
