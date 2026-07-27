@@ -126,10 +126,14 @@ test("the Feishu projections preserve stable Case, Run, Artifact, score, and pro
       .filter((key) => key.endsWith("Table"))
       .sort(),
     [
+      "adjudicationEventTable",
       "artifactScoreTable",
       "capturedArtifactTable",
       "caseTable",
+      "gapCardWorkflowEventTable",
+      "githubIssueLinkEventTable",
       "productGapCardTable",
+      "reviewEventTable",
       "runRecordTable",
     ],
   );

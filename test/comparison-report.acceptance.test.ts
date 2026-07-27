@@ -240,6 +240,12 @@ test("dynamic comparison preserves NOT_ASSESSABLE instead of inventing factual s
     difference: null,
     leftEvidencePages: [],
     rightEvidencePages: [],
+    leftReviewState: "model_not_reviewed",
+    rightReviewState: "model_not_reviewed",
+    leftScoreSource: "model_original",
+    rightScoreSource: "model_original",
+    leftAdjudicationEventId: null,
+    rightAdjudicationEventId: null,
   });
   assert.ok(
     outcome.gapCards.every(

@@ -273,10 +273,14 @@ test("the Feishu domain tables keep Artifact capture independent from scoring an
       .filter((key) => key.endsWith("Table"))
       .sort(),
     [
+      "adjudicationEventTable",
       "artifactScoreTable",
       "capturedArtifactTable",
       "caseTable",
+      "gapCardWorkflowEventTable",
+      "githubIssueLinkEventTable",
       "productGapCardTable",
+      "reviewEventTable",
       "runRecordTable",
     ],
   );
