@@ -15,6 +15,7 @@ export {
 export {
   InMemoryFeishuProjection,
   type ArtifactScoreTablePort,
+  type CapturedArtifactTablePort,
   type ComparisonTablePort,
   type EvaluationCaseTablePort,
   type FeishuProjectionPort,
@@ -46,6 +47,7 @@ export type {
   Artifact,
   ArtifactScorecard,
   ArtifactScoreTableRecord,
+  CapturedArtifactTableRecord,
   BakeoffJobOutcome,
   BakeoffJobSummary,
   BakeoffProtocolSnapshot,

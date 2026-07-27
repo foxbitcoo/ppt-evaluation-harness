@@ -9,6 +9,7 @@ import {
   MockQwenProductAdapter,
   MockWpsProductAdapter,
   OpenAiResponsesJudgeAdapter,
+  PRODUCTION_ENVIRONMENT_ORIGIN,
   VOLCANO_EVALUATION_CASE,
   createBakeoffHarness,
   resolveReferencePackForCase,
@@ -16,7 +17,9 @@ import {
   type JudgeEgressAuthorizationRequest,
   type OpenAiResponsesJudgeAdapterOptions,
   type OpenAiResponsesTransport,
+  type ProductAdapterPort,
 } from "../src/index.ts";
+import { scoreRenderedArtifact } from "../src/mock-score.ts";
 
 const SIX_DIMENSIONS = [
   "requirement_understanding_and_content_coverage",
@@ -978,6 +981,65 @@ test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the
   );
 });
 
+test("Bakeoff rejects a supplied Judge scorecard without OpenAI lineage", async () => {
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu: new InMemoryFeishuProjection(),
+      productAdapter: new MockWpsProductAdapter(),
+      judge: {
+        async score(command) {
+          return scoreRenderedArtifact(
+            command.artifact,
+            command.renderManifest,
+            {
+              jobId: command.jobId,
+              runId: command.runId,
+              scorecardId: command.scorecardId,
+              referencePack: command.referencePack,
+            },
+          );
+        },
+      },
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_EVALUATION_CASE.caseId,
+    }),
+    /non-OpenAI Scorecard lineage/i,
+  );
+});
+
+test("Bakeoff rejects an Artifact with the wrong environment origin before Judge egress", async () => {
+  const wps = new MockWpsProductAdapter();
+  let judgeCalls = 0;
+  const wrongOriginAdapter: ProductAdapterPort = {
+    productPackage: wps.productPackage,
+    async execute(command) {
+      return {
+        ...(await wps.execute(command)),
+        environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
+      };
+    },
+  };
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu: new InMemoryFeishuProjection(),
+      productAdapter: wrongOriginAdapter,
+      judge: {
+        async score() {
+          judgeCalls += 1;
+          throw new Error("Judge must not be reached");
+        },
+      },
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_EVALUATION_CASE.caseId,
+    }),
+    /environment origin/i,
+  );
+  assert.equal(judgeCalls, 0);
+});
+
 test("Bakeoff waits for sibling Judge calls and retains the shared pack when one Judge branch fails", async () => {
   const referencePackStore = new InMemoryReferencePackStore();
   const feishu = new InMemoryFeishuProjection();
@@ -1046,8 +1108,17 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
 
   assert.equal(observedRuns.length, 3);
   assert.equal(outcome.job.status, "partial");
+  assert.equal(outcome.artifact?.artifactId, "MOCK-artifact-wps-volcano-v1");
+  assert.equal(outcome.scorecard, null);
+  assert.equal(outcome.artifacts.length, 3);
+  assert.equal(outcome.renderManifests.length, 3);
   assert.equal(outcome.scorecards.length, 2);
+  assert.equal(feishu.snapshot().capturedArtifactTable.length, 3);
   assert.equal(feishu.snapshot().artifactScoreTable.length, 2);
+  assert.match(
+    outcome.report.markdown,
+    /MOCK-artifact-wps-volcano-v1[\s\S]*Judge：失败/,
+  );
   const failedJudgeRun = feishu
     .snapshot()
     .runRecordTable.find(
@@ -1087,6 +1158,9 @@ test("Bakeoff fails closed without persisting scores and retains the pack involv
   });
 
   assert.equal(outcome.job.status, "failed");
+  assert.equal(outcome.artifacts.length, 1);
+  assert.equal(outcome.renderManifests.length, 1);
+  assert.equal(feishu.snapshot().capturedArtifactTable.length, 1);
   assert.deepEqual(feishu.snapshot().artifactScoreTable, []);
   assert.equal(referencePackStore.snapshot().temporary.length, 0);
   assert.equal(referencePackStore.snapshot().used.length, 1);

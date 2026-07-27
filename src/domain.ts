@@ -304,6 +304,18 @@ export interface ArtifactScoreTableRecord {
   readonly scorecard: ArtifactScorecard;
 }
 
+export interface CapturedArtifactTableRecord {
+  readonly recordId: string;
+  readonly caseId: string;
+  readonly jobId: string;
+  readonly runId: string;
+  readonly artifactId: string;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+  readonly artifact: Artifact;
+  readonly renderManifest: RenderManifest;
+}
+
 export interface ComparisonRecord {
   readonly recordType: "comparison";
   readonly comparisonId: string;

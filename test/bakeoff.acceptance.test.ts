@@ -259,7 +259,7 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
   assert.deepEqual(artifactScoreRecord?.scorecard, firstOutcome.scorecard);
 });
 
-test("the four Feishu domain tables expose the completed MOCK lineage and the job links a minimal report", async () => {
+test("the Feishu domain tables keep Artifact capture independent from scoring and link a minimal report", async () => {
   const feishu = new InMemoryFeishuProjection();
   const outcome = await createFixedMockHarness(feishu).startBakeoffJob({
     environment: "test",
@@ -274,6 +274,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
       .sort(),
     [
       "artifactScoreTable",
+      "capturedArtifactTable",
       "caseTable",
       "productGapCardTable",
       "runRecordTable",
@@ -281,6 +282,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
   );
   assert.equal(projection.caseTable.length, 1);
   assert.equal(projection.runRecordTable.length, 3);
+  assert.equal(projection.capturedArtifactTable.length, 1);
   assert.equal(projection.artifactScoreTable.length, 1);
   assert.deepEqual(projection.productGapCardTable, []);
 

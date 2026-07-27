@@ -290,6 +290,7 @@ function attemptRecord(input: {
 async function executeVendor(
   selection: SelectedProductAdapter,
   caseId: string,
+  targetEnvironment: "test" | "production",
   attemptDeadline: AttemptDeadlinePort,
   jobDeadlineAtEpochMs: number,
   referencePack: ReferencePack | null,
@@ -439,6 +440,11 @@ async function executeVendor(
   if (artifact.runId !== runId || artifact.provenance !== "MOCK") {
     throw new Error("Test Bakeoff Job requires MOCK Artifact lineage");
   }
+  assertEnvironmentOriginAllowed(
+    artifact.environmentOrigin,
+    targetEnvironment,
+    `Artifact ${artifact.artifactId}`,
+  );
   const renderManifest = renderStaticArtifact(
     artifact,
     scenario?.renderManifestId ?? runId.replace(/^MOCK-run-/, "MOCK-render-"),
@@ -501,9 +507,14 @@ async function executeVendor(
       scorecard.evaluationInputManifest.renderManifestHash !==
         renderManifest.contentHash ||
       scorecard.evaluationInputManifest.referencePackHash !==
-        (referencePack?.contentHash ?? null))
+        (referencePack?.contentHash ?? null) ||
+      (judge !== undefined &&
+        (scorecard.judgeLineage === null ||
+          scorecard.judgeLineage.provider !== "openai")))
   ) {
-    throw new Error("Judge returned an inconsistent Scorecard lineage");
+    throw new Error(
+      "Judge returned an inconsistent or non-OpenAI Scorecard lineage",
+    );
   }
   return {
     productPackage,
@@ -614,6 +625,7 @@ export function createBakeoffHarness({
           executeVendor(
             selection,
             command.caseId,
+            command.environment,
             attemptDeadline,
             jobDeadlineAtEpochMs,
             referencePackSelection.pack,
@@ -666,6 +678,14 @@ export function createBakeoffHarness({
           result.renderManifest !== null &&
           result.scorecard !== null,
       );
+      const captured = results.filter(
+        (
+          result,
+        ): result is CapturedVendorResult & {
+          readonly artifact: Artifact;
+          readonly renderManifest: RenderManifest;
+        } => result.artifact !== null && result.renderManifest !== null,
+      );
       const jobStatus = results.some(
         ({ status }) => status === "waiting_for_human",
       )
@@ -675,7 +695,6 @@ export function createBakeoffHarness({
           : successful.length === 0
             ? "failed"
             : "partial";
-      const firstSuccessful = successful[0];
       await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
       await feishu.appendRunRecord({
         recordId: MOCK_SCENARIO.jobId,
@@ -758,6 +777,19 @@ export function createBakeoffHarness({
         for (const attempt of result.attemptRecords) {
           await feishu.appendRunRecord(attempt);
         }
+        if (result.artifact !== null && result.renderManifest !== null) {
+          await feishu.appendCapturedArtifact({
+            recordId: `artifact-capture:${result.artifact.artifactId}`,
+            caseId: command.caseId,
+            jobId: MOCK_SCENARIO.jobId,
+            runId: result.runId,
+            artifactId: result.artifact.artifactId,
+            provenance: "MOCK",
+            environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+            artifact: result.artifact,
+            renderManifest: result.renderManifest,
+          });
+        }
         if (
           result.artifact !== null &&
           result.renderManifest !== null &&
@@ -819,6 +851,7 @@ export function createBakeoffHarness({
             stateReason: result.terminalReason,
             artifact: result.artifact,
             scorecard: result.scorecard,
+            judgeFailure: result.judgeFailure ?? null,
           })),
         ),
       );
@@ -833,11 +866,11 @@ export function createBakeoffHarness({
           provenance: "MOCK",
           environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
         },
-        artifact: firstSuccessful?.artifact ?? null,
-        renderManifest: firstSuccessful?.renderManifest ?? null,
-        scorecard: firstSuccessful?.scorecard ?? null,
-        artifacts: successful.map(({ artifact }) => artifact),
-        renderManifests: successful.map(({ renderManifest }) => renderManifest),
+        artifact: captured[0]?.artifact ?? null,
+        renderManifest: captured[0]?.renderManifest ?? null,
+        scorecard: captured[0]?.scorecard ?? null,
+        artifacts: captured.map(({ artifact }) => artifact),
+        renderManifests: captured.map(({ renderManifest }) => renderManifest),
         scorecards: successful.map(({ scorecard }) => scorecard),
         report,
       };

@@ -3,6 +3,7 @@ import type {
   ArtifactScorecard,
   RunStatus,
   FeishuReportDraft,
+  JudgeFailureLineage,
   ScoreDimension,
   TerminalReason,
 } from "./domain.ts";
@@ -16,6 +17,7 @@ export interface MockReportVendorResult {
   readonly stateReason: TerminalReason;
   readonly artifact: Artifact | null;
   readonly scorecard: ArtifactScorecard | null;
+  readonly judgeFailure: JudgeFailureLineage | null;
 }
 
 const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
@@ -37,22 +39,42 @@ export function createMockReportDraft(
     throw new Error("A Mock report requires at least one vendor Run");
   }
   const vendorSections = results
-    .map(({ product, runId, status, stateReason, artifact, scorecard }) => {
-      if (artifact === null || scorecard === null) {
-        return `## ${product}
+    .map(
+      ({
+        product,
+        runId,
+        status,
+        stateReason,
+        artifact,
+        scorecard,
+        judgeFailure,
+      }) => {
+        if (artifact === null) {
+          return `## ${product}
 
 - Run：\`${runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
 - Artifact：无`;
-      }
-      const scoreRows = scorecard.dimensions
-        .map(
-          ({ dimension, value, evidencePages, rationale }) =>
-            `| ${DIMENSION_LABELS[dimension]} | ${value ?? "NOT_ASSESSABLE"} | ${evidencePages.join("、") || "—"} | ${rationale} |`,
-        )
-        .join("\n");
-      return `## ${product}
+        }
+        if (scorecard === null) {
+          return `## ${product}
+
+- Run：\`${runId}\`
+- 状态：\`${status}\`
+- 状态原因：\`${stateReason}\`
+- Artifact：\`${artifact.artifactId}\`
+- Artifact SHA-256：\`${artifact.contentHash}\`
+- 页数：${artifact.pageCount}
+- Judge：失败（\`${judgeFailure?.submissionStatus ?? "unknown"}\`），Artifact 与静态渲染已独立留存`;
+        }
+        const scoreRows = scorecard.dimensions
+          .map(
+            ({ dimension, value, evidencePages, rationale }) =>
+              `| ${DIMENSION_LABELS[dimension]} | ${value ?? "NOT_ASSESSABLE"} | ${evidencePages.join("、") || "—"} | ${rationale} |`,
+          )
+          .join("\n");
+        return `## ${product}
 
 - Run：\`${scorecard.runId}\`
 - 状态：\`${status}\`
@@ -64,7 +86,8 @@ export function createMockReportDraft(
 | 六维评分 | 1–5 整数分 / NOT_ASSESSABLE | 页码证据 | 简短理由 |
 |---|---:|---|---|
 ${scoreRows}`;
-    })
+      },
+    )
     .join("\n\n");
   const markdown = `# MOCK｜火山 Case Sample 三厂商评测报告
 

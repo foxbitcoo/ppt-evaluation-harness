@@ -1,6 +1,7 @@
 import type {
   ArtifactScorecard,
   ArtifactScoreTableRecord,
+  CapturedArtifactTableRecord,
   ComparisonRecord,
   EvaluationCaseRecord,
   FeishuReport,
@@ -26,6 +27,10 @@ export interface ArtifactScoreTablePort {
   appendArtifactScore(record: ArtifactScoreTableRecord): Promise<void>;
 }
 
+export interface CapturedArtifactTablePort {
+  appendCapturedArtifact(record: CapturedArtifactTableRecord): Promise<void>;
+}
+
 export interface ProductGapCardTablePort {
   appendProductGapCard(record: ProductGapCardRecord): Promise<void>;
 }
@@ -41,6 +46,7 @@ export interface ReportDocumentPort {
 export interface FeishuProjectionPort
   extends EvaluationCaseTablePort,
     RunRecordTablePort,
+    CapturedArtifactTablePort,
     ArtifactScoreTablePort,
     ComparisonTablePort,
     ProductGapCardTablePort,
@@ -51,6 +57,7 @@ export interface FeishuProjectionPort
 export interface FeishuProjectionSnapshot {
   readonly caseTable: readonly EvaluationCaseRecord[];
   readonly runRecordTable: readonly RunRecord[];
+  readonly capturedArtifactTable: readonly CapturedArtifactTableRecord[];
   readonly artifactScoreTable: readonly ArtifactScoreTableRecord[];
   readonly productGapCardTable: readonly (
     | ComparisonRecord
@@ -66,11 +73,10 @@ export interface InMemoryFeishuProjectionOptions {
 export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #caseTable: EvaluationCaseRecord[] = [];
   readonly #runRecordTable: RunRecord[] = [];
+  readonly #capturedArtifactTable: CapturedArtifactTableRecord[] = [];
   readonly #artifactScoreTable: ArtifactScoreTableRecord[] = [];
-  readonly #productGapCardTable: (
-    | ComparisonRecord
-    | ProductGapCardRecord
-  )[] = [];
+  readonly #productGapCardTable: (ComparisonRecord | ProductGapCardRecord)[] =
+    [];
   readonly #reports: FeishuReport[] = [];
   readonly targetEnvironment: "test" | "production";
 
@@ -79,11 +85,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {
-    assertEnvironmentOriginAllowed(
-      origin,
-      this.targetEnvironment,
-      entityName,
-    );
+    assertEnvironmentOriginAllowed(origin, this.targetEnvironment, entityName);
   }
 
   async upsertCase(record: EvaluationCaseRecord): Promise<void> {
@@ -108,8 +110,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     reportUrl: string,
   ): Promise<void> {
     const parentIndex = this.#runRecordTable.findIndex(
-      (record) =>
-        record.recordType === "bakeoff_job" && record.jobId === jobId,
+      (record) => record.recordType === "bakeoff_job" && record.jobId === jobId,
     );
     const parentRecord = this.#runRecordTable[parentIndex];
     if (parentIndex === -1 || parentRecord === undefined) {
@@ -136,9 +137,35 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       record.artifactId !== record.scorecard.artifactId ||
       record.renderManifest.artifactId !== record.artifactId
     ) {
-      throw new Error("Artifact score projection contains inconsistent lineage");
+      throw new Error(
+        "Artifact score projection contains inconsistent lineage",
+      );
     }
     this.#artifactScoreTable.push(record);
+  }
+
+  async appendCapturedArtifact(
+    record: CapturedArtifactTableRecord,
+  ): Promise<void> {
+    this.#assertAllowed(
+      record.environmentOrigin,
+      "Artifact capture projection",
+    );
+    this.#assertAllowed(record.artifact.environmentOrigin, "Artifact");
+    this.#assertAllowed(
+      record.renderManifest.environmentOrigin,
+      "Render manifest",
+    );
+    if (
+      record.runId !== record.artifact.runId ||
+      record.artifactId !== record.artifact.artifactId ||
+      record.renderManifest.artifactId !== record.artifactId
+    ) {
+      throw new Error(
+        "Artifact capture projection contains inconsistent lineage",
+      );
+    }
+    this.#capturedArtifactTable.push(record);
   }
 
   async appendComparison(record: ComparisonRecord): Promise<void> {
@@ -165,6 +192,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     return {
       caseTable: structuredClone(this.#caseTable),
       runRecordTable: structuredClone(this.#runRecordTable),
+      capturedArtifactTable: structuredClone(this.#capturedArtifactTable),
       artifactScoreTable: structuredClone(this.#artifactScoreTable),
       productGapCardTable: structuredClone(this.#productGapCardTable),
       reports: structuredClone(this.#reports),

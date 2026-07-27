@@ -22,10 +22,12 @@ import {
   type RunRecord,
 } from "../src/index.ts";
 
-function deterministicDeadline(options: {
-  readonly timeoutCalls?: readonly number[];
-  readonly successElapsedMs?: number;
-} = {}): AttemptDeadlinePort {
+function deterministicDeadline(
+  options: {
+    readonly timeoutCalls?: readonly number[];
+    readonly successElapsedMs?: number;
+  } = {},
+): AttemptDeadlinePort {
   let call = 0;
   const timeoutCalls = new Set(options.timeoutCalls ?? []);
   return {
@@ -103,7 +105,7 @@ test("one test Bakeoff Job creates stable WPS, Qwen, and Doubao child Runs", asy
   );
 });
 
-test("the four Feishu projections preserve stable Case, Run, score, and product-gap lineage", async () => {
+test("the Feishu projections preserve stable Case, Run, Artifact, score, and product-gap lineage", async () => {
   const feishu = new InMemoryFeishuProjection();
   await createBakeoffHarness({
     feishu,
@@ -124,11 +126,13 @@ test("the four Feishu projections preserve stable Case, Run, score, and product-
       .sort(),
     [
       "artifactScoreTable",
+      "capturedArtifactTable",
       "caseTable",
       "productGapCardTable",
       "runRecordTable",
     ],
   );
+  assert.equal(projection.capturedArtifactTable.length, 3);
   assert.deepEqual(
     projection.artifactScoreTable.map(
       ({ recordId, caseId, jobId, runId, artifactId }) => ({
@@ -623,8 +627,7 @@ test("production rejects every Mock lineage even when every visible provenance l
     },
   } as ArtifactScoreTableRecord;
   const comparison = snapshot.productGapCardTable.find(
-    (record): record is ComparisonRecord =>
-      record.recordType === "comparison",
+    (record): record is ComparisonRecord => record.recordType === "comparison",
   );
   const gapCard = snapshot.productGapCardTable.find(
     (record): record is ProductGapCardRecord =>
@@ -779,8 +782,7 @@ test("Comparison and Gap Card are separate neutral lineage records without a per
   });
   const records = feishu.snapshot().productGapCardTable;
   const comparisons = records.filter(
-    (record): record is ComparisonRecord =>
-      record.recordType === "comparison",
+    (record): record is ComparisonRecord => record.recordType === "comparison",
   );
   const gapCards = records.filter(
     (record): record is ProductGapCardRecord =>
@@ -848,21 +850,14 @@ test("Comparison and Gap Card are separate neutral lineage records without a per
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
-  const competitorComparison =
-    competitorOnlyFeishu
-      .snapshot()
-      .productGapCardTable.find(
-        (record): record is ComparisonRecord =>
-          record.recordType === "comparison",
-      );
-  assert.equal(
-    competitorComparison?.leftRunId,
-    "MOCK-run-qwen-volcano-v1",
-  );
-  assert.equal(
-    competitorComparison?.rightRunId,
-    "MOCK-run-doubao-volcano-v1",
-  );
+  const competitorComparison = competitorOnlyFeishu
+    .snapshot()
+    .productGapCardTable.find(
+      (record): record is ComparisonRecord =>
+        record.recordType === "comparison",
+    );
+  assert.equal(competitorComparison?.leftRunId, "MOCK-run-qwen-volcano-v1");
+  assert.equal(competitorComparison?.rightRunId, "MOCK-run-doubao-volcano-v1");
 });
 
 test("the Job freezes its selected Runs and protocol while Attempts retain observable timing, action, and cost evidence", async () => {
@@ -1153,10 +1148,7 @@ test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", asyn
   const firstRunId = await runOnce();
   const secondRunId = await runOnce();
   assert.equal(firstRunId, secondRunId);
-  assert.match(
-    firstRunId ?? "",
-    /^MOCK-run-proto-[a-f0-9]{32}-volcano-v1$/,
-  );
+  assert.match(firstRunId ?? "", /^MOCK-run-proto-[a-f0-9]{32}-volcano-v1$/);
   assert.doesNotMatch(firstRunId ?? "", /\[object Object\]/);
 });
 
@@ -1172,9 +1164,7 @@ test("measured deadline time overrides a successful adapter's self-reported elap
         blockReason: null,
         submissionEvidence: "submitted",
         elapsedMs: 1_800_000,
-        artifactCandidates: [
-          { artifact, policyCompliant: true },
-        ],
+        artifactCandidates: [{ artifact, policyCompliant: true }],
       };
     },
   };
@@ -1216,9 +1206,7 @@ test("an explicit vendor timeout remains timed out without trusting its self-rep
 
   const outcome = await createBakeoffHarness({
     feishu,
-    productAdapters: [
-      new MockQwenProductAdapter({ scenario: "timeout" }),
-    ],
+    productAdapters: [new MockQwenProductAdapter({ scenario: "timeout" })],
     attemptDeadline: deterministicDeadline({ successElapsedMs: 5 }),
   }).startBakeoffJob({
     environment: "test",
