@@ -938,6 +938,7 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
       return {
         timedOut: false,
         value: await operation(controller.signal),
+        elapsedMs: 0,
       };
     },
   };
@@ -969,4 +970,174 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
   assert.equal(wpsAttempt?.elapsedMs, 1_800_000);
   assert.equal(wpsAttempt?.submissionEvidence, "unknown");
   assert.equal(wpsAttempt?.terminalReason, "vendor_timeout");
+});
+
+test("a thrown adapter error becomes a persisted technical failure with unknown submission evidence", async () => {
+  const wps = new MockWpsProductAdapter();
+  const qwen = new MockQwenProductAdapter();
+  const throwingQwen: ProductAdapterPort = {
+    productPackage: qwen.productPackage,
+    async execute() {
+      throw new Error("simulated adapter crash");
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [wps, throwingQwen],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const qwenRecords = feishu
+    .snapshot()
+    .runRecordTable.filter(
+      ({ recordId, parentRecordId }) =>
+        recordId === "MOCK-run-qwen-volcano-v1" ||
+        parentRecordId === "MOCK-run-qwen-volcano-v1",
+    );
+
+  assert.equal(outcome.job.status, "partial");
+  assert.equal(qwenRecords.length, 2);
+  assert.deepEqual(
+    qwenRecords.map(
+      ({ recordType, status, terminalReason, submissionEvidence }) => ({
+        recordType,
+        status,
+        terminalReason,
+        submissionEvidence,
+      }),
+    ),
+    [
+      {
+        recordType: "vendor_run",
+        status: "failed",
+        terminalReason: "technical_failure",
+        submissionEvidence: null,
+      },
+      {
+        recordType: "evaluation_attempt",
+        status: "failed",
+        terminalReason: "technical_failure",
+        submissionEvidence: "unknown",
+      },
+    ],
+  );
+});
+
+test("the selected adapter set is defensively frozen before any adapter can mutate its caller array", async () => {
+  const wps = new MockWpsProductAdapter();
+  const qwen = new MockQwenProductAdapter();
+  const selectedAdapters: ProductAdapterPort[] = [];
+  const mutatingWps: ProductAdapterPort = {
+    productPackage: wps.productPackage,
+    async execute(command) {
+      selectedAdapters.push(new MockDoubaoProductAdapter());
+      return wps.execute(command);
+    },
+  };
+  selectedAdapters.push(mutatingWps, qwen);
+  const feishu = new InMemoryFeishuProjection();
+
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: selectedAdapters,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const vendorRuns = feishu
+    .snapshot()
+    .runRecordTable.filter(({ recordType }) => recordType === "vendor_run");
+
+  assert.equal(selectedAdapters.length, 3);
+  assert.deepEqual(
+    vendorRuns.map(({ recordId }) => recordId),
+    ["MOCK-run-wps-volcano-v1", "MOCK-run-qwen-volcano-v1"],
+  );
+});
+
+test("all selected vendors begin under one shared 30-minute Job deadline", async () => {
+  let started = 0;
+  const pending: Array<() => void> = [];
+  const sharedDeadline: AttemptDeadlinePort = {
+    async run(operation, timeoutMs) {
+      assert.ok(timeoutMs > 0 && timeoutMs <= 1_800_000);
+      const controller = new AbortController();
+      const execution = operation(controller.signal);
+      started += 1;
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("vendors did not start concurrently")),
+          25,
+        );
+        pending.push(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+        if (started === 3) {
+          for (const release of pending) release();
+        }
+      });
+      return { timedOut: false, value: await execution, elapsedMs: 0 };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+    attemptDeadline: sharedDeadline,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const jobRecord = feishu
+    .snapshot()
+    .runRecordTable.find(({ recordType }) => recordType === "bakeoff_job");
+
+  assert.equal(started, 3);
+  assert.equal(jobRecord?.deadlineAt, "2026-01-01T00:30:00.000Z");
+  assert.equal(outcome.job.status, "completed");
+});
+
+test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", async () => {
+  const wps = new MockWpsProductAdapter();
+  const inheritedKeyAdapter: ProductAdapterPort = {
+    productPackage: {
+      ...wps.productPackage,
+      packageId: "__proto__",
+      displayName: "Custom Prototype Vendor",
+    },
+    execute: (command) => wps.execute(command),
+  };
+
+  const runOnce = async () => {
+    const feishu = new InMemoryFeishuProjection();
+    await createBakeoffHarness({
+      feishu,
+      productAdapters: [inheritedKeyAdapter],
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    });
+    return feishu
+      .snapshot()
+      .runRecordTable.find(({ recordType }) => recordType === "vendor_run")
+      ?.recordId;
+  };
+
+  const firstRunId = await runOnce();
+  const secondRunId = await runOnce();
+  assert.equal(firstRunId, secondRunId);
+  assert.match(
+    firstRunId ?? "",
+    /^MOCK-run-proto-[a-f0-9]{32}-volcano-v1$/,
+  );
+  assert.doesNotMatch(firstRunId ?? "", /\[object Object\]/);
 });

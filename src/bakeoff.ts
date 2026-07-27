@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type {
   Artifact,
   ArtifactScorecard,
@@ -34,6 +36,7 @@ export type AttemptDeadlineResult<T> =
   | {
       readonly timedOut: false;
       readonly value: T;
+      readonly elapsedMs: number;
     }
   | {
       readonly timedOut: true;
@@ -53,6 +56,7 @@ const WALL_CLOCK_ATTEMPT_DEADLINE: AttemptDeadlinePort = {
     timeoutMs: number,
   ): Promise<AttemptDeadlineResult<T>> {
     const controller = new AbortController();
+    const startedAt = Date.now();
     return new Promise((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => {
@@ -65,7 +69,11 @@ const WALL_CLOCK_ATTEMPT_DEADLINE: AttemptDeadlinePort = {
           if (settled) return;
           settled = true;
           clearTimeout(timer);
-          resolve({ timedOut: false, value });
+          resolve({
+            timedOut: false,
+            value,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+          });
         },
         (error: unknown) => {
           if (settled) return;
@@ -101,13 +109,21 @@ interface CapturedVendorResult {
   readonly attemptRecords: readonly RunRecord[];
 }
 
+const KNOWN_VENDOR_SLUGS = new Map<string, string>([
+  ["MOCK-wps-package-v1", "wps"],
+  ["MOCK-qwen-package-v1", "qwen"],
+  ["MOCK-doubao-package-v1", "doubao"],
+]);
+
+type KnownVendorScenario =
+  (typeof MOCK_SCENARIO.vendors)[keyof typeof MOCK_SCENARIO.vendors];
+
+const KNOWN_VENDOR_SCENARIOS = new Map<string, KnownVendorScenario>(
+  Object.entries(MOCK_SCENARIO.vendors),
+);
+
 function vendorSlug(packageId: string): string {
-  const slugs = {
-    "MOCK-wps-package-v1": "wps",
-    "MOCK-qwen-package-v1": "qwen",
-    "MOCK-doubao-package-v1": "doubao",
-  } as const;
-  const knownSlug = slugs[packageId as keyof typeof slugs];
+  const knownSlug = KNOWN_VENDOR_SLUGS.get(packageId);
   if (knownSlug !== undefined) return knownSlug;
   const readableSlug =
     packageId
@@ -115,15 +131,15 @@ function vendorSlug(packageId: string): string {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "")
       .slice(0, 32) || "package";
-  const hash = createHash("sha256").update(packageId).digest("hex").slice(0, 8);
+  const hash = createHash("sha256")
+    .update(packageId)
+    .digest("hex")
+    .slice(0, 32);
   return `${readableSlug}-${hash}`;
 }
 
 function runIdForPackage(packageId: string): string {
-  const scenario =
-    MOCK_SCENARIO.vendors[
-      packageId as keyof typeof MOCK_SCENARIO.vendors
-    ];
+  const scenario = KNOWN_VENDOR_SCENARIOS.get(packageId);
   return (
     scenario?.runId ?? `MOCK-run-${vendorSlug(packageId)}-volcano-v1`
   );
@@ -250,43 +266,80 @@ async function executeVendor(
   adapter: ProductAdapterPort,
   caseId: string,
   attemptDeadline: AttemptDeadlinePort,
+  jobDeadlineAtEpochMs: number,
 ): Promise<CapturedVendorResult> {
-  const scenario =
-    MOCK_SCENARIO.vendors[
-      adapter.productPackage.packageId as keyof typeof MOCK_SCENARIO.vendors
-    ];
+  const scenario = KNOWN_VENDOR_SCENARIOS.get(
+    adapter.productPackage.packageId,
+  );
   const runId = runIdForPackage(adapter.productPackage.packageId);
   const attempts: RunRecord[] = [];
   let retryOfAttemptId: string | null = null;
   let attemptSeq = 1;
+  let observedBudgetRemainingMs = VENDOR_GENERATION_TIMEOUT_MS;
   let result: ProductAttemptResult;
   let terminalReason: TerminalReason;
   let status: RunStatus;
 
   while (true) {
     const attemptId = `${runId}-attempt-${attemptSeq}`;
-    const deadlineResult = await attemptDeadline.run(
-      (signal) =>
-        adapter.execute({
-          jobId: MOCK_SCENARIO.jobId,
-          runId,
-          attemptId,
-          attemptSeq,
-          timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-          signal,
-          evaluationCase: VOLCANO_EVALUATION_CASE,
-        }),
-      VENDOR_GENERATION_TIMEOUT_MS,
+    const attemptTimeoutMs = Math.max(
+      0,
+      Math.min(
+        observedBudgetRemainingMs,
+        jobDeadlineAtEpochMs - Date.now(),
+      ),
     );
-    result = deadlineResult.timedOut
-      ? {
-          terminalReason: "vendor_timeout",
+    if (attemptTimeoutMs === 0) {
+      result = {
+        terminalReason: "vendor_timeout",
+        blockReason: null,
+        submissionEvidence: "unknown",
+        elapsedMs: 0,
+        artifactCandidates: [],
+      };
+    } else {
+      const startedAt = Date.now();
+      try {
+        const deadlineResult = await attemptDeadline.run(
+          (signal) =>
+            adapter.execute({
+              jobId: MOCK_SCENARIO.jobId,
+              runId,
+              attemptId,
+              attemptSeq,
+              timeoutMs: attemptTimeoutMs,
+              signal,
+              evaluationCase: VOLCANO_EVALUATION_CASE,
+            }),
+          attemptTimeoutMs,
+        );
+        observedBudgetRemainingMs = Math.max(
+          0,
+          observedBudgetRemainingMs - deadlineResult.elapsedMs,
+        );
+        result = deadlineResult.timedOut
+          ? {
+              terminalReason: "vendor_timeout",
+              blockReason: null,
+              submissionEvidence: "unknown",
+              elapsedMs: deadlineResult.elapsedMs,
+              artifactCandidates: [],
+            }
+          : normalizeExecution(deadlineResult.value);
+      } catch {
+        observedBudgetRemainingMs = Math.max(
+          0,
+          observedBudgetRemainingMs - Math.max(0, Date.now() - startedAt),
+        );
+        result = {
+          terminalReason: "technical_failure",
           blockReason: null,
           submissionEvidence: "unknown",
-          elapsedMs: deadlineResult.elapsedMs,
+          elapsedMs: Math.max(0, Date.now() - startedAt),
           artifactCandidates: [],
-        }
-      : normalizeExecution(deadlineResult.value);
+        };
+      }
+    }
     terminalReason =
       result.elapsedMs >= VENDOR_GENERATION_TIMEOUT_MS
         ? "vendor_timeout"
@@ -308,7 +361,9 @@ async function executeVendor(
     const mayRetry =
       attemptSeq === 1 &&
       terminalReason === "technical_failure" &&
-      result.submissionEvidence === "not_submitted";
+      result.submissionEvidence === "not_submitted" &&
+      observedBudgetRemainingMs > 0 &&
+      jobDeadlineAtEpochMs > Date.now();
     if (!mayRetry) break;
     retryOfAttemptId = attemptId;
     attemptSeq += 1;
@@ -402,8 +457,10 @@ export function createBakeoffHarness({
   productAdapters,
   attemptDeadline = WALL_CLOCK_ATTEMPT_DEADLINE,
 }: BakeoffHarnessDependencies): BakeoffHarness {
-  const selectedProductAdapters =
-    productAdapters ?? (productAdapter === undefined ? [] : [productAdapter]);
+  const selectedProductAdapters = Object.freeze([
+    ...(productAdapters ??
+      (productAdapter === undefined ? [] : [productAdapter])),
+  ]);
   if (selectedProductAdapters.length === 0) {
     throw new Error("A Bakeoff Job requires at least one Product Adapter");
   }
@@ -436,12 +493,18 @@ export function createBakeoffHarness({
         );
       }
 
-      const results: CapturedVendorResult[] = [];
-      for (const adapter of selectedProductAdapters) {
-        results.push(
-          await executeVendor(adapter, command.caseId, attemptDeadline),
-        );
-      }
+      const jobDeadlineAtEpochMs =
+        Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
+      const results = await Promise.all(
+        selectedProductAdapters.map((adapter) =>
+          executeVendor(
+            adapter,
+            command.caseId,
+            attemptDeadline,
+            jobDeadlineAtEpochMs,
+          ),
+        ),
+      );
       const successful = results.filter(
         (
           result,
@@ -632,4 +695,3 @@ export function createBakeoffHarness({
     },
   };
 }
-import { createHash } from "node:crypto";
