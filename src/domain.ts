@@ -67,6 +67,10 @@ export interface ObservableAttemptEvent {
   readonly evidenceRef: string;
   readonly sourceUrl?: string | null;
   readonly submissionEvidenceAtCheckpoint?: SubmissionEvidence;
+  readonly vendorTaskId?: string | null;
+  readonly taskStateVersion?: string | null;
+  readonly adapterVersion?: string;
+  readonly artifactId?: string | null;
 }
 
 export interface CostEvidence {

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Artifact, RenderManifest } from "./domain.ts";
+import type { ProductionDriverExecutionEvidence } from "./product-adapter.ts";
 import {
   calculateRenderManifestHash,
   renderManifestBytes,
@@ -34,6 +35,8 @@ export interface JobTombstoneLookupPort {
 
 export interface ImmutableBlobStorePort {
   readonly storeId: string;
+  readonly durability?: "ephemeral" | "durable";
+  readonly recoveryReferencePrefix?: string;
   readonly egressDestination: EgressDestinationMetadata;
   putImmutable(
     key: string,
@@ -191,6 +194,8 @@ export class InMemoryArtifactCaptureJournal
 
 export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
   readonly storeId: string;
+  readonly durability = "ephemeral" as const;
+  readonly recoveryReferencePrefix = "unavailable";
   readonly egressDestination: EgressDestinationMetadata;
   readonly #blobs = new Map<string, Uint8Array>();
   readonly #writeClaims = new Map<string, Set<string>>();
@@ -344,6 +349,9 @@ export interface ArtifactPackageManifest {
   readonly derivatives: readonly ArtifactDerivativeLineage[];
   readonly payloadLocations: readonly RetentionPayloadLocation[];
   readonly egressAuthorizations: readonly ApprovedEgressAuthorization[];
+  readonly productionExecutionEvidence?: (ProductionDriverExecutionEvidence & {
+    readonly rasterManifestHash: `sha256:${string}`;
+  }) | null;
 }
 
 export interface CaptureArtifactPackageCommand {
@@ -352,6 +360,9 @@ export interface CaptureArtifactPackageCommand {
   readonly sourceOwner: string;
   readonly artifact: Artifact;
   readonly renderManifest: RenderManifest;
+  readonly productionExecutionEvidence?: ProductionDriverExecutionEvidence & {
+    readonly rasterManifestHash: `sha256:${string}`;
+  };
 }
 
 export interface RecoveredArtifactPackage {
@@ -365,6 +376,12 @@ export interface RecoveredArtifactPackage {
 }
 
 export interface ArtifactVault {
+  readonly storageProfile?: {
+    readonly durability: "ephemeral" | "durable";
+    readonly primaryStoreId: string;
+    readonly secondaryStoreId: string;
+    readonly recoveryReferencePrefix: string;
+  };
   capture(command: CaptureArtifactPackageCommand): Promise<ArtifactPackageManifest>;
   readFromSecondary(
     manifest: ArtifactPackageManifest,
@@ -411,6 +428,11 @@ function manifestIdentity(input: {
   readonly renderOutcome: RenderManifest["renderOutcome"];
   readonly fidelity: RenderManifest["fidelity"];
   readonly derivatives: readonly ArtifactDerivativeLineage[];
+  readonly productionExecutionEvidence:
+    | (ProductionDriverExecutionEvidence & {
+        readonly rasterManifestHash: `sha256:${string}`;
+      })
+    | null;
 }) {
   return {
     schemaVersion: "artifact-package-identity-v1" as const,
@@ -421,6 +443,7 @@ function manifestIdentity(input: {
     renderOutcome: input.renderOutcome,
     fidelity: input.fidelity,
     derivatives: input.derivatives,
+    productionExecutionEvidence: input.productionExecutionEvidence,
   };
 }
 
@@ -514,6 +537,17 @@ export function createArtifactVault({
     throw new Error("ArtifactVault requires two distinct controlled stores");
   }
   return {
+    storageProfile: Object.freeze({
+      durability:
+        primary.durability === "durable" &&
+        secondary.durability === "durable"
+          ? "durable"
+          : "ephemeral",
+      primaryStoreId: primary.storeId,
+      secondaryStoreId: secondary.storeId,
+      recoveryReferencePrefix:
+        secondary.recoveryReferencePrefix ?? "unavailable",
+    }),
     async capture(command) {
       const { artifact, renderManifest } = command;
       if (
@@ -622,6 +656,8 @@ export function createArtifactVault({
         renderOutcome: renderManifest.renderOutcome,
         fidelity: renderManifest.fidelity,
         derivatives,
+        productionExecutionEvidence:
+          command.productionExecutionEvidence ?? null,
       });
       const frozenIdentity = identityBytes(identity);
       const artifactIdentityHash = sha256(frozenIdentity);
@@ -853,6 +889,8 @@ export function createArtifactVault({
         derivatives: Object.freeze(derivatives),
         payloadLocations: Object.freeze(payloadLocations),
         egressAuthorizations: Object.freeze(authorizations),
+        productionExecutionEvidence:
+          command.productionExecutionEvidence ?? null,
       });
     },
 
@@ -978,6 +1016,8 @@ export function createArtifactVault({
           renderOutcome: manifest.renderOutcome,
           fidelity: manifest.fidelity,
           derivatives: manifest.derivatives,
+          productionExecutionEvidence:
+            manifest.productionExecutionEvidence ?? null,
         }),
       );
       if (sha256(expectedIdentity) !== manifest.artifactIdentityHash) {

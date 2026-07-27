@@ -149,6 +149,11 @@ export interface CaptureRunSpecificationCommand {
 }
 
 export interface RunSpecificationVault {
+  readonly storageProfile?: {
+    readonly durability: "ephemeral" | "durable";
+    readonly storeId: string;
+    readonly recoveryReferencePrefix: string;
+  };
   capture(
     command: CaptureRunSpecificationCommand,
   ): Promise<RunSpecificationReference>;
@@ -286,6 +291,13 @@ export function createRunSpecificationVault({
   clock = SYSTEM_CLOCK,
 }: RunSpecificationVaultDependencies): RunSpecificationVault {
   return {
+    storageProfile: Object.freeze({
+      durability:
+        store.durability === "durable" ? "durable" : "ephemeral",
+      storeId: store.storeId,
+      recoveryReferencePrefix:
+        store.recoveryReferencePrefix ?? "unavailable",
+    }),
     async capture(command) {
       if (!/^[a-f0-9]{40}$/.test(command.specCommitSha)) {
         throw new Error("Run specification requires an exact spec commit SHA");

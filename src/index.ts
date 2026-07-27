@@ -1,4 +1,20 @@
 export {
+  FileSystemImmutableBlobStore,
+} from "./file-system-blob-store.ts";
+export {
+  FileSystemAttemptCheckpointStore,
+} from "./file-system-checkpoint-store.ts";
+export {
+  FileSystemBrowserProfileLock,
+  InProcessBrowserProfileLock,
+  type BrowserProfileLockPort,
+} from "./browser-profile-lock.ts";
+export {
+  BUILD_IDENTITY,
+  BUILD_IDENTITY_SOURCE,
+  BUILD_SPEC_COMMIT_SHA,
+} from "./build-identity.ts";
+export {
   VENDOR_GENERATION_TIMEOUT_MS,
   ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
   createBakeoffHarness,
@@ -153,8 +169,11 @@ export {
   type ProductAttemptResult,
   type ProductAdapterPort,
   type ProductExperienceConfiguration,
+  type AccountCategoryObservation,
+  type CommercialPlanObservation,
   type ProductPackageSnapshot,
   type ProductRunCommand,
+  type SafeRasterRendererPort,
 } from "./product-adapter.ts";
 export {
   WPS_AIPPT_ADAPTER_VERSION,
@@ -179,6 +198,8 @@ export {
   registeredWpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverPort,
+  type WpsAiPptTaskReconciliationEvidence,
+  type WpsAiPptTaskReconciliationQuery,
 } from "./wps-aippt-driver.ts";
 export type {
   Artifact,

@@ -6,12 +6,19 @@ import type {
   WpsAiPptBrowserCommand,
   WpsAiPptBrowserResult,
 } from "./wps-aippt.ts";
+import {
+  reconcileHarnessOwnedWpsAiPptTask,
+  runHarnessOwnedWpsAiPptBrowser,
+} from "./wps-aippt-external-runtime.ts";
 
 export const WPS_AIPPT_BROWSER_DRIVER_VERSION =
-  "wps-aippt-captured-chrome-session@1" as const;
+  "wps-aippt-harness-browser-bridge@2" as const;
 
 const textEncoder = new TextEncoder();
 const moduleContent = Uint8Array.from(readFileSync(new URL(import.meta.url)));
+const runtimeModuleContent = Uint8Array.from(
+  readFileSync(new URL("./wps-aippt-external-runtime.ts", import.meta.url)),
+);
 
 function sha256(content: Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
@@ -29,11 +36,16 @@ export const WPS_AIPPT_BROWSER_PROFILE_DIGEST = sha256(
 );
 
 function implementationPackage(): ProductAdapterImplementationPackage {
+  const content = Uint8Array.from([
+    ...moduleContent,
+    ...textEncoder.encode("\n/* external runtime */\n"),
+    ...runtimeModuleContent,
+  ]);
   return Object.freeze({
     packageName:
-      "src/wps-aippt-driver.ts#captured-chrome-session-driver",
-    contentHash: sha256(moduleContent),
-    content: Uint8Array.from(moduleContent),
+      "src/wps-aippt-driver.ts#harness-owned-external-browser-runtime",
+    contentHash: sha256(content),
+    content,
   });
 }
 
@@ -47,20 +59,35 @@ function configurationPackage(): ProductAdapterImplementationPackage {
   );
   return Object.freeze({
     packageName:
-      "wps-aippt-browser-driver-configuration#captured-chrome-session",
+      "wps-aippt-browser-driver-configuration#harness-owned-bridge",
     contentHash: sha256(content),
     content,
   });
 }
 
 export interface WpsAiPptBrowserDriverPort {
-  readonly driverId: "wps-aippt-captured-chrome-session";
-  readonly provenance: "PRODUCTION" | "TEST_FAKE";
+  readonly driverId: "wps-aippt-test-fixture";
+  readonly provenance: "TEST_FAKE";
   readonly driverVersion: typeof WPS_AIPPT_BROWSER_DRIVER_VERSION;
   readonly browserProfileDigest: typeof WPS_AIPPT_BROWSER_PROFILE_DIGEST;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly configurationPackage: ProductAdapterImplementationPackage;
   readonly sessions: readonly WpsAiPptBrowserResult[];
+  readonly reconciliations: readonly WpsAiPptTaskReconciliationEvidence[];
+}
+
+export interface WpsAiPptTaskReconciliationQuery {
+  readonly vendorTaskId: `task_${string}`;
+  readonly taskStateVersion: string;
+  readonly eventHistoryHash: `sha256:${string}`;
+  readonly artifactContentHash: `sha256:${string}` | null;
+}
+
+export interface WpsAiPptTaskReconciliationEvidence {
+  readonly query: WpsAiPptTaskReconciliationQuery;
+  readonly observedState: "unknown" | "submitted" | "artifact_ready" | "failed";
+  readonly observedAt: string;
+  readonly evidenceId: `ev_${string}`;
 }
 
 function cloneValue<T>(value: T): T {
@@ -84,9 +111,15 @@ function cloneValue<T>(value: T): T {
 export function createWpsAiPptBrowserDriverPackage(input: {
   readonly provenance: "PRODUCTION" | "TEST_FAKE";
   readonly sessions: readonly WpsAiPptBrowserResult[];
+  readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
 }): WpsAiPptBrowserDriverPort {
+  if (input.provenance !== "TEST_FAKE") {
+    throw new Error(
+      "The public WPS browser-driver fixture factory cannot mint PRODUCTION sessions",
+    );
+  }
   return Object.freeze({
-    driverId: "wps-aippt-captured-chrome-session",
+    driverId: "wps-aippt-test-fixture",
     provenance: input.provenance,
     driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
     browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
@@ -95,6 +128,11 @@ export function createWpsAiPptBrowserDriverPackage(input: {
     sessions: Object.freeze(
       input.sessions.map((session) =>
         Object.freeze(cloneValue(session)),
+      ),
+    ),
+    reconciliations: Object.freeze(
+      (input.reconciliations ?? []).map((entry) =>
+        Object.freeze(cloneValue(entry)),
       ),
     ),
   });
@@ -117,21 +155,31 @@ function assertPackage(
 }
 
 export interface WpsAiPptBrowserDriverEvidence {
-  readonly driverId: WpsAiPptBrowserDriverPort["driverId"];
-  readonly provenance: WpsAiPptBrowserDriverPort["provenance"];
+  readonly driverId:
+    | WpsAiPptBrowserDriverPort["driverId"]
+    | "wps-aippt-harness-browser-bridge";
+  readonly provenance: "PRODUCTION" | "TEST_FAKE";
   readonly driverVersion: typeof WPS_AIPPT_BROWSER_DRIVER_VERSION;
   readonly browserProfileDigest: typeof WPS_AIPPT_BROWSER_PROFILE_DIGEST;
   readonly implementationDigest: `sha256:${string}`;
   readonly configurationDigest: `sha256:${string}`;
 }
 
+const HARNESS_OWNED_PRODUCTION_DRIVER_EVIDENCE:
+  WpsAiPptBrowserDriverEvidence = Object.freeze({
+    driverId: "wps-aippt-harness-browser-bridge",
+    provenance: "PRODUCTION",
+    driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
+    browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
+    implementationDigest: implementationPackage().contentHash,
+    configurationDigest: configurationPackage().contentHash,
+  });
+
 export function registeredWpsAiPptBrowserDriverEvidence(
   driver: WpsAiPptBrowserDriverPort | undefined,
 ): WpsAiPptBrowserDriverEvidence {
   if (driver === undefined) {
-    throw new Error(
-      "WPS production adapter requires an explicit registered browser driver package",
-    );
+    return HARNESS_OWNED_PRODUCTION_DRIVER_EVIDENCE;
   }
   assertPackage(
     driver.implementationPackage,
@@ -144,11 +192,14 @@ export function registeredWpsAiPptBrowserDriverEvidence(
     "configuration package",
   );
   if (
-    driver.driverId !== "wps-aippt-captured-chrome-session" ||
+    driver.driverId !== "wps-aippt-test-fixture" ||
+    driver.provenance !== "TEST_FAKE" ||
     driver.driverVersion !== WPS_AIPPT_BROWSER_DRIVER_VERSION ||
     driver.browserProfileDigest !== WPS_AIPPT_BROWSER_PROFILE_DIGEST
   ) {
-    throw new Error("WPS browser driver identity is not allowlisted");
+    throw new Error(
+      "Caller-supplied WPS browser driver identity is not an allowlisted TEST_FAKE fixture",
+    );
   }
   return Object.freeze({
     driverId: driver.driverId,
@@ -162,16 +213,25 @@ export function registeredWpsAiPptBrowserDriverEvidence(
 
 export function resolveRegisteredWpsAiPptBrowserDriver(
   driver: WpsAiPptBrowserDriverPort | undefined,
+  checkpointSink: (
+    event: WpsAiPptBrowserResult["events"][number],
+  ) => Promise<void>,
 ): (command: WpsAiPptBrowserCommand) => Promise<WpsAiPptBrowserResult> {
   registeredWpsAiPptBrowserDriverEvidence(driver);
   const frozenSessions = driver?.sessions ?? [];
   return async (command) => {
     if (
       command.evaluationProvenance === "PRODUCTION" &&
-      driver?.provenance !== "PRODUCTION"
+      driver !== undefined
     ) {
       throw new Error(
-        "Production WPS Run rejects TEST_FAKE browser driver provenance",
+        "Production WPS Run rejects caller-supplied browser sessions",
+      );
+    }
+    if (command.evaluationProvenance === "PRODUCTION") {
+      return await runHarnessOwnedWpsAiPptBrowser(
+        command,
+        checkpointSink,
       );
     }
     const result = frozenSessions[command.attemptSeq - 1];
@@ -180,6 +240,31 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
         `WPS browser driver has no captured session for attempt ${command.attemptSeq}`,
       );
     }
+    for (const event of result.events) {
+      await checkpointSink(event);
+    }
     return Object.freeze(cloneValue(result));
   };
+}
+
+export function reconcileRegisteredWpsAiPptTask(
+  driver: WpsAiPptBrowserDriverPort | undefined,
+  query: WpsAiPptTaskReconciliationQuery,
+): Promise<WpsAiPptTaskReconciliationEvidence> {
+  registeredWpsAiPptBrowserDriverEvidence(driver);
+  if (driver === undefined) {
+    return reconcileHarnessOwnedWpsAiPptTask(query);
+  }
+  const evidence = driver.reconciliations.find(
+    (candidate) =>
+      JSON.stringify(candidate.query) === JSON.stringify(query),
+  );
+  if (evidence === undefined) {
+    return Promise.reject(
+      new Error(
+        "WPS reconciliation API has no task/history/hash match",
+      ),
+    );
+  }
+  return Promise.resolve(Object.freeze(cloneValue(evidence)));
 }

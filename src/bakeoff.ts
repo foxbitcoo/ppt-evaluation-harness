@@ -22,6 +22,14 @@ import {
   type ArtifactPackageManifest,
   type ArtifactVault,
 } from "./artifact-vault.ts";
+import {
+  BUILD_IDENTITY_SOURCE,
+  BUILD_SPEC_COMMIT_SHA,
+} from "./build-identity.ts";
+import {
+  InProcessBrowserProfileLock,
+  type BrowserProfileLockPort,
+} from "./browser-profile-lock.ts";
 import { createComparisonReportService } from "./comparison-report.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
@@ -69,6 +77,7 @@ import {
   type ProductAdapterPort,
   type ProductAttemptResult,
   type ProductPackageSnapshot,
+  type SafeRasterRendererPort,
 } from "./product-adapter.ts";
 import {
   InMemoryReferencePackStore,
@@ -99,7 +108,6 @@ import {
 } from "./wps-aippt-driver.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
-const DEFAULT_SPEC_COMMIT_SHA = "9e68de5801bc14f00c187336000c83ce8cc37efa";
 const MOCK_RENDERER_DESTINATION: EgressDestinationMetadata = Object.freeze({
   targetService: "mock-static-svg-renderer",
   targetAccount: "mock-renderer-sandbox",
@@ -271,9 +279,10 @@ export interface BakeoffHarnessDependencies {
   readonly judgeDestination?: EgressDestinationMetadata;
   readonly tombstones?: TombstoneLedgerPort;
   readonly egressAudit?: EgressAuthorizationAuditPort;
-  readonly specCommitSha?: string;
   readonly wpsAiPptBrowserDriver?: WpsAiPptBrowserDriverPort;
   readonly attemptCheckpointStore?: AttemptCheckpointPort;
+  readonly browserProfileLock?: BrowserProfileLockPort;
+  readonly safeRasterRenderer?: SafeRasterRendererPort;
 }
 
 interface InFlightBakeoffJob {
@@ -321,30 +330,6 @@ const DEFAULT_ARTIFACT_CAPTURE_JOURNALS = new WeakMap<
 >();
 const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
 let nextDependencyIdentity = 1;
-const WPS_BROWSER_PROFILE_LOCKS = new Map<string, Promise<void>>();
-
-async function withWpsBrowserProfileLock<T>(
-  key: string,
-  operation: () => Promise<T>,
-): Promise<T> {
-  let release!: () => void;
-  const currentGate = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const previous = WPS_BROWSER_PROFILE_LOCKS.get(key) ?? Promise.resolve();
-  const currentTail = previous.then(() => currentGate);
-  WPS_BROWSER_PROFILE_LOCKS.set(key, currentTail);
-  await previous;
-  try {
-    return await operation();
-  } finally {
-    release();
-    if (WPS_BROWSER_PROFILE_LOCKS.get(key) === currentTail) {
-      WPS_BROWSER_PROFILE_LOCKS.delete(key);
-    }
-  }
-}
-
 function defaultReferencePackStore(
   feishu: FeishuProjectionPort,
 ): ReferencePackStorePort {
@@ -494,6 +479,8 @@ function bakeoffJobIdentity(
       | WpsAiPptBrowserDriverPort
       | undefined;
     readonly attemptCheckpointStore: AttemptCheckpointPort;
+    readonly browserProfileLock: BrowserProfileLockPort;
+    readonly safeRasterRenderer: SafeRasterRendererPort | undefined;
   },
 ): string {
   return JSON.stringify({
@@ -561,6 +548,13 @@ function bakeoffJobIdentity(
       ),
       attemptCheckpointStore:
         dependencies.attemptCheckpointStore.checkpointStoreId,
+      browserProfileLock: {
+        lockId: dependencies.browserProfileLock.lockId,
+        isolation: dependencies.browserProfileLock.isolation,
+      },
+      safeRasterRenderer: dependencyIdentity(
+        dependencies.safeRasterRenderer,
+      ),
     },
   });
 }
@@ -1200,6 +1194,7 @@ async function executeVendor(
   artifactVault: ArtifactVault,
   clock: ClockPort,
   rendererDestination: EgressDestinationMetadata,
+  safeRasterRenderer: SafeRasterRendererPort | undefined,
   judgeDestination: EgressDestinationMetadata,
   onReferencePackUse: (evaluationAttemptId: string) => void,
 ): Promise<CapturedVendorResult> {
@@ -1401,6 +1396,32 @@ async function executeVendor(
     targetEnvironment,
     `Artifact ${artifact.artifactId}`,
   );
+  const productionExecutionEvidence =
+    selectedArtifact.productionExecutionEvidence;
+  if (productPackage.provenance === "PRODUCTION") {
+    const latestEvent = result.observableEvents?.at(-1);
+    if (
+      productionExecutionEvidence === undefined ||
+      !/^session_[a-z0-9_-]{16,128}$/.test(
+        productionExecutionEvidence.driverSessionId,
+      ) ||
+      productionExecutionEvidence.vendorTaskId !==
+        latestEvent?.vendorTaskId ||
+      productionExecutionEvidence.taskStateVersion !==
+        latestEvent?.taskStateVersion ||
+      productionExecutionEvidence.driverVersion.trim().length === 0 ||
+      productionExecutionEvidence.adapterVersion !==
+        productPackage.adapterVersion ||
+      productionExecutionEvidence.artifactContentHash !==
+        artifact.contentHash ||
+      productionExecutionEvidence.traceHash !==
+        sha256Json(result.observableEvents ?? [])
+    ) {
+      throw new Error(
+        "Production WPS Artifact requires bound driver session, outcome, Artifact, and Trace evidence",
+      );
+    }
+  }
   const rendererAuthorization = await requireEgressAuthorization(
     egressAuthorization,
     {
@@ -1435,11 +1456,27 @@ async function executeVendor(
       "Production Artifact cannot inject a pre-rendered manifest",
     );
   }
-  const renderManifest =
+  if (
+    productPackage.provenance === "PRODUCTION" &&
     selectedArtifact.safeRasterCandidate !== undefined
-      ? createAuthorizedSafeRasterManifest({
+  ) {
+    throw new Error(
+      "Production browser driver cannot submit raster output before renderer authorization",
+    );
+  }
+  const safeRasterCandidate =
+    productPackage.provenance === "PRODUCTION"
+      ? await safeRasterRenderer!.render({
           artifact,
-          candidate: selectedArtifact.safeRasterCandidate,
+          authorizationDecisionId:
+            rendererAuthorizationDecisionId,
+        })
+      : selectedArtifact.safeRasterCandidate;
+  const renderManifest =
+    safeRasterCandidate !== undefined
+      ? await createAuthorizedSafeRasterManifest({
+          artifact,
+          candidate: safeRasterCandidate,
           renderManifestId: `${artifact.artifactId}-render`,
           rendererAuthorizationDecisionId:
             rendererAuthorizationDecisionId,
@@ -1468,6 +1505,14 @@ async function executeVendor(
       sourceOwner: context.evaluationCase.sourceOwner,
       artifact,
       renderManifest,
+      ...(productionExecutionEvidence === undefined
+        ? {}
+        : {
+            productionExecutionEvidence: {
+              ...productionExecutionEvidence,
+              rasterManifestHash: renderManifest.contentHash,
+            },
+          }),
     });
   } catch (error) {
     if (
@@ -1656,7 +1701,8 @@ export function createBakeoffHarness({
   egressAudit: configuredEgressAudit,
   wpsAiPptBrowserDriver,
   attemptCheckpointStore: configuredAttemptCheckpointStore,
-  specCommitSha: configuredSpecCommitSha,
+  browserProfileLock: configuredBrowserProfileLock,
+  safeRasterRenderer,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
     configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
@@ -1673,6 +1719,11 @@ export function createBakeoffHarness({
   const attemptCheckpointStore =
     configuredAttemptCheckpointStore ??
     defaultAttemptCheckpointStore(feishu);
+  const browserProfileLock =
+    configuredBrowserProfileLock ??
+    new InProcessBrowserProfileLock(
+      `in-process-wps-profile-lock:${dependencyIdentity(feishu)}`,
+    );
   const payloadInventory =
     configuredPayloadInventory ??
     (configuredTombstones === undefined
@@ -1741,20 +1792,6 @@ export function createBakeoffHarness({
   if (selectedProductAdapters.length === 0) {
     throw new Error("A Bakeoff Job requires at least one Product Adapter");
   }
-  const specCommitShaFor = (
-    environment: "test" | "production",
-  ): string => {
-    if (configuredSpecCommitSha !== undefined) {
-      return configuredSpecCommitSha;
-    }
-    if (environment === "production") {
-      throw new Error(
-        "Production Bakeoff requires an explicit frozen spec commit SHA",
-      );
-    }
-    return DEFAULT_SPEC_COMMIT_SHA;
-  };
-
   const executor = {
     async startBakeoffJob(
       command: StartBakeoffJobCommand,
@@ -1791,7 +1828,7 @@ export function createBakeoffHarness({
         command.environment,
         `Evaluation Case ${context.evaluationCase.caseId}`,
       );
-      const specCommitSha = specCommitShaFor(command.environment);
+      const specCommitSha = BUILD_SPEC_COMMIT_SHA;
       if (
         command.environment === "production" &&
         configuredEgressAuthorization === undefined
@@ -1905,6 +1942,7 @@ export function createBakeoffHarness({
             artifactVault,
             clock,
             rendererDestination,
+            safeRasterRenderer,
             judgeDestination,
             (evaluationAttemptId) => {
               evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
@@ -1913,7 +1951,7 @@ export function createBakeoffHarness({
           const evidence = selection.browserDriverEvidence;
           return evidence === null
             ? operation()
-            : withWpsBrowserProfileLock(
+            : browserProfileLock.runExclusive(
                 `${evidence.browserProfileDigest}:${selection.productPackage.egressDestination.targetAccount}`,
                 operation,
               );
@@ -2238,16 +2276,90 @@ export function createBakeoffHarness({
   return {
     startBakeoffJob(command) {
       const commandSnapshot = snapshotBakeoffCommand(command);
-      const context = executionContext(
-        commandSnapshot.environment,
-        clock.now(),
-      );
-      const specCommitSha =
-        configuredSpecCommitSha ?? DEFAULT_SPEC_COMMIT_SHA;
+      if (commandSnapshot.environment !== feishu.targetEnvironment) {
+        return Promise.reject(
+          new Error(
+            `${commandSnapshot.environment} command cannot use ${feishu.targetEnvironment} projection environment`,
+          ),
+        );
+      }
       const selections = snapshotProductSelections(
         selectedProductAdapters,
         { wpsAiPptBrowserDriver, attemptCheckpointStore },
       );
+      if (commandSnapshot.environment === "production") {
+        if (
+          selections.some(({ executionConfiguration }) =>
+            executionConfiguration.adapterKind.startsWith("mock-"),
+          )
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production environment origin rejects Mock adapter implementation lineage",
+            ),
+          );
+        }
+        if (wpsAiPptBrowserDriver !== undefined) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff rejects caller-supplied WPS browser sessions",
+            ),
+          );
+        }
+        if (artifactVault.storageProfile?.durability !== "durable") {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires an explicit durable ArtifactVault",
+            ),
+          );
+        }
+        if (
+          runSpecificationVault.storageProfile?.durability !==
+          "durable"
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires an explicit durable RunSpecificationVault",
+            ),
+          );
+        }
+        if (attemptCheckpointStore.durability !== "durable") {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires an explicit durable checkpoint store",
+            ),
+          );
+        }
+        if (browserProfileLock.isolation !== "cross_process") {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires an explicit cross-process browser profile lock",
+            ),
+          );
+        }
+        if (safeRasterRenderer === undefined) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires an explicit authorized safe raster renderer",
+            ),
+          );
+        }
+        if (
+          BUILD_IDENTITY_SOURCE !==
+          "BUILD_INJECTED_SOURCE_REVISION"
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires a build-injected spec commit SHA",
+            ),
+          );
+        }
+      }
+      const context = executionContext(
+        commandSnapshot.environment,
+        clock.now(),
+      );
+      const specCommitSha = BUILD_SPEC_COMMIT_SHA;
       const jobIdentity = bakeoffJobIdentity(
         commandSnapshot,
         selections,
@@ -2268,6 +2380,8 @@ export function createBakeoffHarness({
           specCommitSha,
           wpsAiPptBrowserDriver,
           attemptCheckpointStore,
+          browserProfileLock,
+          safeRasterRenderer,
         },
       );
       return coalesceBakeoffJob(

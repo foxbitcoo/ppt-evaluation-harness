@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import sharp from "sharp";
 
 import type { Artifact, RenderManifest } from "./domain.ts";
 import type { SafeRasterCandidate } from "./product-adapter.ts";
@@ -107,12 +108,50 @@ function assertSafePng(content: Uint8Array, label: string): void {
   }
 }
 
-export function createAuthorizedSafeRasterManifest(input: {
+async function decodeAndNormalizePng(
+  content: Uint8Array,
+  label: string,
+): Promise<Uint8Array> {
+  assertSafePng(content, label);
+  try {
+    const image = sharp(Buffer.from(content), {
+      animated: false,
+      failOn: "error",
+      limitInputPixels: 33_554_432,
+      sequentialRead: true,
+    });
+    const metadata = await image.metadata();
+    if (
+      metadata.format !== "png" ||
+      metadata.pages !== undefined && metadata.pages !== 1 ||
+      metadata.width === undefined ||
+      metadata.height === undefined
+    ) {
+      throw new Error("unexpected decoded PNG metadata");
+    }
+    const normalized = Uint8Array.from(
+      await image
+        .png({
+          adaptiveFiltering: false,
+          compressionLevel: 9,
+          force: true,
+          palette: false,
+        })
+        .toBuffer(),
+    );
+    assertSafePng(normalized, `${label} normalized output`);
+    return normalized;
+  } catch (error) {
+    throw new Error(`${label} PNG decode failed`, { cause: error });
+  }
+}
+
+export async function createAuthorizedSafeRasterManifest(input: {
   readonly artifact: Artifact;
   readonly candidate: SafeRasterCandidate;
   readonly renderManifestId: string;
   readonly rendererAuthorizationDecisionId: string;
-}): RenderManifest {
+}): Promise<RenderManifest> {
   const { artifact, candidate } = input;
   if (
     candidate.slides.length !== artifact.pageCount ||
@@ -122,8 +161,18 @@ export function createAuthorizedSafeRasterManifest(input: {
   ) {
     throw new Error("Safe raster candidate is incomplete");
   }
+  if (
+    (candidate.renderOutcome === "faithful" &&
+      candidate.fidelity.status !== "verified") ||
+    (candidate.renderOutcome === "degraded" &&
+      candidate.fidelity.status === "verified")
+  ) {
+    throw new Error(
+      "Safe raster has contradictory render outcome and fidelity",
+    );
+  }
   const slides = Object.freeze(
-    candidate.slides.map((slide, index) => {
+    await Promise.all(candidate.slides.map(async (slide, index) => {
       if (
         slide.pageNumber !== index + 1 ||
         slide.mimeType !== "image/png" ||
@@ -131,18 +180,24 @@ export function createAuthorizedSafeRasterManifest(input: {
       ) {
         throw new Error(`Safe raster page ${index + 1} is invalid`);
       }
-      assertSafePng(slide.content, `Safe raster page ${index + 1}`);
+      const normalizedContent = await decodeAndNormalizePng(
+        slide.content,
+        `Safe raster page ${index + 1}`,
+      );
       return Object.freeze({
         ...slide,
-        content: Uint8Array.from(slide.content),
-        contentHash: sha256(slide.content),
+        content: normalizedContent,
+        contentHash: sha256(normalizedContent),
       });
-    }),
+    })),
   );
   if (candidate.contactSheet.mimeType !== "image/png") {
     throw new Error("Safe raster contact sheet must be PNG");
   }
-  assertSafePng(candidate.contactSheet.content, "Safe raster contact sheet");
+  const normalizedContactSheet = await decodeAndNormalizePng(
+    candidate.contactSheet.content,
+    "Safe raster contact sheet",
+  );
   const withoutHash: Omit<RenderManifest, "contentHash"> = {
     renderManifestId: input.renderManifestId,
     artifactId: artifact.artifactId,
@@ -167,8 +222,8 @@ export function createAuthorizedSafeRasterManifest(input: {
     slides,
     contactSheet: Object.freeze({
       ...candidate.contactSheet,
-      content: Uint8Array.from(candidate.contactSheet.content),
-      contentHash: sha256(candidate.contactSheet.content),
+      content: normalizedContactSheet,
+      contentHash: sha256(normalizedContactSheet),
     }),
   };
   return Object.freeze({

@@ -30,8 +30,10 @@ export interface ProductPackageSnapshot {
 export interface ProductExperienceConfiguration {
   readonly productUrl: string;
   readonly accountScope: "current_authenticated_account";
-  readonly accountIdentityObservation: "unknown";
-  readonly commercialPlanObservation: "unknown";
+  readonly accountObservationPolicy:
+    "observe_category_or_record_ui_unavailable";
+  readonly commercialPlanObservationPolicy:
+    "observe_plan_name_or_record_ui_unavailable";
   readonly packageSelection:
     "best_available_zero_incremental_cost";
   readonly incrementalCost: 0;
@@ -39,6 +41,30 @@ export interface ProductExperienceConfiguration {
   readonly networking: "enabled";
   readonly pageCount: 16;
 }
+
+export type AccountCategoryObservation =
+  | {
+      readonly status: "observed";
+      readonly category: "personal" | "enterprise" | "education";
+      readonly evidenceId: `ev_${string}`;
+    }
+  | {
+      readonly status: "ui_unavailable";
+      readonly reason: string;
+      readonly evidenceId: `ev_${string}`;
+    };
+
+export type CommercialPlanObservation =
+  | {
+      readonly status: "observed";
+      readonly planName: string;
+      readonly evidenceId: `ev_${string}`;
+    }
+  | {
+      readonly status: "ui_unavailable";
+      readonly reason: string;
+      readonly evidenceId: `ev_${string}`;
+    };
 
 export interface ProductRunCommand {
   readonly jobId: string;
@@ -55,6 +81,19 @@ export interface ArtifactCandidate {
   readonly policyCompliant: boolean;
   readonly renderManifest?: RenderManifest;
   readonly safeRasterCandidate?: SafeRasterCandidate;
+  readonly productionExecutionEvidence?:
+    ProductionDriverExecutionEvidence;
+}
+
+export interface ProductionDriverExecutionEvidence {
+  readonly driverSessionId: `session_${string}`;
+  readonly vendorTaskId: `task_${string}`;
+  readonly taskStateVersion: string;
+  readonly driverVersion: string;
+  readonly adapterVersion: string;
+  readonly outcome: "captured";
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly traceHash: `sha256:${string}`;
 }
 
 export interface SafeRasterCandidate {
@@ -78,6 +117,14 @@ export interface SafeRasterCandidate {
   };
 }
 
+export interface SafeRasterRendererPort {
+  readonly rendererId: string;
+  render(input: {
+    readonly artifact: Artifact;
+    readonly authorizationDecisionId: string;
+  }): Promise<SafeRasterCandidate>;
+}
+
 export interface ProductAttemptResult {
   readonly terminalReason: TerminalReason;
   readonly blockReason: BlockReason | null;
@@ -90,6 +137,8 @@ export interface ProductAttemptResult {
 
 export interface AttemptCheckpointPort {
   readonly checkpointStoreId: string;
+  readonly durability?: "ephemeral" | "durable";
+  readonly recoveryReferencePrefix?: string;
   append(event: ObservableAttemptEvent): Promise<void>;
 }
 
@@ -97,6 +146,8 @@ export class InMemoryAttemptCheckpointStore
   implements AttemptCheckpointPort
 {
   readonly checkpointStoreId: string;
+  readonly durability = "ephemeral" as const;
+  readonly recoveryReferencePrefix = "unavailable";
   readonly #events: ObservableAttemptEvent[] = [];
 
   constructor(

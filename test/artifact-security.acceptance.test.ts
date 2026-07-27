@@ -1109,7 +1109,6 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     runSpecificationVault,
     payloadInventory,
     tombstones,
-    specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -1213,7 +1212,6 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     runSpecificationVault,
     payloadInventory,
     tombstones,
-    specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -1230,7 +1228,6 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
       runSpecificationVault,
       payloadInventory: new InMemoryPayloadInventory(freshTombstones),
       tombstones: freshTombstones,
-      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
     }).startBakeoffJob({
       environment: "test",
       caseId: VOLCANO_CASE_ID,
@@ -1257,8 +1254,6 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         artifactVault,
         runSpecificationVault,
         payloadInventory,
-        specCommitSha:
-          "9e68de5801bc14f00c187336000c83ce8cc37efa",
       }).startBakeoffJob({
         environment: "test",
         caseId: VOLCANO_CASE_ID,
@@ -1280,7 +1275,6 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         targetRegion: "test",
         subprocessors: [],
       },
-      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
     }).startBakeoffJob({
       environment: "test",
       caseId: VOLCANO_CASE_ID,
@@ -1981,7 +1975,6 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     runSpecificationVault,
     payloadInventory,
     tombstones,
-    specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -2315,7 +2308,6 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     runSpecificationVault,
     payloadInventory: inventory,
     tombstones,
-    specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -2440,7 +2432,6 @@ test("retention expiry tombstones and deletes every controlled payload class whi
       runSpecificationVault,
       payloadInventory: inventory,
       tombstones,
-      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
     }).startBakeoffJob({
       environment: "test",
       caseId: VOLCANO_CASE_ID,

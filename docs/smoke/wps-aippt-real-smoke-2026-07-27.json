@@ -1,14 +1,24 @@
 {
-  "schemaVersion": "wps-aippt-real-smoke-v1",
+  "schemaVersion": "wps-aippt-real-smoke-v2",
   "observedDateLocal": "2026-07-27",
   "timezone": "Asia/Shanghai",
   "status": "passed_with_degraded_static_render",
-  "scope": "observable UI events and downloaded Artifact validation only",
+  "scope": "historical observable UI events, downloaded Artifact validation, and durable recovery rehearsal; no browser rerun",
   "productPackage": {
     "productUrl": "https://aippt.wps.cn/aippt/",
     "accountScope": "current_authenticated_account",
-    "accountIdentityObservation": "unknown",
-    "commercialPlanObservation": "unknown",
+    "accountObservationPolicy": "observe_category_or_record_ui_unavailable",
+    "commercialPlanObservationPolicy": "observe_plan_name_or_record_ui_unavailable",
+    "accountCategoryObservation": {
+      "status": "ui_unavailable",
+      "evidenceId": "ev_00000000000000a1",
+      "reason": "account category UI was not retained in the historical capture"
+    },
+    "commercialPlanObservation": {
+      "status": "ui_unavailable",
+      "evidenceId": "ev_00000000000000a2",
+      "reason": "commercial plan UI was not retained in the historical capture"
+    },
     "packageSelection": "best_available_zero_incremental_cost",
     "incrementalCost": 0,
     "mode": "professional",
@@ -88,20 +98,39 @@
     "zipValidation": "passed",
     "contentHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86"
   },
-  "productionHarness": {
-    "jobId": "production-job-volcano-wps-v1",
-    "environment": "production",
-    "status": "completed",
-    "provenance": "PRODUCTION",
-    "protocolId": "production-query-default-cost-v1",
-    "specCommitSha": "b38313c8f9c95498c7b975707bb88dbda08511bc",
-    "runSpecificationHash": "sha256:e500ae739293eb8110933b7e1c79cb52471080aa500e640c478886f21d1128d8",
-    "adapterSpecificationHash": "sha256:b7526f6d0f63ddc696526d545e00223820a7acd1e64cce6b65e05d9efda53b99",
-    "runnerCodeHash": "sha256:4f3dfff201e7b2f9bbfb53d5ec31271ca3cce436fcf670eb7d8a87c42e93dee8",
-    "checkpointCount": 6,
-    "artifactPackageManifestHash": "sha256:df1df97acd822cee59497e015683d51f92eff2deebb4513c6dac8061a7fc6d1c",
-    "artifactIdentityHash": "sha256:ba6fe24e7b26d078b0b568d92f3672f53481f66b9c64adf091d70a2e1b1f0cee",
-    "derivativeCount": 33
+  "durableRecoveryRehearsal": {
+    "status": "recovered_and_hash_verified",
+    "browserRerun": false,
+    "buildSpecCommitSha": "31f8a33e3990936c0c3c1b7109c6ae7131fc2081",
+    "buildIdentitySource": "BUILD_INJECTED_SOURCE_REVISION",
+    "artifactPackageManifestHash": "sha256:a5b130b9ed184923a037f95f72ce195f3f13c2ca6673962f9f1adc0149e6d9b0",
+    "artifactIdentityHash": "sha256:9088dacdbe91d5f7ed4267ef16cf7cb911672b0d5ea8e458f59c9a6565d94ba7",
+    "recoveredOriginalHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
+    "derivativeCount": 33,
+    "recoveredDerivativeCount": 33,
+    "artifactStorage": {
+      "primaryStoreId": "wps-smoke-artifact-primary-v1",
+      "recoveryStoreId": "wps-smoke-artifact-recovery-v1",
+      "recoveryReferencePrefix": "store:wps-smoke-artifact-recovery-v1:sha256-key",
+      "originalRecoveryKey": "artifacts/production-wps-volcano-c87cf5bd16ee81eb/original",
+      "originalRecoveryHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
+      "manifestRecoveryKey": "artifacts/production-wps-volcano-c87cf5bd16ee81eb/manifest",
+      "manifestRecoveryHash": "sha256:9088dacdbe91d5f7ed4267ef16cf7cb911672b0d5ea8e458f59c9a6565d94ba7"
+    },
+    "runSpecificationStorage": {
+      "storeId": "wps-smoke-run-spec-recovery-v1",
+      "recoveryReferencePrefix": "store:wps-smoke-run-spec-recovery-v1:sha256-key",
+      "key": "run-specifications/0609568a2305bdb8875efb0e38518a47403cf753c59aa54910c18283cb50f8a2",
+      "contentHash": "sha256:0609568a2305bdb8875efb0e38518a47403cf753c59aa54910c18283cb50f8a2"
+    },
+    "checkpointStorage": {
+      "checkpointStoreId": "wps-smoke-checkpoints-v1",
+      "recoveryReferencePrefix": "checkpoint-store:wps-smoke-checkpoints-v1:attempt",
+      "attemptReference": "checkpoint-store:wps-smoke-checkpoints-v1:attempt:production-attempt-wps-recovery-v1",
+      "recoveredCheckpointCount": 1,
+      "evidenceKind": "historical_capture_recovery_marker"
+    },
+    "durableCheckpointReplay": "not_available_for_historical_capture"
   },
   "render": {
     "pipeline": "libreoffice-impress+pdftoppm",
@@ -110,28 +139,28 @@
     "fidelityStatus": "degraded",
     "visualAssessment": "NOT_ASSESSABLE",
     "faithfulVisualGate": "CONDITIONAL",
-    "renderManifestHash": "sha256:b723f09da5f0c4891b2ad5b472be0536494581e77f16bfbf3ad25e3cd370ebae",
+    "renderManifestHash": "sha256:9bea928ae075bd5694c70859efc085e7ab91716d539122ef229de298f12b04c0",
     "pdfHash": "sha256:b0830a9511dad88d9f10dda45d17f4b8a6e18f5bd9c9f8b0a358d35c16d2208a",
     "firstPageHash": "sha256:63a682a8955c6b1ebdc14c12f5a685d63e998b0be453721ee8dc6a73474b27e2",
     "lastPageHash": "sha256:2be2d6cc60a1b54fa05a00e5c2e5389effee6584aefc192c28c404b176d68392",
-    "contactSheetHash": "sha256:58f9ad604fdeb9d2f1a5e7e50c8bb5a6e14cebcbda67c90aafed494a8bb363fc",
+    "contactSheetHash": "sha256:006e0e8993f5c11b8d1ba4faba9bda0d7687a41079feb8a228cc4d16606aceaa",
     "staticSlideHashes": [
-      "sha256:63a682a8955c6b1ebdc14c12f5a685d63e998b0be453721ee8dc6a73474b27e2",
-      "sha256:9ccb185960046661186447d70a3b0c4214f6387d3dd597e2e2f4eca85414fc91",
-      "sha256:58827602760b34a4c439ea5985e852b20a1fdcda3929326689d7459355800349",
-      "sha256:a5405533eeb0ddb00bed981e6e9460272cabbb98c2235bec98bd78085b01621a",
-      "sha256:92f8c6435a5b19e646a50ca4d8dd5af27ac253d31428add6abcdf0680bba9438",
-      "sha256:9de5c13063058191348bb7944d3a5d657c5b7cb2481771fecb2104b3e488b853",
-      "sha256:6f5baf0a0ad3836e687110062b0b5aa62cbe2fdf65cb416ca1907a52cfc4b3dd",
-      "sha256:b8e21655e2fa25e5c95b100d9da4c285c1aefbb01ecff76d811d255bc1a52649",
-      "sha256:3d59e9f144f9c08133eefa5ae0e88f0901b718acad99dabdf2330eb24908ab54",
-      "sha256:da058f792eff7accf76bb6360e167a900c060ee9b36ac4a9793235863eb9c3df",
-      "sha256:5d496e980214f61c6ad25cc33fe8c1df9cb79cdcaf428b0a8ed5f43a4bff8c19",
-      "sha256:8c2b0d6979528905f3894a62a1e22fa7afada5805faf23e520d8749b0043d1c4",
-      "sha256:3a80a88a58bdf41237abaca34f3987f96e3e6cfa3a7ea3c0652820a46534fa3b",
-      "sha256:8281af2b61788b6ee0f0991dfe916b1f651bc5b116cc09eb7e8e0e1127f5755d",
-      "sha256:6954433ec37f514a38ee3f60f7415039af8e7f5c7ece6f58632966c9460f5326",
-      "sha256:2be2d6cc60a1b54fa05a00e5c2e5389effee6584aefc192c28c404b176d68392"
+      "sha256:006e0e8993f5c11b8d1ba4faba9bda0d7687a41079feb8a228cc4d16606aceaa",
+      "sha256:87e869c4735bf2d9b1cf68aac737913fd8baac7174d4a28e16b63e77c7454943",
+      "sha256:b73b612d2a957403f59b4f90b106b4600319b6b4074f3c3c4e2e262a0a7706d2",
+      "sha256:c9b14e7e99f3562e530ee741688cc1d3efc82a9243eb2ab35994ddda729ed43e",
+      "sha256:2aba7f80197e30c242a6b4c3b8afcca2494ddf95bb983bff7fe1bb6048af73b8",
+      "sha256:5acf8585c54693f8ae9644892664df14584adbfca53b31ae812263a94355896f",
+      "sha256:8b090fe847e65e1989805f75b1781419a94b7523cd476df8250f88d0e783f13b",
+      "sha256:eaab21e621a921a98b203d9926d98e0b8e3ee7e2408112b53d94f507c7d5936c",
+      "sha256:ddaef15319455ae186cb2ebfa09dff0807dfe3edd6456330389d7c59110ad13f",
+      "sha256:908697423de6ab6f719b5b7455b182e2141d5b0db66a1c33baf39f8884be350f",
+      "sha256:24d17d5f081856c5f85e2c61e94b59e65cdc174af714c7dec717518e8f4f7363",
+      "sha256:81a05095862f109cd2fe9eda84d0ec409ec9a187f26fdd9b613e242a227a128c",
+      "sha256:1b0239ba9fc1da9269abe1a2ff1e6a49caee89af2c469993f3a0e8bd5dcd4cc9",
+      "sha256:cfd378b8766d74337581b2034e68a13510a1156c35d457a5e8f644bd3d8e5239",
+      "sha256:aaefd7724f673e9712dd07223f91329832dde71e702c338012e3a72efbef35fb",
+      "sha256:03b0b4805cf6955ea29c2f3b67863fb469235d345c356295095c938c5391372c"
     ],
     "fidelityNote": "The native WPS editor view was readable, but the local static renderer substituted or omitted Chinese glyphs."
   },
@@ -148,11 +177,15 @@
     "localHeaderAndCrcValidation": "passed",
     "opcContentTypesValidation": "passed",
     "opcRelationshipValidation": "passed",
+    "xmlEntityDecodedRelationshipValidation": "passed",
+    "presentationSlideIdRelationshipValidation": "passed",
+    "truePngDecodeAndCanonicalReencode": "passed",
     "macroAndEmbeddedActiveContentRejection": "passed",
     "externalRelationshipRejection": "passed"
   },
   "uncertainty": [
-    "The visible account identity and exact commercial plan name were intentionally not captured.",
+    "The historical capture did not retain the account-category or commercial-plan UI, so both are recorded as ui_unavailable with opaque evidence IDs.",
+    "The historical browser session did not emit the new durable checkpoint schema and was not replayed as a production driver session.",
     "The local static render is evidence of 16-page renderability, not a faithful design-scoring surface."
   ]
 }
