@@ -37,6 +37,29 @@
     "sha256": null,
     "staticRenderCount": 0
   },
+  "reconciliation": {
+    "observedAt": "2026-07-27T21:12:06.168Z",
+    "source": "retained_original_conversation",
+    "sameTaskEvidence": {
+      "submittedVisitAt": "2026-07-27T09:56:58.903Z",
+      "submittedAtDeltaMs": 122
+    },
+    "status": "browser_connection_blocked",
+    "readAttempts": [
+      "visible_dom",
+      "viewport_screenshot",
+      "bounded_controls",
+      "accessibility_tree",
+      "frame_tree"
+    ],
+    "completionVerified": false,
+    "verifiedPageCount": null,
+    "downloadReady": null,
+    "downloadCount": 0,
+    "retryPerformed": false,
+    "artifactCaptured": false,
+    "handoff": "original_conversation_retained"
+  },
   "retry": {
     "performed": false,
     "reason": "submission_was_observed_and_quality_retries_are_forbidden"

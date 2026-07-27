@@ -1116,6 +1116,14 @@ test("the real Qwen smoke metadata keeps a timed-out partial output out of Artif
       readonly sha256: string | null;
       readonly staticRenderCount: number;
     };
+    readonly reconciliation: {
+      readonly status: string;
+      readonly completionVerified: boolean;
+      readonly downloadReady: boolean | null;
+      readonly downloadCount: number;
+      readonly retryPerformed: boolean;
+      readonly artifactCaptured: boolean;
+    };
     readonly evaluationGate: {
       readonly artifactAccepted: boolean;
       readonly scorecardProduced: boolean;
@@ -1127,6 +1135,15 @@ test("the real Qwen smoke metadata keeps a timed-out partial output out of Artif
   assert.equal(smoke.result.pptxCaptured, false);
   assert.equal(smoke.result.sha256, null);
   assert.equal(smoke.result.staticRenderCount, 0);
+  assert.equal(
+    smoke.reconciliation.status,
+    "browser_connection_blocked",
+  );
+  assert.equal(smoke.reconciliation.completionVerified, false);
+  assert.equal(smoke.reconciliation.downloadReady, null);
+  assert.equal(smoke.reconciliation.downloadCount, 0);
+  assert.equal(smoke.reconciliation.retryPerformed, false);
+  assert.equal(smoke.reconciliation.artifactCaptured, false);
   assert.equal(smoke.evaluationGate.artifactAccepted, false);
   assert.equal(smoke.evaluationGate.scorecardProduced, false);
   assert.equal(smoke.evaluationGate.comparisonProduced, false);
