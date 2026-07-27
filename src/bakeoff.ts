@@ -19,7 +19,10 @@ import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
 } from "./environment-origin.ts";
-import type { FeishuProjectionPort } from "./feishu.ts";
+import type {
+  ComparisonReportSource,
+  FeishuProjectionPort,
+} from "./feishu.ts";
 import {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
@@ -142,6 +145,115 @@ interface SelectedProductAdapter {
   readonly adapter: ProductAdapterPort;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
+}
+
+function replayedBakeoffOutcome(
+  command: StartBakeoffJobCommand,
+  selections: readonly SelectedProductAdapter[],
+  source: ComparisonReportSource,
+): BakeoffJobOutcome {
+  const expectedRunIds = selections.map(({ runId }) => runId);
+  const selectedRunIds = source.job.selectedRunIds;
+  if (
+    source.job.caseId !== command.caseId ||
+    selectedRunIds === null ||
+    selectedRunIds.length !== expectedRunIds.length ||
+    selectedRunIds.some((runId, index) => runId !== expectedRunIds[index])
+  ) {
+    throw new Error(
+      `Bakeoff Job identity conflict: ${source.job.recordId}`,
+    );
+  }
+  assertEnvironmentOriginAllowed(
+    source.job.environmentOrigin,
+    command.environment,
+    `Bakeoff Job ${source.job.recordId}`,
+  );
+  if (
+    source.job.status !== "active" &&
+    source.job.status !== "completed" &&
+    source.job.status !== "partial" &&
+    source.job.status !== "failed"
+  ) {
+    throw new Error(
+      `Bakeoff Job has invalid parent status: ${source.job.status}`,
+    );
+  }
+  if (source.primaryReport === null) {
+    throw new Error(
+      `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
+    );
+  }
+
+  const vendorRuns = new Map(
+    source.vendorRuns.map((record) => [record.recordId, record]),
+  );
+  if (vendorRuns.size !== selections.length) {
+    throw new Error(
+      `Bakeoff Job identity conflict: ${source.job.recordId}`,
+    );
+  }
+  const capturesByArtifactId = new Map(
+    source.capturedArtifacts.map((record) => [record.artifactId, record]),
+  );
+  const scoresByScorecardId = new Map(
+    source.artifactScores.map((record) => [
+      record.scorecard.scorecardId,
+      record,
+    ]),
+  );
+  const captures = [];
+  const scorecards = [];
+  for (const selection of selections) {
+    const run = vendorRuns.get(selection.runId);
+    if (
+      run === undefined ||
+      run.product !== selection.productPackage.displayName ||
+      run.productVendorId !== selection.productPackage.vendorId ||
+      run.productPackageId !== selection.productPackage.packageId ||
+      run.adapterVersion !== selection.productPackage.adapterVersion
+    ) {
+      throw new Error(
+        `Bakeoff Job identity conflict: ${source.job.recordId}`,
+      );
+    }
+    if (run.artifactId !== null) {
+      const capture = capturesByArtifactId.get(run.artifactId);
+      if (capture === undefined || capture.runId !== run.recordId) {
+        throw new Error(
+          `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
+        );
+      }
+      captures.push(capture);
+    }
+    if (run.scorecardId !== null) {
+      const score = scoresByScorecardId.get(run.scorecardId);
+      if (score === undefined || score.runId !== run.recordId) {
+        throw new Error(
+          `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
+        );
+      }
+      scorecards.push(score.scorecard);
+    }
+  }
+
+  return {
+    job: {
+      jobId: source.job.jobId,
+      caseId: source.job.caseId,
+      environment: command.environment,
+      status: source.job.status,
+      provenance: "MOCK",
+      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    },
+    artifact: captures[0]?.artifact ?? null,
+    renderManifest: captures[0]?.renderManifest ?? null,
+    scorecard: scorecards[0] ?? null,
+    artifacts: captures.map(({ artifact }) => artifact),
+    renderManifests: captures.map(({ renderManifest }) => renderManifest),
+    scorecards,
+    report: source.primaryReport,
+  };
 }
 
 const KNOWN_VENDOR_SLUGS = new Map<string, string>([
@@ -671,6 +783,17 @@ export function createBakeoffHarness({
           productPackage.environmentOrigin,
           command.environment,
           `Product Package ${productPackage.packageId}`,
+        );
+      }
+
+      const existingSource = await feishu.findComparisonReportSource(
+        MOCK_SCENARIO.jobId,
+      );
+      if (existingSource !== null) {
+        return replayedBakeoffOutcome(
+          command,
+          selections,
+          existingSource,
         );
       }
 

@@ -18,23 +18,11 @@ import {
 
 function stableRunReplayPayload(record: RunRecord): unknown {
   const {
-    elapsedMs: _elapsedMs,
-    vendorGenerationMs: _vendorGenerationMs,
-    humanWaitMs: _humanWaitMs,
-    timingPausedAt: _timingPausedAt,
     reportUrl: _reportUrl,
     auxiliaryReportUrls: _auxiliaryReportUrls,
-    observableEvents,
     ...stable
   } = record;
-  return {
-    ...stable,
-    observableEvents:
-      observableEvents?.map(
-        ({ sourceAt: _sourceAt, observedAt: _observedAt, ...event }) =>
-          event,
-      ) ?? null,
-  };
+  return stable;
 }
 
 export interface EvaluationCaseTablePort {
@@ -75,9 +63,13 @@ export interface ComparisonReportSource {
   readonly vendorRuns: readonly RunRecord[];
   readonly capturedArtifacts: readonly CapturedArtifactTableRecord[];
   readonly artifactScores: readonly ArtifactScoreTableRecord[];
+  readonly primaryReport: FeishuReport | null;
 }
 
 export interface ComparisonReportSourcePort {
+  findComparisonReportSource(
+    jobId: string,
+  ): Promise<ComparisonReportSource | null>;
   loadComparisonReportSource(jobId: string): Promise<ComparisonReportSource>;
   artifactPageEvidenceUrl(artifactId: string, pageNumber: number): string;
 }
@@ -307,20 +299,24 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     return structuredClone(report);
   }
 
-  async loadComparisonReportSource(
+  async findComparisonReportSource(
     jobId: string,
-  ): Promise<ComparisonReportSource> {
+  ): Promise<ComparisonReportSource | null> {
     const job = this.#runRecordTable.find(
       (record) =>
         record.recordType === "bakeoff_job" && record.jobId === jobId,
     );
     if (job === undefined) {
-      throw new Error(`Bakeoff Job record not found: ${jobId}`);
+      return null;
     }
     const cloneRun = (record: RunRecord): RunRecord => ({
       ...structuredClone(record),
       environmentOrigin: record.environmentOrigin,
     });
+    const primaryReport =
+      job.reportUrl === null
+        ? null
+        : (this.#reports.find(({ url }) => url === job.reportUrl) ?? null);
     return {
       job: cloneRun(job),
       vendorRuns: this.#runRecordTable
@@ -341,7 +337,24 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
           ...structuredClone(record),
           environmentOrigin: record.environmentOrigin,
         })),
+      primaryReport:
+        primaryReport === null
+          ? null
+          : {
+              ...structuredClone(primaryReport),
+              environmentOrigin: primaryReport.environmentOrigin,
+            },
     };
+  }
+
+  async loadComparisonReportSource(
+    jobId: string,
+  ): Promise<ComparisonReportSource> {
+    const source = await this.findComparisonReportSource(jobId);
+    if (source === null) {
+      throw new Error(`Bakeoff Job record not found: ${jobId}`);
+    }
+    return source;
   }
 
   artifactPageEvidenceUrl(

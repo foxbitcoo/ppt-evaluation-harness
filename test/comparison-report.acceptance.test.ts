@@ -555,15 +555,23 @@ test("append-only reevaluations require explicit scorecard selection and bind co
   );
 });
 
-test("replaying the same stable Bakeoff IDs is idempotent while conflicting capture payloads are rejected", async () => {
+test("replaying the same stable Bakeoff IDs is idempotent while conflicting audit or capture payloads are rejected", async () => {
   const feishu = new InMemoryFeishuProjection();
+  let adapterExecutions = 0;
+  const adapters: readonly ProductAdapterPort[] = [
+    new MockWpsProductAdapter(),
+    new MockQwenProductAdapter(),
+    new MockDoubaoProductAdapter(),
+  ].map((adapter) => ({
+    productPackage: adapter.productPackage,
+    async execute(command) {
+      adapterExecutions += 1;
+      return adapter.execute(command);
+    },
+  }));
   const harness = createBakeoffHarness({
     feishu,
-    productAdapters: [
-      new MockWpsProductAdapter(),
-      new MockQwenProductAdapter(),
-      new MockDoubaoProductAdapter(),
-    ],
+    productAdapters: adapters,
   });
   const command = {
     environment: "test" as const,
@@ -575,6 +583,7 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting capt
   await harness.startBakeoffJob(command);
   const replayed = feishu.snapshot();
 
+  assert.equal(adapterExecutions, 3);
   assert.equal(replayed.runRecordTable.length, first.runRecordTable.length);
   assert.equal(
     replayed.capturedArtifactTable.length,
@@ -589,6 +598,39 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting capt
     first.productGapCardTable.length,
   );
   assert.equal(replayed.reports.length, first.reports.length);
+
+  const attempt = first.runRecordTable.find(
+    ({ recordType }) => recordType === "evaluation_attempt",
+  );
+  assert.ok(attempt);
+  await assert.rejects(
+    feishu.appendRunRecord({
+      ...attempt,
+      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      elapsedMs: (attempt.elapsedMs ?? 0) + 1,
+      vendorGenerationMs: (attempt.vendorGenerationMs ?? 0) + 1,
+    }),
+    /identity conflict/i,
+  );
+
+  assert.ok(attempt.observableEvents?.[0]);
+  await assert.rejects(
+    feishu.appendRunRecord({
+      ...attempt,
+      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      observableEvents: attempt.observableEvents.map((event, index) =>
+        index === 0
+          ? {
+              ...event,
+              observedAt: new Date(
+                Date.parse(event.observedAt) + 1,
+              ).toISOString(),
+            }
+          : event,
+      ),
+    }),
+    /identity conflict/i,
+  );
 
   const capture = first.capturedArtifactTable[0];
   assert.ok(capture);
