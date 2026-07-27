@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "vendor": "Qwen Web",
+  "issue": 9,
+  "adapterCommit": "f9a4afcd761827377bff6fbc0c20a8ae74288522",
+  "evaluationCase": "volcano-query-v1",
+  "entryOrigin": "https://www.qianwen.com",
+  "submittedAt": "2026-07-27T17:56:58.781+08:00",
+  "observedAt": "2026-07-27T18:27:12.486+08:00",
+  "elapsedMs": 1813705,
+  "runtimeConfiguration": {
+    "accountReference": "current_signed_in_account",
+    "visibleModel": "Qwen3.7-千问",
+    "packageSelection": "best_available_zero_added_cost",
+    "expertMode": "enabled",
+    "networking": {
+      "requested": true,
+      "independentUiToggleObserved": false,
+      "verified": false
+    },
+    "visiblePageRange": "10-20",
+    "targetPageCount": 16
+  },
+  "result": {
+    "status": "timeout_partial",
+    "submissionEvidence": "submitted",
+    "submissionCount": 1,
+    "onlineArtifactCard": {
+      "createdAt": "2026-07-27T18:02:00+08:00",
+      "createdAtPrecision": "minute",
+      "reportedSizeMb": 23.78
+    },
+    "observedPageCountLowerBound": 12,
+    "verifiedPageCount": null,
+    "downloadReady": false,
+    "pptxCaptured": false,
+    "sha256": null,
+    "staticRenderCount": 0
+  },
+  "retry": {
+    "performed": false,
+    "reason": "submission_was_observed_and_quality_retries_are_forbidden"
+  },
+  "safety": {
+    "paymentOrUpgradeOpened": false,
+    "challengeHandled": false,
+    "sessionDataAccessed": false,
+    "hiddenReasoningPersisted": false
+  },
+  "evaluationGate": {
+    "artifactAccepted": false,
+    "scorecardProduced": false,
+    "comparisonProduced": false,
+    "reason": "No downloaded PPTX, verified 16-page file, or complete static-render package was captured before the deadline."
+  }
+}

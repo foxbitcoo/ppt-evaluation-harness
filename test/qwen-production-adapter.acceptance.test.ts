@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -457,5 +458,40 @@ test("the Qwen artifact safety gate rejects a downloaded presentation containing
       evaluationCase: VOLCANO_EVALUATION_CASE,
     }),
     /macro|unsafe PPTX/i,
+  );
+});
+
+test("the real Qwen smoke metadata keeps a timed-out partial output out of Artifact, scorecard, and comparison", () => {
+  const raw = readFileSync(
+    new URL(
+      "../docs/smoke/qwen-real-smoke-2026-07-27.json",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const smoke = JSON.parse(raw) as {
+    readonly result: {
+      readonly status: string;
+      readonly pptxCaptured: boolean;
+      readonly sha256: string | null;
+      readonly staticRenderCount: number;
+    };
+    readonly evaluationGate: {
+      readonly artifactAccepted: boolean;
+      readonly scorecardProduced: boolean;
+      readonly comparisonProduced: boolean;
+    };
+  };
+
+  assert.equal(smoke.result.status, "timeout_partial");
+  assert.equal(smoke.result.pptxCaptured, false);
+  assert.equal(smoke.result.sha256, null);
+  assert.equal(smoke.result.staticRenderCount, 0);
+  assert.equal(smoke.evaluationGate.artifactAccepted, false);
+  assert.equal(smoke.evaluationGate.scorecardProduced, false);
+  assert.equal(smoke.evaluationGate.comparisonProduced, false);
+  assert.doesNotMatch(
+    raw,
+    /Qwen1062|\/Users\/|localStorage|authorization|password/i,
   );
 });
