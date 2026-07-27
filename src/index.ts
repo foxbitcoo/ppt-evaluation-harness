@@ -21,6 +21,14 @@ export {
   BUILD_SPEC_COMMIT_SHA,
 } from "./build-identity.ts";
 export {
+  loadDurableRootRegistry,
+  registerDurableRoots,
+  resolveDurableRoot,
+  retainedRehearsalRoot,
+  type DurableRootRegistry,
+  type DurableRootRegistryEntry,
+} from "./durable-root-registry.ts";
+export {
   VENDOR_GENERATION_TIMEOUT_MS,
   ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
   createBakeoffHarness,
@@ -157,6 +165,7 @@ export {
 export {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
+  PRODUCTION_VOLCANO_EVALUATION_CASE,
 } from "./fixtures/volcano-case.ts";
 export {
   MockDoubaoProductAdapter,
@@ -186,6 +195,7 @@ export {
   WPS_AIPPT_EXPERIENCE_CONFIGURATION,
   WPS_AIPPT_URL,
   WpsAiPptProductAdapter,
+  WpsAiPptReplayAdapter,
   resolveWpsAiPptProductAdapterExecutor,
   type WpsAiPptBrowserArtifactCapture,
   type WpsAiPptBrowserCommand,
@@ -201,6 +211,7 @@ export {
   WPS_AIPPT_BROWSER_DRIVER_VERSION,
   WPS_AIPPT_BROWSER_PROFILE_DIGEST,
   createWpsAiPptBrowserDriverPackage,
+  createWpsAiPptRealProviderReplayPackage,
   registeredWpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverPort,

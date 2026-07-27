@@ -3,12 +3,15 @@ import { createHash } from "node:crypto";
 import {
   FileSystemAttemptCheckpointStore,
   FileSystemImmutableBlobStore,
+  loadDurableRootRegistry,
+  resolveDurableRoot,
 } from "../src/index.ts";
 
 const [
-  artifactRecoveryRoot,
-  runSpecificationRoot,
-  checkpointRoot,
+  registryId,
+  artifactRecoveryRootReference,
+  runSpecificationRootReference,
+  checkpointRootReference,
   artifactStoreId,
   manifestKey,
   originalKey,
@@ -18,9 +21,10 @@ const [
   attemptId,
 ] = process.argv.slice(2);
 if (
-  artifactRecoveryRoot === undefined ||
-  runSpecificationRoot === undefined ||
-  checkpointRoot === undefined ||
+  registryId === undefined ||
+  artifactRecoveryRootReference === undefined ||
+  runSpecificationRootReference === undefined ||
+  checkpointRootReference === undefined ||
   artifactStoreId === undefined ||
   manifestKey === undefined ||
   originalKey === undefined ||
@@ -31,6 +35,19 @@ if (
 ) {
   throw new Error("Recovery command arguments are incomplete");
 }
+const registry = await loadDurableRootRegistry(registryId);
+const artifactRecoveryRoot = resolveDurableRoot(
+  registry,
+  artifactRecoveryRootReference,
+);
+const runSpecificationRoot = resolveDurableRoot(
+  registry,
+  runSpecificationRootReference,
+);
+const checkpointRoot = resolveDurableRoot(
+  registry,
+  checkpointRootReference,
+);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
   rootPath: artifactRecoveryRoot,
@@ -85,6 +102,13 @@ if (
 }
 process.stdout.write(
   `${JSON.stringify({
+    registryId,
+    registryHash: registry.registryHash,
+    rootReferences: {
+      artifactRecovery: artifactRecoveryRootReference,
+      runSpecification: runSpecificationRootReference,
+      checkpoint: checkpointRootReference,
+    },
     manifestHash: hash(manifest),
     originalHash,
     runSpecificationHash: hash(runSpecification),

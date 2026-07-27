@@ -879,7 +879,17 @@ export function resolveHarnessProductAdapterExecutor(
       );
     }
     if (scenario === "hung") {
-      return new Promise<Artifact>(() => {});
+      return new Promise<Artifact>((_, reject) => {
+        if (command.signal.aborted) {
+          reject(new Error("mock adapter aborted"));
+          return;
+        }
+        command.signal.addEventListener(
+          "abort",
+          () => reject(new Error("mock adapter aborted")),
+          { once: true },
+        );
+      });
     }
     if (scenario === "throwing") {
       throw new Error("simulated adapter crash");

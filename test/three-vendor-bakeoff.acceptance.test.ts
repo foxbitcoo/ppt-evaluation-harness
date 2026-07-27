@@ -48,6 +48,7 @@ function deterministicDeadline(
         return {
           timedOut: true,
           elapsedMs: VENDOR_GENERATION_TIMEOUT_MS,
+          shutdownCompleted: true,
         };
       }
       const controller = new AbortController();
@@ -701,7 +702,7 @@ test("production rejects every Mock lineage even when every visible provenance l
       mockAdapter.executionConfigurationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
-      provenance: "PRODUCTION",
+      provenance: "LIVE_PRODUCTION",
     },
   };
   await assert.rejects(
@@ -731,7 +732,7 @@ test("the command environment must match the projection environment before any a
       mockAdapter.executionConfigurationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
-      provenance: "PRODUCTION",
+      provenance: "LIVE_PRODUCTION",
       environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
     },
   };
@@ -960,15 +961,22 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
     scenario: "hung",
   });
   let deadlineCall = 0;
+  let shutdownAwaited = false;
   const immediateDeadline: AttemptDeadlinePort = {
     async run(operation, timeoutMs) {
       deadlineCall += 1;
       const controller = new AbortController();
       if (deadlineCall === 1) {
         executeCount += 1;
-        void operation(controller.signal);
+        const running = operation(controller.signal);
         controller.abort();
-        return { timedOut: true, elapsedMs: timeoutMs };
+        await assert.rejects(running, /adapter aborted/i);
+        shutdownAwaited = true;
+        return {
+          timedOut: true,
+          elapsedMs: timeoutMs,
+          shutdownCompleted: true,
+        };
       }
       return {
         timedOut: false,
@@ -999,11 +1007,46 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
     );
 
   assert.equal(executeCount, 1);
+  assert.equal(shutdownAwaited, true);
   assert.equal(outcome.job.status, "partial");
   assert.equal(wpsAttempt?.status, "timed_out");
   assert.equal(wpsAttempt?.elapsedMs, 1_800_000);
   assert.equal(wpsAttempt?.submissionEvidence, "unknown");
   assert.equal(wpsAttempt?.terminalReason, "vendor_timeout");
+});
+
+test("a timed-out Attempt cannot finalize before adapter shutdown and reconciliation complete", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const incompleteDeadline = {
+    async run() {
+      return {
+        timedOut: true,
+        elapsedMs: VENDOR_GENERATION_TIMEOUT_MS,
+        shutdownCompleted: false,
+      };
+    },
+  } as unknown as AttemptDeadlinePort;
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapter: new MockWpsProductAdapter(),
+      attemptDeadline: incompleteDeadline,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /shutdown.*reconciliation.*complete/i,
+  );
+  assert.equal(
+    feishu
+      .snapshot()
+      .runRecordTable.some(
+        ({ recordType }) =>
+          recordType === "evaluation_attempt",
+      ),
+    false,
+  );
 });
 
 test("a thrown adapter error becomes a persisted technical failure with unknown submission evidence", async () => {

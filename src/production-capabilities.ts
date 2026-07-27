@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import sharp from "sharp";
 
@@ -32,7 +33,7 @@ import {
 } from "./run-specification.ts";
 
 interface FailureDomainConfiguration {
-  readonly failureDomainId: string;
+  readonly operatorDomainLabel: string;
   readonly rootPath: string;
   readonly rootReference: string;
   readonly storeId: string;
@@ -41,20 +42,27 @@ interface FailureDomainConfiguration {
 export interface HarnessOwnedProductionCapabilityEvidence {
   readonly schemaVersion: "production-capability-evidence-v1";
   readonly capabilityBundleId: string;
+  readonly artifactStorageTopology: {
+    readonly isolation:
+      | "single_failure_domain"
+      | "device_separated";
+    readonly primaryDeviceIdentity: string;
+    readonly recoveryDeviceIdentity: string;
+  };
   readonly artifactPrimary: {
-    readonly failureDomainId: string;
     readonly rootReference: string;
     readonly storeId: string;
+    readonly backendInstanceIdentity: string;
   };
   readonly artifactRecovery: {
-    readonly failureDomainId: string;
     readonly rootReference: string;
     readonly storeId: string;
+    readonly backendInstanceIdentity: string;
   };
   readonly runSpecification: {
-    readonly failureDomainId: string;
     readonly rootReference: string;
     readonly storeId: string;
+    readonly backendInstanceIdentity: string;
   };
   readonly checkpoint: {
     readonly rootReference: string;
@@ -86,9 +94,36 @@ function safeIdentifier(value: string, label: string): void {
 
 function evidenceFor(configuration: FailureDomainConfiguration) {
   return Object.freeze({
-    failureDomainId: configuration.failureDomainId,
     rootReference: configuration.rootReference,
     storeId: configuration.storeId,
+  });
+}
+
+function sha256(value: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function backendAttestation(
+  configuration: FailureDomainConfiguration,
+): {
+  readonly deviceIdentity: `fs-device:sha256:${string}`;
+  readonly backendInstanceIdentity: `fs-backend:sha256:${string}`;
+} {
+  const root = resolve(configuration.rootPath);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const stat = statSync(root);
+  return Object.freeze({
+    deviceIdentity:
+      `fs-device:${sha256(String(stat.dev))}` as const,
+    backendInstanceIdentity:
+      `fs-backend:${sha256(
+        JSON.stringify({
+          dev: stat.dev,
+          ino: stat.ino,
+          root,
+          storeId: configuration.storeId,
+        }),
+      )}` as const,
   });
 }
 
@@ -123,15 +158,12 @@ export function createHarnessOwnedProductionCapabilities(input: {
   const primaryRoot = resolve(input.artifactPrimary.rootPath);
   const recoveryRoot = resolve(input.artifactRecovery.rootPath);
   if (
-    input.artifactPrimary.failureDomainId ===
-      input.artifactRecovery.failureDomainId ||
     input.artifactPrimary.rootReference ===
       input.artifactRecovery.rootReference ||
-    primaryRoot === recoveryRoot ||
-    dirname(primaryRoot) === dirname(recoveryRoot)
+    primaryRoot === recoveryRoot
   ) {
     throw new Error(
-      "Production Artifact primary and recovery stores require distinct failure domains and roots",
+      "Production Artifact primary and recovery stores require distinct roots",
     );
   }
   for (const configuration of [
@@ -140,8 +172,8 @@ export function createHarnessOwnedProductionCapabilities(input: {
     input.runSpecification,
   ]) {
     safeIdentifier(
-      configuration.failureDomainId,
-      "failureDomainId",
+      configuration.operatorDomainLabel,
+      "operatorDomainLabel",
     );
     safeIdentifier(configuration.rootReference, "rootReference");
     safeIdentifier(configuration.storeId, "storeId");
@@ -151,6 +183,15 @@ export function createHarnessOwnedProductionCapabilities(input: {
   safeIdentifier(input.profileLock.rootReference, "profile rootReference");
   safeIdentifier(input.profileLock.lockId, "profile lockId");
   safeIdentifier(input.renderer.rendererId, "rendererId");
+  const primaryAttestation = backendAttestation(
+    input.artifactPrimary,
+  );
+  const recoveryAttestation = backendAttestation(
+    input.artifactRecovery,
+  );
+  const runSpecificationAttestation = backendAttestation(
+    input.runSpecification,
+  );
 
   const primary = new FileSystemImmutableBlobStore({
     storeId: input.artifactPrimary.storeId,
@@ -294,9 +335,32 @@ export function createHarnessOwnedProductionCapabilities(input: {
     evidence: Object.freeze({
       schemaVersion: "production-capability-evidence-v1",
       capabilityBundleId,
-      artifactPrimary: evidenceFor(input.artifactPrimary),
-      artifactRecovery: evidenceFor(input.artifactRecovery),
-      runSpecification: evidenceFor(input.runSpecification),
+      artifactStorageTopology: Object.freeze({
+        isolation:
+          primaryAttestation.deviceIdentity ===
+          recoveryAttestation.deviceIdentity
+            ? "single_failure_domain"
+            : "device_separated",
+        primaryDeviceIdentity:
+          primaryAttestation.deviceIdentity,
+        recoveryDeviceIdentity:
+          recoveryAttestation.deviceIdentity,
+      }),
+      artifactPrimary: Object.freeze({
+        ...evidenceFor(input.artifactPrimary),
+        backendInstanceIdentity:
+          primaryAttestation.backendInstanceIdentity,
+      }),
+      artifactRecovery: Object.freeze({
+        ...evidenceFor(input.artifactRecovery),
+        backendInstanceIdentity:
+          recoveryAttestation.backendInstanceIdentity,
+      }),
+      runSpecification: Object.freeze({
+        ...evidenceFor(input.runSpecification),
+        backendInstanceIdentity:
+          runSpecificationAttestation.backendInstanceIdentity,
+      }),
       checkpoint: Object.freeze({
         rootReference: input.checkpoint.rootReference,
         storeId: input.checkpoint.storeId,

@@ -7,6 +7,7 @@ import type {
   Artifact,
   ObservableAttemptEvent,
   SubmissionEvidence,
+  TerminalReason,
 } from "./domain.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
@@ -92,12 +93,14 @@ function implementationPackage(): ProductAdapterImplementationPackage {
   });
 }
 
-function executionConfigurationPackage():
+function executionConfigurationPackage(
+  scenario: "production-live" | "production-replay",
+):
   ProductAdapterImplementationPackage {
   const content = textEncoder.encode(
     JSON.stringify({
       adapterKind: "wps-aippt-browser",
-      scenario: "production",
+      scenario,
       schemaVersion:
         "product-adapter-execution-configuration-v1",
     }),
@@ -128,6 +131,13 @@ export interface WpsAiPptBrowserEvent {
   readonly taskStateVersion: string | null;
   readonly adapterVersion: typeof WPS_AIPPT_ADAPTER_VERSION;
   readonly artifactId: string | null;
+  readonly reconciliationObservedState?:
+    | "unknown"
+    | "submitted"
+    | "artifact_ready"
+    | "failed";
+  readonly reconciliationTerminalReason?: TerminalReason;
+  readonly reconciliationArtifactReference?: string | null;
 }
 
 export interface WpsAiPptBrowserCommand {
@@ -329,6 +339,24 @@ async function observableEvent(
         taskStateVersion: event.taskStateVersion,
         adapterVersion: event.adapterVersion,
         artifactId: event.artifactId,
+        ...(event.reconciliationObservedState === undefined
+          ? {}
+          : {
+              reconciliationObservedState:
+                event.reconciliationObservedState,
+            }),
+        ...(event.reconciliationTerminalReason === undefined
+          ? {}
+          : {
+              reconciliationTerminalReason:
+                event.reconciliationTerminalReason,
+            }),
+        ...(event.reconciliationArtifactReference === undefined
+          ? {}
+          : {
+              reconciliationArtifactReference:
+                event.reconciliationArtifactReference,
+            }),
       });
       await checkpointStore?.append(checkpoint);
       return checkpoint;
@@ -343,6 +371,23 @@ function checkedManualActions(
       return action;
     }),
   );
+}
+
+function terminalReasonForReconciliation(
+  observedState: WpsAiPptBrowserEvent["reconciliationObservedState"],
+): "task_state_unknown" | "download_failure" | "technical_failure" {
+  if (observedState === "artifact_ready") return "download_failure";
+  if (observedState === "failed") return "technical_failure";
+  return "task_state_unknown";
+}
+
+function artifactReferenceForReconciliation(
+  observedState: WpsAiPptBrowserEvent["reconciliationObservedState"],
+  vendorTaskId: string,
+): string | null {
+  return observedState === "artifact_ready"
+    ? `wps-task:${vendorTaskId}`
+    : null;
 }
 
 function assertObservedConfiguration(
@@ -579,63 +624,51 @@ interface ParsedRelationship {
   readonly targetMode: string | null;
 }
 
-function decodeXmlEntities(xml: string): string {
+function parseRelationships(xml: string): readonly ParsedRelationship[] {
   if (/<!DOCTYPE|<!ENTITY/i.test(xml)) {
     throw new Error("WPS Artifact OPC XML declarations are unsafe");
   }
-  return xml.replace(
-    /&(?:#(\d+)|#x([a-f0-9]+)|amp|lt|gt|quot|apos);/gi,
-    (entity, decimal: string | undefined, hex: string | undefined) => {
-      if (decimal !== undefined || hex !== undefined) {
-        const value = Number.parseInt(decimal ?? hex!, hex === undefined ? 10 : 16);
-        if (
-          !Number.isInteger(value) ||
-          value < 0x20 ||
-          value > 0x10ffff ||
-          (value >= 0xd800 && value <= 0xdfff)
-        ) {
-          throw new Error("WPS Artifact OPC XML entity is unsafe");
-        }
-        return String.fromCodePoint(value);
-      }
-      const named: Record<string, string> = {
-        "&amp;": "&",
-        "&lt;": "<",
-        "&gt;": ">",
-        "&quot;": '"',
-        "&apos;": "'",
-      };
-      return named[entity.toLowerCase()] ?? entity;
-    },
-  );
-}
-
-function parsedAttributes(fragment: string): ReadonlyMap<string, string> {
-  return new Map(
-    [...fragment.matchAll(/([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*(["'])(.*?)\2/g)]
-      .map((match) => [match[1]!, match[3]!] as const),
-  );
-}
-
-function parseRelationships(xml: string): readonly ParsedRelationship[] {
-  const decoded = decodeXmlEntities(xml);
-  const relationships = [
-    ...decoded.matchAll(/<Relationship\b([^>]*)\/?>/gi),
-  ].map((match) => {
-    const attributes = parsedAttributes(match[1]!);
-    const id = attributes.get("Id");
-    const type = attributes.get("Type");
-    const target = attributes.get("Target");
+  const relationshipNamespace =
+    "http://schemas.openxmlformats.org/package/2006/relationships";
+  const stack: Array<{ readonly uri: string; readonly local: string }> = [];
+  const relationships: ParsedRelationship[] = [];
+  const parser = new SaxesParser({ xmlns: true });
+  parser.on("opentag", (tag) => {
+    stack.push({ uri: tag.uri, local: tag.local });
+    if (
+      stack.length !== 2 ||
+      stack[0]?.uri !== relationshipNamespace ||
+      stack[0]?.local !== "Relationships" ||
+      stack[1]?.uri !== relationshipNamespace ||
+      stack[1]?.local !== "Relationship"
+    ) {
+      return;
+    }
+    const attributes = Object.values(tag.attributes);
+    const value = (name: string) =>
+      attributes.find(
+        (attribute) =>
+          attribute.uri === "" && attribute.local === name,
+      )?.value;
+    const id = value("Id");
+    const type = value("Type");
+    const target = value("Target");
     if (id === undefined || type === undefined || target === undefined) {
       throw new Error("WPS Artifact OPC relationship is malformed");
     }
-    return Object.freeze({
-      id,
-      type,
-      target,
-      targetMode: attributes.get("TargetMode") ?? null,
-    });
+    relationships.push(
+      Object.freeze({
+        id,
+        type,
+        target,
+        targetMode: value("TargetMode") ?? null,
+      }),
+    );
   });
+  parser.on("closetag", () => {
+    stack.pop();
+  });
+  parser.write(xml).close();
   if (relationships.length === 0) {
     throw new Error("WPS Artifact OPC relationships are missing");
   }
@@ -820,6 +853,7 @@ function capturedResult(
   command: ProductRunCommand,
   driver: WpsAiPptBrowserDriverPort | undefined,
   result: WpsAiPptCapturedBrowserResult,
+  executionMode: "live" | "replay",
 ): {
   readonly artifact: Artifact;
   readonly safeRasterCandidate: SafeRasterCandidate | undefined;
@@ -828,12 +862,19 @@ function capturedResult(
 } {
   assertObservedConfiguration(result.observedConfiguration);
   assertOpenableSixteenPagePptx(result.artifact);
-  if (driver === undefined && result.render !== undefined) {
+  if (
+    (executionMode === "live" || executionMode === "replay") &&
+    command.evaluationCase.provenance === "PRODUCTION" &&
+    result.render !== undefined
+  ) {
     throw new Error(
-      "Production WPS browser runtime cannot submit raster output before renderer authorization",
+      "Production WPS capture cannot submit raster output before renderer authorization",
     );
   }
-  if (driver !== undefined && result.render === undefined) {
+  if (
+    driver?.provenance === "TEST_FAKE" &&
+    result.render === undefined
+  ) {
     throw new Error("WPS TEST_FAKE captured result requires a static render");
   }
   const render = result.render;
@@ -848,9 +889,13 @@ function capturedResult(
   }
   const contentHash = sha256(result.artifact.content);
   const provenance =
-    driver === undefined ? "PRODUCTION" : "MOCK";
+    command.evaluationCase.provenance === "PRODUCTION"
+      ? executionMode === "live"
+        ? "LIVE_PRODUCTION"
+        : "PRODUCTION_REPLAY"
+      : "MOCK";
   const environmentOrigin =
-    driver === undefined
+    command.evaluationCase.provenance === "PRODUCTION"
       ? PRODUCTION_ENVIRONMENT_ORIGIN
       : MOCK_TEST_ENVIRONMENT_ORIGIN;
   const artifact: Artifact = Object.freeze({
@@ -908,10 +953,16 @@ export function resolveWpsAiPptProductAdapterExecutor(
 ): ProductAdapterExecutor {
   if (
     executionConfiguration.adapterKind !== "wps-aippt-browser" ||
-    executionConfiguration.scenario !== "production"
+    !["production-live", "production-replay"].includes(
+      executionConfiguration.scenario,
+    )
   ) {
     throw new Error("WPS adapter execution configuration is invalid");
   }
+  const executionMode =
+    executionConfiguration.scenario === "production-replay"
+      ? "replay"
+      : "live";
   assertRegisteredImplementationPackage(implementation);
   return Object.freeze(async (command: ProductRunCommand) => {
     if (
@@ -965,10 +1016,11 @@ export function resolveWpsAiPptProductAdapterExecutor(
       );
     }
     if (persistedEvents.length > 0) {
-      const alreadyReconciled = persistedEvents.some(
+      const latestReconciliation = [...persistedEvents].reverse().find(
         ({ eventType }) =>
           eventType === "task_reconciliation_result",
       );
+      const alreadyReconciled = latestReconciliation !== undefined;
       const latestTaskCheckpoint = [...persistedEvents].reverse().find(
         (event) =>
           event.vendorTaskId !== null &&
@@ -987,7 +1039,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
               textEncoder.encode(JSON.stringify(persistedEvents)),
             ),
             artifactContentHash: null,
-          });
+          }, executionMode);
         persistedEvents.push(
           await observableEvent(
             command,
@@ -1010,6 +1062,17 @@ export function resolveWpsAiPptProductAdapterExecutor(
                 reconciliation.query.taskStateVersion,
               adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
               artifactId: null,
+              reconciliationObservedState:
+                reconciliation.observedState,
+              reconciliationTerminalReason:
+                terminalReasonForReconciliation(
+                  reconciliation.observedState,
+                ),
+              reconciliationArtifactReference:
+                artifactReferenceForReconciliation(
+                  reconciliation.observedState,
+                  reconciliation.query.vendorTaskId,
+                ),
             },
             persistedEvents.length,
             checkpointStore,
@@ -1025,7 +1088,12 @@ export function resolveWpsAiPptProductAdapterExecutor(
             event.submissionEvidenceAtCheckpoint === "submitted",
         );
         return {
-          terminalReason: "task_state_unknown",
+          terminalReason:
+            [...persistedEvents].reverse().find(
+              ({ eventType }) =>
+                eventType === "task_reconciliation_result",
+            )?.reconciliationTerminalReason ??
+            "task_state_unknown",
           blockReason: null,
           submissionEvidence: submitted ? "submitted" : "unknown",
           elapsedMs: 0,
@@ -1038,15 +1106,16 @@ export function resolveWpsAiPptProductAdapterExecutor(
     const runBrowser = resolveRegisteredWpsAiPptBrowserDriver(
       browserDriver,
       async (event) => {
-        persistedEvents.push(
-          await observableEvent(
-            command,
-            event,
-            persistedEvents.length,
-            checkpointStore,
-          ),
+        const checkpoint = await observableEvent(
+          command,
+          event,
+          persistedEvents.length,
+          checkpointStore,
         );
+        persistedEvents.push(checkpoint);
+        return checkpoint;
       },
+      executionMode,
     );
     let result: WpsAiPptBrowserResult;
     try {
@@ -1091,7 +1160,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
             textEncoder.encode(JSON.stringify(persistedEvents)),
           ),
           artifactContentHash: null,
-        });
+        }, executionMode);
       persistedEvents.push(
         await observableEvent(
           command,
@@ -1107,18 +1176,26 @@ export function resolveWpsAiPptProductAdapterExecutor(
               reconciliation.query.taskStateVersion,
             adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
             artifactId: null,
+            reconciliationObservedState:
+              reconciliation.observedState,
+            reconciliationTerminalReason:
+              terminalReasonForReconciliation(
+                reconciliation.observedState,
+              ),
+            reconciliationArtifactReference:
+              artifactReferenceForReconciliation(
+                reconciliation.observedState,
+                reconciliation.query.vendorTaskId,
+              ),
           },
           persistedEvents.length,
           checkpointStore,
         ),
       );
       return {
-        terminalReason:
-          reconciliation.observedState === "artifact_ready"
-            ? "download_failure"
-            : reconciliation.observedState === "failed"
-              ? "technical_failure"
-              : "task_state_unknown",
+        terminalReason: terminalReasonForReconciliation(
+          reconciliation.observedState,
+        ),
         blockReason: null,
         submissionEvidence: "submitted",
         elapsedMs: 0,
@@ -1158,18 +1235,15 @@ export function resolveWpsAiPptProductAdapterExecutor(
           taskStateVersion: latest.taskStateVersion,
           eventHistoryHash,
           artifactContentHash: null,
-        });
+        }, executionMode);
       if (!Number.isFinite(Date.parse(reconciliation.observedAt))) {
         throw new Error(
           "WPS reconciliation API returned inconsistent task state",
         );
       }
-      reconciledTerminalReason =
-        reconciliation.observedState === "artifact_ready"
-          ? "download_failure"
-          : reconciliation.observedState === "failed"
-            ? "technical_failure"
-            : "task_state_unknown";
+      reconciledTerminalReason = terminalReasonForReconciliation(
+        reconciliation.observedState,
+      );
       persistedEvents.push(
         await observableEvent(
           command,
@@ -1185,6 +1259,15 @@ export function resolveWpsAiPptProductAdapterExecutor(
             taskStateVersion: latest.taskStateVersion,
             adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
             artifactId: null,
+            reconciliationObservedState:
+              reconciliation.observedState,
+            reconciliationTerminalReason:
+              reconciledTerminalReason,
+            reconciliationArtifactReference:
+              artifactReferenceForReconciliation(
+                reconciliation.observedState,
+                latest.vendorTaskId,
+              ),
           },
           persistedEvents.length,
           checkpointStore,
@@ -1222,6 +1305,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
       command,
       browserDriver,
       result,
+      executionMode,
     );
     return {
       terminalReason: "success",
@@ -1249,7 +1333,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
 export class WpsAiPptProductAdapter implements ProductAdapterPort {
   readonly implementationPackage = implementationPackage();
   readonly executionConfigurationPackage =
-    executionConfigurationPackage();
+    executionConfigurationPackage("production-live");
   readonly executionConfiguration: ProductAdapterExecutionConfiguration =
     parseAdapterExecutionConfiguration(
       this.executionConfigurationPackage,
@@ -1259,12 +1343,37 @@ export class WpsAiPptProductAdapter implements ProductAdapterPort {
     vendorId: "wps",
     displayName: "WPS AI PPT",
     adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
-    provenance: "PRODUCTION",
+    provenance: "LIVE_PRODUCTION",
     environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
     egressDestination: {
       targetService: "wps-aippt-web",
       targetAccount: "current-authenticated-account",
       targetRegion: "cn",
+      subprocessors: [],
+    },
+    experienceConfiguration: WPS_AIPPT_EXPERIENCE_CONFIGURATION,
+  });
+}
+
+export class WpsAiPptReplayAdapter implements ProductAdapterPort {
+  readonly implementationPackage = implementationPackage();
+  readonly executionConfigurationPackage =
+    executionConfigurationPackage("production-replay");
+  readonly executionConfiguration: ProductAdapterExecutionConfiguration =
+    parseAdapterExecutionConfiguration(
+      this.executionConfigurationPackage,
+    );
+  readonly productPackage: ProductPackageSnapshot = Object.freeze({
+    packageId: "wps-aippt-real-provider-replay-v1",
+    vendorId: "wps",
+    displayName: "WPS AI PPT retained real-provider replay",
+    adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
+    provenance: "PRODUCTION_REPLAY",
+    environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "wps-aippt-replay-ingest",
+      targetAccount: "retained-real-provider-capture",
+      targetRegion: "local",
       subprocessors: [],
     },
     experienceConfiguration: WPS_AIPPT_EXPERIENCE_CONFIGURATION,

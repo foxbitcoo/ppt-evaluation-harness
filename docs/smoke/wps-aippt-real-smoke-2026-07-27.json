@@ -1,9 +1,9 @@
 {
-  "schemaVersion": "wps-aippt-real-smoke-v2",
+  "schemaVersion": "wps-aippt-real-smoke-v3",
   "observedDateLocal": "2026-07-27",
   "timezone": "Asia/Shanghai",
-  "status": "passed_with_degraded_static_render",
-  "scope": "historical observable UI events plus a public production-harness replay through the fixed controlled bridge, downloaded Artifact validation, and command-verified durable recovery; no browser rerun",
+  "status": "observed_real_provider_replay_ingest_recovered",
+  "scope": "current public-harness ingest of a retained real-provider WPS Artifact and WPS-derived static renders; no live browser rerun and no LIVE_PRODUCTION claim",
   "productPackage": {
     "productUrl": "https://aippt.wps.cn/aippt/",
     "accountScope": "current_authenticated_account",
@@ -11,13 +11,13 @@
     "commercialPlanObservationPolicy": "observe_plan_name_or_record_ui_unavailable",
     "accountCategoryObservation": {
       "status": "ui_unavailable",
-      "evidenceId": "ev_00000000000000a1",
-      "reason": "account category UI was not retained in the historical capture"
+      "evidenceId": "ev_0000000000000201",
+      "reason": "account category UI was not retained in the real-provider capture"
     },
     "commercialPlanObservation": {
       "status": "ui_unavailable",
-      "evidenceId": "ev_00000000000000a2",
-      "reason": "commercial plan UI was not retained in the historical capture"
+      "evidenceId": "ev_0000000000000202",
+      "reason": "commercial plan UI was not retained in the real-provider capture"
     },
     "packageSelection": "best_available_zero_incremental_cost",
     "incrementalCost": 0,
@@ -26,7 +26,11 @@
     "pageCount": 16
   },
   "execution": {
-    "timeoutPolicyMinutes": 30,
+    "publicHarnessReplayIngest": true,
+    "liveAutomatedRun": false,
+    "browserRerun": false,
+    "executionMode": "PRODUCTION_REPLAY",
+    "captureSource": "REAL_PROVIDER_CAPTURE",
     "submitCount": 1,
     "retryCount": 0,
     "resultSelectionPolicy": "first_policy_compliant_artifact"
@@ -34,116 +38,84 @@
   "observableEvents": [
     {
       "sequence": 1,
-      "eventType": "home_loaded",
-      "evidence": "visible_ui"
+      "eventType": "configuration_observed",
+      "evidence": "retained_real_provider_capture"
     },
     {
       "sequence": 2,
-      "eventType": "professional_mode_observed",
-      "evidence": "visible_ui"
-    },
-    {
-      "sequence": 3,
-      "eventType": "query_submitted",
-      "evidence": "visible_ui_navigation"
-    },
-    {
-      "sequence": 4,
-      "eventType": "network_search_observed",
-      "evidence": "visible_ui"
-    },
-    {
-      "sequence": 5,
-      "eventType": "intent_confirmed",
-      "evidence": "manual_action"
-    },
-    {
-      "sequence": 6,
-      "eventType": "outline_completed_16_pages",
-      "evidence": "visible_ui"
-    },
-    {
-      "sequence": 7,
-      "eventType": "artifact_generation_completed",
-      "evidence": "visible_ui_16_pages"
-    },
-    {
-      "sequence": 8,
-      "eventType": "cloud_editor_opened",
-      "evidence": "visible_ui_1_of_16"
-    },
-    {
-      "sequence": 9,
       "eventType": "artifact_downloaded",
-      "evidence": "browser_download"
-    },
-    {
-      "sequence": 10,
-      "eventType": "static_render_completed_degraded",
-      "evidence": "local_hash_and_page_count_validation"
+      "evidence": "retained_real_provider_capture"
     }
   ],
   "manualActions": [
-    "entered frozen public synthetic query",
-    "confirmed intent with optional supplement left blank",
-    "started first presentation generation",
-    "opened the completed presentation card",
-    "downloaded the first completed presentation"
+    "ingested retained REAL_PROVIDER_CAPTURE without live browser automation"
   ],
+  "buildIdentity": {
+    "specCommitSha": "28c1ec3dfe04cb8b5355311d42e9f2307eb918b1",
+    "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    "sourceArchiveDigest": "sha256:ea981a3611f5ba9f23c18c6ba25e24cc6245b7c35dce0239d07c58ff3dbf19fa",
+    "sourceArchiveEntryCount": 36,
+    "embeddedManifestHash": "sha256:07a05be2ec3b6c1b8186c810a1338b61555f74a11322ffaaa5132afa6dff7645",
+    "manifestHash": "sha256:bb7495a9c2fa0f70be0cd6a1ee8996a4e3fab19738c3bc3ebff62469774319dd"
+  },
   "artifact": {
     "filename": "火山为什么会喷发？(1).pptx",
     "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "byteSize": 1805544,
     "pageCount": 16,
     "zipValidation": "passed",
+    "provenance": "PRODUCTION_REPLAY",
     "contentHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86"
   },
   "durableRecoveryRehearsal": {
-    "status": "public_production_replay_recovered",
-    "publicProductionHarness": true,
-    "browserRerun": false,
-    "buildSpecCommitSha": "28c1ec3dfe04cb8b5355311d42e9f2307eb918b1",
-    "buildIdentitySource": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-    "sourceArchiveDigest": "sha256:c25c487d220db65ce5e81ec8f0b56301b9b984f6f9b5c974797d2733eb558ae5",
-    "controlledBridgeEndpoint": "http://127.0.0.1:47821/v1/wps-aippt/run",
-    "oneTimeRequestCorrelation": true,
+    "status": "observed_real_provider_replay_ingest_recovered",
     "executionEvidencePresent": true,
-    "artifactPackageManifestHash": "sha256:2645dc6dbbcac92788105fb4d8268bc5b8da2434be37ac72318dea136646b042",
-    "artifactIdentityHash": "sha256:713b3821c74e9e1f1c1f6a94334dc1358a7ff309e8da7f148949fe88991436e0",
+    "artifactPackageManifestHash": "sha256:b491165950348f58f169573e9619abe54db992b56fa0d068cbfccb3915261f77",
+    "artifactIdentityHash": "sha256:49a6c1b87a8dc932cc1e53e8c2504f605702564d14d77918ad7621995f1d7a74",
     "recoveredOriginalHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
     "derivativeCount": 33,
     "recoveredDerivativeCount": 33,
+    "artifactStorageTopology": {
+      "isolation": "single_failure_domain",
+      "primaryDeviceIdentity": "fs-device:sha256:5e1e2c07ec588f25889ac9d1416a35ad84b91d86abb531466084ffe691ea18b5",
+      "recoveryDeviceIdentity": "fs-device:sha256:5e1e2c07ec588f25889ac9d1416a35ad84b91d86abb531466084ffe691ea18b5"
+    },
     "artifactStorage": {
-      "primaryFailureDomainId": "artifact-primary-domain-v1",
-      "primaryRootReference": "root:artifact-primary-domain-v1",
-      "primaryStoreId": "wps-smoke-artifact-primary-v2",
-      "recoveryFailureDomainId": "artifact-recovery-domain-v1",
-      "recoveryRootReference": "root:artifact-recovery-domain-v1",
-      "recoveryStoreId": "wps-smoke-artifact-recovery-v2",
-      "recoveryReferencePrefix": "store:wps-smoke-artifact-recovery-v2:sha256-key",
-      "originalRecoveryKey": "artifacts/production-run-wps-aippt-best-zero-incremental--d8babfee598dcd9b77e665f723e0cea6-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/original",
-      "originalRecoveryHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
-      "manifestRecoveryKey": "artifacts/production-run-wps-aippt-best-zero-incremental--d8babfee598dcd9b77e665f723e0cea6-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/manifest",
-      "manifestRecoveryHash": "sha256:713b3821c74e9e1f1c1f6a94334dc1358a7ff309e8da7f148949fe88991436e0"
+      "primaryRootReference": "root:wps-replay-artifact-primary",
+      "primaryStoreId": "wps-replay-artifact-primary-v3",
+      "primaryBackendInstanceIdentity": "fs-backend:sha256:375e453122b2eae89b0d7e055f06e3bd08e405836618285cd75ff1c0ed3d47f4",
+      "recoveryRootReference": "root:wps-replay-artifact-recovery",
+      "recoveryStoreId": "wps-replay-artifact-recovery-v3",
+      "recoveryBackendInstanceIdentity": "fs-backend:sha256:bc463d14f1a0cfbd57e3c9e0c4bd96448cf496e194393e84f1dcf01544c9e01f",
+      "manifestRecoveryKey": "artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/manifest",
+      "manifestRecoveryHash": "sha256:49a6c1b87a8dc932cc1e53e8c2504f605702564d14d77918ad7621995f1d7a74",
+      "originalRecoveryKey": "artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/original",
+      "originalRecoveryHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86"
     },
     "runSpecificationStorage": {
-      "failureDomainId": "run-spec-recovery-domain-v1",
-      "rootReference": "root:run-spec-recovery-domain-v1",
-      "storeId": "wps-smoke-run-spec-recovery-v2",
-      "recoveryReferencePrefix": "store:wps-smoke-run-spec-recovery-v2:sha256-key",
-      "key": "run-specifications/1150cda8d89f47d7241667400ee2fe9e432f24165060f36a899a1cb7e60db0e9",
-      "contentHash": "sha256:1150cda8d89f47d7241667400ee2fe9e432f24165060f36a899a1cb7e60db0e9",
+      "rootReference": "root:wps-replay-run-specification",
+      "storeId": "wps-replay-run-specification-v3",
+      "backendInstanceIdentity": "fs-backend:sha256:645c6bf4c2c8d308bcd46194a0659633f470e50995d58e90617278ff35cb5d00",
+      "key": "run-specifications/a6ade3dd8eb73948cce5e6c29bf926ee0c484bb9df36fa377e33025502357fba",
+      "contentHash": "sha256:a6ade3dd8eb73948cce5e6c29bf926ee0c484bb9df36fa377e33025502357fba",
       "caseProvenance": "PRODUCTION"
     },
     "checkpointStorage": {
-      "rootReference": "root:checkpoint-domain-v1",
-      "checkpointStoreId": "wps-smoke-checkpoints-v2",
-      "recoveryReferencePrefix": "checkpoint-store:wps-smoke-checkpoints-v2:attempt",
-      "attemptReference": "checkpoint-store:wps-smoke-checkpoints-v2:attempt:production-run-wps-aippt-best-zero-incremental--d8babfee598dcd9b77e665f723e0cea6-volcano-v1-attempt-1",
+      "rootReference": "root:wps-replay-checkpoint",
+      "checkpointStoreId": "wps-replay-checkpoints-v3",
+      "attemptId": "production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1",
       "recoveredCheckpointCount": 2,
       "replayAvailable": true
     },
-    "recoveryCommand": "node --import tsx scripts/recover-wps-production-run.ts <artifact-recovery-root> <run-spec-root> <checkpoint-root> <artifact-store-id> <manifest-key> <original-key> <run-spec-store-id> <run-spec-key> <checkpoint-store-id> <attempt-id>"
+    "durableRootRegistry": {
+      "registryId": "wps-real-provider-20260727-round5-freeze",
+      "registryHash": "sha256:d0ed82aa6d4a09afb353f6ab025480a1806c25deb26e06132f1d16fff391f09d",
+      "operationalRootReference": "root:wps-replay-operational"
+    },
+    "recoveryCommand": "node --import tsx scripts/recover-wps-production-run.ts wps-real-provider-20260727-round5-freeze root:wps-replay-artifact-recovery root:wps-replay-run-specification root:wps-replay-checkpoint wps-replay-artifact-recovery-v3 artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/manifest artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/original wps-replay-run-specification-v3 run-specifications/a6ade3dd8eb73948cce5e6c29bf926ee0c484bb9df36fa377e33025502357fba wps-replay-checkpoints-v3 production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1",
+    "recoveryCliExecuted": true,
+    "recoveryCliResultReference": "root:wps-replay-operational:recovery-cli-result.json",
+    "recoveryCliResultHash": "sha256:b9daa802978a15df24ff91e0078dd038b89e8843d12d9a489c603f84efd4a54e"
   },
   "render": {
     "pipeline": "libreoffice-impress+pdftoppm",
@@ -152,32 +124,32 @@
     "fidelityStatus": "degraded",
     "visualAssessment": "NOT_ASSESSABLE",
     "faithfulVisualGate": "CONDITIONAL",
-    "renderManifestHash": "sha256:595a992344d57957b3a09d047a22ab271eec54d53f70d9ab89f94d7f9af29e0b",
-    "pdfHash": "sha256:b0830a9511dad88d9f10dda45d17f4b8a6e18f5bd9c9f8b0a358d35c16d2208a",
-    "firstPageHash": "sha256:63a682a8955c6b1ebdc14c12f5a685d63e998b0be453721ee8dc6a73474b27e2",
-    "lastPageHash": "sha256:2be2d6cc60a1b54fa05a00e5c2e5389effee6584aefc192c28c404b176d68392",
-    "contactSheetHash": "sha256:9ea9a548fceba58550530465fd57f8f29db41ef6d51d52ac726179d2eace5b62",
+    "renderManifestHash": "sha256:f6b740c41862c749edb5c52d594edf9979e4f1246415ea11e0b1f6d2656e8f2e",
+    "pdfHash": "sha256:21a1ce7cb1624e20a1dd23e45287e7aa53728a630f54aaf41b65be3bca19780e",
+    "firstPageHash": "sha256:557823f094c26392fe495aee58d621df8a02f9729dae5c4176e44934dc6d503e",
+    "lastPageHash": "sha256:e4b24e51f7ead5cf95b91cc8a80ce7af39911e7ae8fd920672944e44a6658555",
+    "contactSheetHash": "sha256:c8af77f204c57a88b0dfd1b507d52343ddfea176af1e4953f3c4c6b525ff4513",
     "contactSheetDimensions": "1280x720",
     "contactSheetComposition": "4x4 stitched thumbnails from all 16 pages",
     "staticSlideHashes": [
-      "sha256:006e0e8993f5c11b8d1ba4faba9bda0d7687a41079feb8a228cc4d16606aceaa",
-      "sha256:87e869c4735bf2d9b1cf68aac737913fd8baac7174d4a28e16b63e77c7454943",
-      "sha256:b73b612d2a957403f59b4f90b106b4600319b6b4074f3c3c4e2e262a0a7706d2",
-      "sha256:c9b14e7e99f3562e530ee741688cc1d3efc82a9243eb2ab35994ddda729ed43e",
-      "sha256:2aba7f80197e30c242a6b4c3b8afcca2494ddf95bb983bff7fe1bb6048af73b8",
-      "sha256:5acf8585c54693f8ae9644892664df14584adbfca53b31ae812263a94355896f",
-      "sha256:8b090fe847e65e1989805f75b1781419a94b7523cd476df8250f88d0e783f13b",
-      "sha256:eaab21e621a921a98b203d9926d98e0b8e3ee7e2408112b53d94f507c7d5936c",
-      "sha256:ddaef15319455ae186cb2ebfa09dff0807dfe3edd6456330389d7c59110ad13f",
-      "sha256:908697423de6ab6f719b5b7455b182e2141d5b0db66a1c33baf39f8884be350f",
-      "sha256:24d17d5f081856c5f85e2c61e94b59e65cdc174af714c7dec717518e8f4f7363",
-      "sha256:81a05095862f109cd2fe9eda84d0ec409ec9a187f26fdd9b613e242a227a128c",
-      "sha256:1b0239ba9fc1da9269abe1a2ff1e6a49caee89af2c469993f3a0e8bd5dcd4cc9",
-      "sha256:cfd378b8766d74337581b2034e68a13510a1156c35d457a5e8f644bd3d8e5239",
-      "sha256:aaefd7724f673e9712dd07223f91329832dde71e702c338012e3a72efbef35fb",
-      "sha256:03b0b4805cf6955ea29c2f3b67863fb469235d345c356295095c938c5391372c"
+      "sha256:557823f094c26392fe495aee58d621df8a02f9729dae5c4176e44934dc6d503e",
+      "sha256:ab41e9bc27e655567d3c6d8c6862f66e0a9b3c9ccc5da2d18da8fe7b350b8139",
+      "sha256:2565fe5f9a2b9755a20122074324a1e6369e47ecdf93c668d0e0a7850d312f3e",
+      "sha256:2aceaae34ba423f1048161300e8deab1be197e47d45cca87cee841a5ee20a017",
+      "sha256:cab556af2488e1ecf684251ca98202a35c20aee2910029ad57f09f5e6036a3a8",
+      "sha256:583797917be870528cd449b66fdc8ae800e9d9abc2646c998fe205154102c055",
+      "sha256:56062b08118f4e85f1f0bc9611e23442e22ac1ba24a009406ae28162433289d0",
+      "sha256:a618fdac1fcca0d73611b5afe9da992f111115165a7e884dd95d9ae8530e3001",
+      "sha256:de3d15f50790902f4414be7c9eb14637a00c9c941a4a256c78778f0dbed2e53d",
+      "sha256:365b1f03dc5fffb3d9e2d82ec79f234bcc2d92f9cae3737a1f95ed09ddf3d2e8",
+      "sha256:ab07f43d4e3fa1166ace93e8e5407119892547ffb74b57ce85a2d21aa7f93a1f",
+      "sha256:c7f0c460d72e81c61c3a039acde9f9bed6239b59d7ac5f8a9edc825b82981462",
+      "sha256:cbbca203a007743e6b5083308e4e7d781db90cbe050a9ddfa2b523b3a35cb88c",
+      "sha256:95841a6ae3a6bd9115cdd3eec2311ca63277629605dbeec75ad17c9de8709a5f",
+      "sha256:077c2e5146cc60b1c04aa511220f43053d8d9ba9817f946e99866655a4380b13",
+      "sha256:e4b24e51f7ead5cf95b91cc8a80ce7af39911e7ae8fd920672944e44a6658555"
     ],
-    "fidelityNote": "The native WPS editor view was readable, but the local static renderer substituted or omitted Chinese glyphs."
+    "fidelityNote": "The retained local render may substitute or omit Chinese glyphs and is not a faithful design-scoring surface."
   },
   "security": {
     "browserStoresRead": false,
@@ -193,6 +165,7 @@
     "opcContentTypesValidation": "passed",
     "opcRelationshipValidation": "passed",
     "xmlEntityDecodedRelationshipValidation": "passed",
+    "structuredRelationshipXmlCommentAndCdataHandling": "passed",
     "presentationSlideIdRelationshipValidation": "passed",
     "structuredPresentationXmlCommentAndCdataHandling": "passed",
     "truePngDecodeAndCanonicalReencode": "passed",
@@ -200,8 +173,9 @@
     "externalRelationshipRejection": "passed"
   },
   "uncertainty": [
-    "The historical capture did not retain the account-category or commercial-plan UI, so both are recorded as ui_unavailable with opaque evidence IDs.",
-    "The live browser was not rerun; the retained production capture was replayed through the fixed correlated bridge and public production harness.",
-    "The local static render is evidence of 16-page renderability, not a faithful design-scoring surface."
+    "The capture did not retain the account-category or commercial-plan UI, so both are recorded as ui_unavailable with opaque evidence IDs.",
+    "No trusted live bridge executable was available in this build; the live path fails closed and this rehearsal is explicitly PRODUCTION_REPLAY.",
+    "The two Artifact copies are separate backend instances on one physical device, so the evidence is explicitly single_failure_domain.",
+    "The local static render proves 16-page renderability but is not a faithful visual-scoring surface."
   ]
 }

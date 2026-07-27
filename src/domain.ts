@@ -14,7 +14,11 @@ import type {
 export const MOCK_PROVENANCE = "MOCK" as const;
 
 export type MockProvenance = typeof MOCK_PROVENANCE;
-export type ProvenanceLabel = MockProvenance | "PRODUCTION";
+export type ProvenanceLabel =
+  | MockProvenance
+  | "PRODUCTION"
+  | "LIVE_PRODUCTION"
+  | "PRODUCTION_REPLAY";
 
 export type RunStatus =
   | "active"
@@ -71,6 +75,13 @@ export interface ObservableAttemptEvent {
   readonly taskStateVersion?: string | null;
   readonly adapterVersion?: string;
   readonly artifactId?: string | null;
+  readonly reconciliationObservedState?:
+    | "unknown"
+    | "submitted"
+    | "artifact_ready"
+    | "failed";
+  readonly reconciliationTerminalReason?: TerminalReason;
+  readonly reconciliationArtifactReference?: string | null;
 }
 
 export interface CostEvidence {
@@ -81,7 +92,7 @@ export interface CostEvidence {
 
 export interface EvaluationCaseRecord {
   readonly recordId: string;
-  readonly provenance: ProvenanceLabel;
+  readonly provenance: MockProvenance | "PRODUCTION";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly dataClassification: "public_or_synthetic" | "restricted";
   readonly sourceOwner: string;

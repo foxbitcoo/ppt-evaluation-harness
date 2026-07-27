@@ -214,6 +214,8 @@ export type AttemptDeadlineResult<T> =
   | {
       readonly timedOut: true;
       readonly elapsedMs: number;
+      readonly shutdownCompleted: true;
+      readonly shutdownValue?: T;
     };
 
 export interface AttemptDeadlinePort {
@@ -223,39 +225,70 @@ export interface AttemptDeadlinePort {
   ): Promise<AttemptDeadlineResult<T>>;
 }
 
+const ADAPTER_SHUTDOWN_GRACE_MS = 10_000;
+
 const WALL_CLOCK_ATTEMPT_DEADLINE: AttemptDeadlinePort = {
-  run<T>(
+  async run<T>(
     operation: (signal: AbortSignal) => Promise<T>,
     timeoutMs: number,
   ): Promise<AttemptDeadlineResult<T>> {
     const controller = new AbortController();
     const startedAt = Date.now();
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      const timer = setTimeout(() => {
-        settled = true;
-        controller.abort();
-        resolve({ timedOut: true, elapsedMs: timeoutMs });
-      }, timeoutMs);
-      void operation(controller.signal).then(
-        (value) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve({
-            timedOut: false,
-            value,
-            elapsedMs: Math.max(0, Date.now() - startedAt),
-          });
-        },
-        (error: unknown) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          reject(error);
-        },
-      );
-    });
+    const operationSettlement = operation(controller.signal).then(
+      (value) => ({ kind: "value" as const, value }),
+      (error: unknown) => ({ kind: "error" as const, error }),
+    );
+    let timeoutHandle!: ReturnType<typeof setTimeout>;
+    const first = await Promise.race([
+      operationSettlement,
+      new Promise<{ readonly kind: "timeout" }>((resolveTimeout) => {
+        timeoutHandle = setTimeout(
+          () => resolveTimeout({ kind: "timeout" }),
+          timeoutMs,
+        );
+      }),
+    ]);
+    if (first.kind === "value") {
+      clearTimeout(timeoutHandle);
+      return {
+        timedOut: false,
+        value: first.value,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+      };
+    }
+    if (first.kind === "error") {
+      clearTimeout(timeoutHandle);
+      throw first.error;
+    }
+    controller.abort();
+    let graceHandle!: ReturnType<typeof setTimeout>;
+    const shutdown = await Promise.race([
+      operationSettlement,
+      new Promise<never>((_, rejectGrace) => {
+        graceHandle = setTimeout(
+          () =>
+            rejectGrace(
+              new Error(
+                "Adapter shutdown and durable reconciliation did not complete within the bounded grace period",
+              ),
+            ),
+          ADAPTER_SHUTDOWN_GRACE_MS,
+        );
+      }),
+    ]);
+    clearTimeout(graceHandle);
+    return shutdown.kind === "value"
+      ? {
+          timedOut: true,
+          elapsedMs: timeoutMs,
+          shutdownCompleted: true,
+          shutdownValue: shutdown.value,
+        }
+      : {
+          timedOut: true,
+          elapsedMs: timeoutMs,
+          shutdownCompleted: true,
+        };
   },
 };
 
@@ -979,14 +1012,31 @@ function vendorSlug(packageId: string): string {
 
 function runIdForPackage(
   packageId: string,
-  provenance: "MOCK" | "PRODUCTION",
+  provenance:
+    | "MOCK"
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY",
 ): string {
   const scenario = KNOWN_VENDOR_SCENARIOS.get(packageId);
   if (provenance === "MOCK" && scenario !== undefined) {
     return scenario.runId;
   }
-  const prefix = provenance === "PRODUCTION" ? "production" : "MOCK";
+  const prefix =
+    provenance === "LIVE_PRODUCTION"
+      ? "live-production"
+      : provenance === "PRODUCTION_REPLAY"
+        ? "production-replay"
+        : "MOCK";
   return `${prefix}-run-${vendorSlug(packageId)}-volcano-v1`;
+}
+
+function isRealProviderProductProvenance(
+  provenance: ProductPackageSnapshot["provenance"],
+): provenance is "LIVE_PRODUCTION" | "PRODUCTION_REPLAY" {
+  return (
+    provenance === "LIVE_PRODUCTION" ||
+    provenance === "PRODUCTION_REPLAY"
+  );
 }
 
 function isArtifact(
@@ -1285,19 +1335,51 @@ async function executeVendor(
           observedBudgetRemainingMs - deadlineResult.elapsedMs,
         );
         measuredElapsedMs = deadlineResult.elapsedMs;
-        result = deadlineResult.timedOut
-          ? {
-              terminalReason: "vendor_timeout",
-              blockReason: null,
-              submissionEvidence: "unknown",
-              elapsedMs: deadlineResult.elapsedMs,
-              artifactCandidates: [],
-            }
-          : normalizeExecution(deadlineResult.value);
+        if (
+          deadlineResult.timedOut &&
+          deadlineResult.shutdownCompleted !== true
+        ) {
+          throw new Error(
+            "Attempt cannot finalize before adapter shutdown and durable reconciliation complete",
+          );
+        }
+        if (deadlineResult.timedOut) {
+          const shutdownResult =
+            deadlineResult.shutdownValue === undefined
+              ? null
+              : normalizeExecution(deadlineResult.shutdownValue);
+          result = {
+            terminalReason: "vendor_timeout",
+            blockReason: null,
+            submissionEvidence:
+              shutdownResult?.submissionEvidence ?? "unknown",
+            elapsedMs: deadlineResult.elapsedMs,
+            artifactCandidates: [],
+            ...(shutdownResult?.observableEvents === undefined
+              ? {}
+              : {
+                  observableEvents:
+                    shutdownResult.observableEvents,
+                }),
+            ...(shutdownResult?.manualActions === undefined
+              ? {}
+              : { manualActions: shutdownResult.manualActions }),
+          };
+        } else {
+          result = normalizeExecution(deadlineResult.value);
+        }
         if (!deadlineResult.timedOut) {
           vendorReportedElapsedMs = result.elapsedMs;
         }
-      } catch {
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          /cannot finalize before adapter shutdown and durable reconciliation complete/i.test(
+            error.message,
+          )
+        ) {
+          throw error;
+        }
         measuredElapsedMs = Math.max(0, Date.now() - startedAt);
         observedBudgetRemainingMs = Math.max(
           0,
@@ -1399,10 +1481,19 @@ async function executeVendor(
   );
   const productionExecutionEvidence =
     selectedArtifact.productionExecutionEvidence;
-  if (productPackage.provenance === "PRODUCTION") {
+  if (isRealProviderProductProvenance(productPackage.provenance)) {
     const latestEvent = result.observableEvents?.at(-1);
     if (
       productionExecutionEvidence === undefined ||
+      productionExecutionEvidence.executionMode !==
+        productPackage.provenance ||
+      (productPackage.provenance === "LIVE_PRODUCTION"
+        ? productionExecutionEvidence.captureSource !==
+            "LIVE_BROWSER_AUTOMATION" ||
+          productionExecutionEvidence.liveBridgeTranscriptHash ===
+            undefined
+        : productionExecutionEvidence.captureSource !==
+          "REAL_PROVIDER_CAPTURE") ||
       !/^session_[a-z0-9_-]{16,128}$/.test(
         productionExecutionEvidence.driverSessionId,
       ) ||
@@ -1450,7 +1541,7 @@ async function executeVendor(
       ? rendererAuthorization.decisionId
       : "mock-renderer-authorized";
   if (
-    productPackage.provenance === "PRODUCTION" &&
+    isRealProviderProductProvenance(productPackage.provenance) &&
     selectedArtifact.renderManifest !== undefined
   ) {
     throw new Error(
@@ -1458,7 +1549,7 @@ async function executeVendor(
     );
   }
   if (
-    productPackage.provenance === "PRODUCTION" &&
+    isRealProviderProductProvenance(productPackage.provenance) &&
     selectedArtifact.safeRasterCandidate !== undefined
   ) {
     throw new Error(
@@ -1466,7 +1557,7 @@ async function executeVendor(
     );
   }
   const safeRasterCandidate =
-    productPackage.provenance === "PRODUCTION"
+    isRealProviderProductProvenance(productPackage.provenance)
       ? await safeRasterRenderer!.render({
           artifact,
           authorizationDecisionId:
@@ -2300,7 +2391,30 @@ export function createBakeoffHarness({
             ),
           );
         }
-        if (wpsAiPptBrowserDriver !== undefined) {
+        const selectedWpsRuns = selections.filter(
+          ({ executionConfiguration }) =>
+            executionConfiguration.adapterKind ===
+            "wps-aippt-browser",
+        );
+        const isExplicitRealProviderReplay =
+          wpsAiPptBrowserDriver?.provenance ===
+            "PRODUCTION_REPLAY" &&
+          wpsAiPptBrowserDriver.captureSource ===
+            "REAL_PROVIDER_CAPTURE" &&
+          selectedWpsRuns.length > 0 &&
+          selectedWpsRuns.every(
+            ({ browserDriverEvidence, productPackage }) =>
+              productPackage.provenance ===
+                "PRODUCTION_REPLAY" &&
+              browserDriverEvidence?.provenance ===
+                "PRODUCTION_REPLAY" &&
+              browserDriverEvidence.captureSource ===
+                "REAL_PROVIDER_CAPTURE",
+          );
+        if (
+          wpsAiPptBrowserDriver !== undefined &&
+          !isExplicitRealProviderReplay
+        ) {
           return Promise.reject(
             new Error(
               "Production Bakeoff rejects caller-supplied WPS browser sessions",

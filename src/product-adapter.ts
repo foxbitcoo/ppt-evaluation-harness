@@ -21,7 +21,10 @@ export interface ProductPackageSnapshot {
   readonly vendorId: "wps" | "qwen" | "doubao" | (string & {});
   readonly displayName: string;
   readonly adapterVersion: string;
-  readonly provenance: "MOCK" | "PRODUCTION";
+  readonly provenance:
+    | "MOCK"
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly egressDestination: EgressDestinationMetadata;
   readonly experienceConfiguration?: ProductExperienceConfiguration;
@@ -86,6 +89,12 @@ export interface ArtifactCandidate {
 }
 
 export interface ProductionDriverExecutionEvidence {
+  readonly executionMode:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
+  readonly captureSource:
+    | "LIVE_BROWSER_AUTOMATION"
+    | "REAL_PROVIDER_CAPTURE";
   readonly driverSessionId: `session_${string}`;
   readonly vendorTaskId: `task_${string}`;
   readonly taskStateVersion: string;
@@ -94,6 +103,7 @@ export interface ProductionDriverExecutionEvidence {
   readonly outcome: "captured";
   readonly artifactContentHash: `sha256:${string}`;
   readonly traceHash: `sha256:${string}`;
+  readonly liveBridgeTranscriptHash?: `sha256:${string}`;
 }
 
 export interface SafeRasterCandidate {

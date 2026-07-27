@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import type { ProductAdapterImplementationPackage } from "./product-adapter.ts";
+import type { ObservableAttemptEvent } from "./domain.ts";
 import type {
   WpsAiPptBrowserCommand,
   WpsAiPptBrowserResult,
@@ -10,6 +11,10 @@ import {
   reconcileHarnessOwnedWpsAiPptTask,
   runHarnessOwnedWpsAiPptBrowser,
 } from "./wps-aippt-external-runtime.ts";
+import {
+  startHarnessOwnedWpsLiveBridge,
+  stopHarnessOwnedWpsLiveBridge,
+} from "./wps-aippt-live-bridge.ts";
 
 export const WPS_AIPPT_BROWSER_DRIVER_VERSION =
   "wps-aippt-harness-browser-bridge@2" as const;
@@ -66,8 +71,11 @@ function configurationPackage(): ProductAdapterImplementationPackage {
 }
 
 export interface WpsAiPptBrowserDriverPort {
-  readonly driverId: "wps-aippt-test-fixture";
-  readonly provenance: "TEST_FAKE";
+  readonly driverId:
+    | "wps-aippt-test-fixture"
+    | "wps-aippt-real-provider-replay";
+  readonly provenance: "TEST_FAKE" | "PRODUCTION_REPLAY";
+  readonly captureSource: "TEST_FIXTURE" | "REAL_PROVIDER_CAPTURE";
   readonly driverVersion: typeof WPS_AIPPT_BROWSER_DRIVER_VERSION;
   readonly browserProfileDigest: typeof WPS_AIPPT_BROWSER_PROFILE_DIGEST;
   readonly implementationPackage: ProductAdapterImplementationPackage;
@@ -121,6 +129,40 @@ export function createWpsAiPptBrowserDriverPackage(input: {
   return Object.freeze({
     driverId: "wps-aippt-test-fixture",
     provenance: input.provenance,
+    captureSource: "TEST_FIXTURE",
+    driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
+    browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
+    implementationPackage: implementationPackage(),
+    configurationPackage: configurationPackage(),
+    sessions: Object.freeze(
+      input.sessions.map((session) =>
+        Object.freeze(cloneValue(session)),
+      ),
+    ),
+    reconciliations: Object.freeze(
+      (input.reconciliations ?? []).map((entry) =>
+        Object.freeze(cloneValue(entry)),
+      ),
+    ),
+  });
+}
+
+export function createWpsAiPptRealProviderReplayPackage(input: {
+  readonly sessions: readonly WpsAiPptBrowserResult[];
+  readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
+}): WpsAiPptBrowserDriverPort {
+  if (
+    input.sessions.length === 0 &&
+    (input.reconciliations?.length ?? 0) === 0
+  ) {
+    throw new Error(
+      "WPS replay ingest requires retained real-provider evidence",
+    );
+  }
+  return Object.freeze({
+    driverId: "wps-aippt-real-provider-replay",
+    provenance: "PRODUCTION_REPLAY",
+    captureSource: "REAL_PROVIDER_CAPTURE",
     driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
     browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
     implementationPackage: implementationPackage(),
@@ -158,7 +200,14 @@ export interface WpsAiPptBrowserDriverEvidence {
   readonly driverId:
     | WpsAiPptBrowserDriverPort["driverId"]
     | "wps-aippt-harness-browser-bridge";
-  readonly provenance: "PRODUCTION" | "TEST_FAKE";
+  readonly provenance:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY"
+    | "TEST_FAKE";
+  readonly captureSource:
+    | "LIVE_BROWSER_AUTOMATION"
+    | "REAL_PROVIDER_CAPTURE"
+    | "TEST_FIXTURE";
   readonly driverVersion: typeof WPS_AIPPT_BROWSER_DRIVER_VERSION;
   readonly browserProfileDigest: typeof WPS_AIPPT_BROWSER_PROFILE_DIGEST;
   readonly implementationDigest: `sha256:${string}`;
@@ -168,7 +217,8 @@ export interface WpsAiPptBrowserDriverEvidence {
 const HARNESS_OWNED_PRODUCTION_DRIVER_EVIDENCE:
   WpsAiPptBrowserDriverEvidence = Object.freeze({
     driverId: "wps-aippt-harness-browser-bridge",
-    provenance: "PRODUCTION",
+    provenance: "LIVE_PRODUCTION",
+    captureSource: "LIVE_BROWSER_AUTOMATION",
     driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
     browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
     implementationDigest: implementationPackage().contentHash,
@@ -192,8 +242,12 @@ export function registeredWpsAiPptBrowserDriverEvidence(
     "configuration package",
   );
   if (
-    driver.driverId !== "wps-aippt-test-fixture" ||
-    driver.provenance !== "TEST_FAKE" ||
+    ((driver.driverId !== "wps-aippt-test-fixture" ||
+      driver.provenance !== "TEST_FAKE" ||
+      driver.captureSource !== "TEST_FIXTURE") &&
+      (driver.driverId !== "wps-aippt-real-provider-replay" ||
+        driver.provenance !== "PRODUCTION_REPLAY" ||
+        driver.captureSource !== "REAL_PROVIDER_CAPTURE")) ||
     driver.driverVersion !== WPS_AIPPT_BROWSER_DRIVER_VERSION ||
     driver.browserProfileDigest !== WPS_AIPPT_BROWSER_PROFILE_DIGEST
   ) {
@@ -204,6 +258,7 @@ export function registeredWpsAiPptBrowserDriverEvidence(
   return Object.freeze({
     driverId: driver.driverId,
     provenance: driver.provenance,
+    captureSource: driver.captureSource,
     driverVersion: driver.driverVersion,
     browserProfileDigest: driver.browserProfileDigest,
     implementationDigest: driver.implementationPackage.contentHash,
@@ -215,23 +270,48 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
   driver: WpsAiPptBrowserDriverPort | undefined,
   checkpointSink: (
     event: WpsAiPptBrowserResult["events"][number],
-  ) => Promise<void>,
+  ) => Promise<ObservableAttemptEvent>,
+  executionMode: "live" | "replay",
 ): (command: WpsAiPptBrowserCommand) => Promise<WpsAiPptBrowserResult> {
   registeredWpsAiPptBrowserDriverEvidence(driver);
   const frozenSessions = driver?.sessions ?? [];
   return async (command) => {
-    if (
+    if (executionMode === "live" &&
       command.evaluationProvenance === "PRODUCTION" &&
-      driver !== undefined
-    ) {
+      driver !== undefined) {
       throw new Error(
         "Production WPS Run rejects caller-supplied browser sessions",
       );
     }
-    if (command.evaluationProvenance === "PRODUCTION") {
-      return await runHarnessOwnedWpsAiPptBrowser(
-        command,
-        checkpointSink,
+    if (executionMode === "live" &&
+      command.evaluationProvenance === "PRODUCTION") {
+      const liveSession = await startHarnessOwnedWpsLiveBridge();
+      try {
+        return await runHarnessOwnedWpsAiPptBrowser(
+          command,
+          checkpointSink,
+          liveSession,
+        );
+      } finally {
+        await stopHarnessOwnedWpsLiveBridge(liveSession);
+      }
+    }
+    if (
+      executionMode === "replay" &&
+      (command.evaluationProvenance !== "PRODUCTION" ||
+        driver?.provenance !== "PRODUCTION_REPLAY" ||
+        driver.captureSource !== "REAL_PROVIDER_CAPTURE")
+    ) {
+      throw new Error(
+        "WPS production replay requires a REAL_PROVIDER_CAPTURE replay package",
+      );
+    }
+    if (
+      command.evaluationProvenance !== "PRODUCTION" &&
+      driver?.provenance !== "TEST_FAKE"
+    ) {
+      throw new Error(
+        "WPS test execution requires a TEST_FAKE browser package",
       );
     }
     const result = frozenSessions[command.attemptSeq - 1];
@@ -240,8 +320,43 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
         `WPS browser driver has no captured session for attempt ${command.attemptSeq}`,
       );
     }
+    const persistedEvents: ObservableAttemptEvent[] = [];
     for (const event of result.events) {
-      await checkpointSink(event);
+      persistedEvents.push(await checkpointSink(event));
+    }
+    if (
+      driver?.provenance === "PRODUCTION_REPLAY" &&
+      result.outcome === "captured"
+    ) {
+      const contentHash = sha256(result.artifact.content);
+      const latest = result.events.at(-1);
+      if (
+        latest?.vendorTaskId === null ||
+        latest?.vendorTaskId === undefined ||
+        latest.taskStateVersion === null
+      ) {
+        throw new Error(
+          "WPS real-provider replay requires retained task lineage",
+        );
+      }
+      return Object.freeze({
+        ...cloneValue(result),
+        productionExecutionEvidence: Object.freeze({
+          executionMode: "PRODUCTION_REPLAY",
+          captureSource: "REAL_PROVIDER_CAPTURE",
+          driverSessionId:
+            `session_replay_${contentHash.slice(7, 39)}` as const,
+          vendorTaskId: latest.vendorTaskId,
+          taskStateVersion: latest.taskStateVersion,
+          driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
+          adapterVersion: latest.adapterVersion,
+          outcome: "captured",
+          artifactContentHash: contentHash,
+          traceHash: sha256(
+            textEncoder.encode(JSON.stringify(persistedEvents)),
+          ),
+        }),
+      });
     }
     return Object.freeze(cloneValue(result));
   };
@@ -250,10 +365,37 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
 export function reconcileRegisteredWpsAiPptTask(
   driver: WpsAiPptBrowserDriverPort | undefined,
   query: WpsAiPptTaskReconciliationQuery,
+  executionMode: "live" | "replay",
 ): Promise<WpsAiPptTaskReconciliationEvidence> {
   registeredWpsAiPptBrowserDriverEvidence(driver);
+  if (executionMode === "live" && driver === undefined) {
+    return startHarnessOwnedWpsLiveBridge().then(
+      async (liveSession) => {
+        try {
+          return await reconcileHarnessOwnedWpsAiPptTask(
+            query,
+            liveSession,
+          );
+        } finally {
+          await stopHarnessOwnedWpsLiveBridge(liveSession);
+        }
+      },
+    );
+  }
+  if (
+    executionMode === "replay" &&
+    driver?.provenance !== "PRODUCTION_REPLAY"
+  ) {
+    return Promise.reject(
+      new Error(
+        "WPS production replay reconciliation requires REAL_PROVIDER_CAPTURE evidence",
+      ),
+    );
+  }
   if (driver === undefined) {
-    return reconcileHarnessOwnedWpsAiPptTask(query);
+    return Promise.reject(
+      new Error("WPS reconciliation driver is unavailable"),
+    );
   }
   const evidence = driver.reconciliations.find(
     (candidate) =>
