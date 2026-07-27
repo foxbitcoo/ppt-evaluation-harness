@@ -1022,6 +1022,7 @@ test("Bakeoff rejects an Artifact with the wrong environment origin before Judge
   const wps = new MockWpsProductAdapter();
   let judgeCalls = 0;
   const wrongOriginAdapter: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
     productPackage: wps.productPackage,
     async execute(command) {
       return {

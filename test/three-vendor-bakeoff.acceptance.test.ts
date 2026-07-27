@@ -686,6 +686,7 @@ test("production rejects every Mock lineage even when every visible provenance l
 
   const mockAdapter = new MockWpsProductAdapter();
   const relabeledAdapter: ProductAdapterPort = {
+    implementationPackage: mockAdapter.implementationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
       provenance: "PRODUCTION",
@@ -708,6 +709,7 @@ test("the command environment must match the projection environment before any a
   const mockAdapter = new MockWpsProductAdapter();
   let executeCount = 0;
   const productionLabeledAdapter: ProductAdapterPort = {
+    implementationPackage: mockAdapter.implementationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
       provenance: "PRODUCTION",
@@ -941,6 +943,7 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
   let executeCount = 0;
   let observedAbort = false;
   const hungWps: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
     productPackage: wps.productPackage,
     execute(command) {
       executeCount += 1;
@@ -1001,6 +1004,7 @@ test("a thrown adapter error becomes a persisted technical failure with unknown 
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();
   const throwingQwen: ProductAdapterPort = {
+    implementationPackage: qwen.implementationPackage,
     productPackage: qwen.productPackage,
     async execute() {
       throw new Error("simulated adapter crash");
@@ -1056,6 +1060,7 @@ test("the selected adapter set is defensively frozen before any adapter can muta
   const qwen = new MockQwenProductAdapter();
   const selectedAdapters: ProductAdapterPort[] = [];
   const mutatingWps: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
     productPackage: wps.productPackage,
     async execute(command) {
       selectedAdapters.push(new MockDoubaoProductAdapter());
@@ -1134,6 +1139,7 @@ test("all selected vendors begin under one shared 30-minute Job deadline", async
 test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", async () => {
   const wps = new MockWpsProductAdapter();
   const inheritedKeyAdapter: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
     productPackage: {
       ...wps.productPackage,
       packageId: "__proto__",
@@ -1167,6 +1173,7 @@ test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", asyn
 test("measured deadline time overrides a successful adapter's self-reported elapsed time", async () => {
   const wps = new MockWpsProductAdapter();
   const inflatedElapsedAdapter: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
     productPackage: wps.productPackage,
     async execute(command) {
       const artifact = await wps.execute(command);
@@ -1242,10 +1249,12 @@ test("package metadata and derived Run IDs are snapshotted before any adapter ex
   const qwen = new MockQwenProductAdapter();
   const mutableQwenPackage = { ...qwen.productPackage };
   const mutableQwen: ProductAdapterPort = {
+    implementationPackage: qwen.implementationPackage,
     productPackage: mutableQwenPackage,
     execute: (command) => qwen.execute(command),
   };
   const mutatingWps: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
     productPackage: wps.productPackage,
     async execute(command) {
       mutableQwenPackage.packageId = "MUTATED-package-id";
@@ -1277,6 +1286,7 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
   const wps = new MockWpsProductAdapter();
   const duplicateArtifactAdapters: ProductAdapterPort[] = [
     {
+      implementationPackage: wps.implementationPackage,
       productPackage: {
         ...wps.productPackage,
         packageId: "custom-package-a",
@@ -1285,6 +1295,7 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
       execute: (command) => wps.execute(command),
     },
     {
+      implementationPackage: wps.implementationPackage,
       productPackage: {
         ...wps.productPackage,
         packageId: "custom-package-b",

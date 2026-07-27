@@ -12,12 +12,19 @@ import type {
   ApprovedEgressAuthorization,
   EgressAuthorizationPort,
 } from "./egress-authorization.ts";
-import { requireEgressAuthorization } from "./egress-authorization.ts";
+import {
+  approvedEgressAuthorizationHash,
+  assertPersistedApprovedEgressAuthorization,
+  requireEgressAuthorization,
+} from "./egress-authorization.ts";
 import type {
   ImmutableBlobStorePort,
   RetentionPayloadLocation,
 } from "./artifact-vault.ts";
-import type { ProductPackageSnapshot } from "./product-adapter.ts";
+import type {
+  ProductAdapterImplementationPackage,
+  ProductPackageSnapshot,
+} from "./product-adapter.ts";
 import type { PayloadInventoryPort } from "./retention.ts";
 
 export interface RunSpecificationVersionReferences {
@@ -53,6 +60,8 @@ export interface RunSpecificationBundle {
     readonly vendorId: string;
     readonly egressDestination: ProductPackageSnapshot["egressDestination"];
     readonly implementationDigest: `sha256:${string}`;
+    readonly implementationPackageName: string;
+    readonly implementationPackageByteSize: number;
   };
   readonly schemaSnapshot: {
     readonly schemaVersion: "evaluation-framework-v0.8";
@@ -109,6 +118,7 @@ export interface RunSpecificationReference {
   readonly specCommitSha: string;
   readonly versionReferences: RunSpecificationVersionReferences;
   readonly egressAuthorization: ApprovedEgressAuthorization;
+  readonly egressAuthorizationHash: `sha256:${string}`;
 }
 
 export interface CaptureRunSpecificationCommand {
@@ -118,7 +128,7 @@ export interface CaptureRunSpecificationCommand {
   readonly evaluationCase: EvaluationCaseRecord;
   readonly productPackage: ProductPackageSnapshot;
   readonly protocolSnapshot: BakeoffProtocolSnapshot;
-  readonly adapterImplementationDigest: `sha256:${string}`;
+  readonly adapterImplementationPackage: ProductAdapterImplementationPackage;
 }
 
 export interface RunSpecificationVault {
@@ -259,6 +269,16 @@ export function createRunSpecificationVault({
       if (!/^[a-f0-9]{40}$/.test(command.specCommitSha)) {
         throw new Error("Run specification requires an exact spec commit SHA");
       }
+      if (
+        command.adapterImplementationPackage.packageName.trim().length ===
+          0 ||
+        sha256Bytes(command.adapterImplementationPackage.content) !==
+          command.adapterImplementationPackage.contentHash
+      ) {
+        throw new Error(
+          "Run specification requires an exact adapter implementation package",
+        );
+      }
       const bundleWithoutReferences = Object.freeze({
         schemaVersion: "run-specification-bundle-v1",
         jobId: command.jobId,
@@ -280,7 +300,12 @@ export function createRunSpecificationVault({
           egressDestination: Object.freeze(
             structuredClone(command.productPackage.egressDestination),
           ),
-          implementationDigest: command.adapterImplementationDigest,
+          implementationDigest:
+            command.adapterImplementationPackage.contentHash,
+          implementationPackageName:
+            command.adapterImplementationPackage.packageName,
+          implementationPackageByteSize:
+            command.adapterImplementationPackage.content.byteLength,
         }),
         schemaSnapshot: Object.freeze({
           schemaVersion: "evaluation-framework-v0.8" as const,
@@ -371,6 +396,8 @@ export function createRunSpecificationVault({
       await store.putImmutable(key, content, {
         jobId: command.jobId,
         contentHash,
+        writeAttemptId:
+          `run-specification:${command.jobId}:${command.runId}:${contentHash}`,
       });
       const readback = await store.read(key);
       if (readback === null || sha256Bytes(readback) !== contentHash) {
@@ -386,12 +413,22 @@ export function createRunSpecificationVault({
         specCommitSha: command.specCommitSha,
         versionReferences,
         egressAuthorization: authorization,
+        egressAuthorizationHash:
+          approvedEgressAuthorizationHash(authorization),
       });
     },
 
     async read(reference) {
       if (reference.storeId !== store.storeId) {
         throw new Error("Run specification store mismatch");
+      }
+      if (
+        reference.schemaVersion !==
+          "run-specification-reference-v1" ||
+        reference.key !==
+          `run-specifications/${reference.contentHash.slice("sha256:".length)}`
+      ) {
+        throw new Error("Run specification reference lineage mismatch");
       }
       const content = await store.read(reference.key);
       if (
@@ -403,6 +440,31 @@ export function createRunSpecificationVault({
         );
       }
       const bundle = parseBundle(content);
+      assertPersistedApprovedEgressAuthorization(
+        reference.egressAuthorization,
+        {
+          requestId:
+            `run-specification-storage:${reference.runId}:${reference.contentHash}`,
+          jobId: reference.jobId,
+          runId: reference.runId,
+          attemptId: null,
+          dataClassification:
+            bundle.evaluationCase.dataClassification,
+          sourceOwner: bundle.evaluationCase.sourceOwner,
+          processingPurpose: "run_specification_storage",
+          targetKind: "storage",
+          targetService: store.egressDestination.targetService,
+          targetAccount: store.egressDestination.targetAccount,
+          targetRegion: store.egressDestination.targetRegion,
+          subprocessors: store.egressDestination.subprocessors,
+          contentFields: ["run_specification_bundle"],
+          payloadHash: reference.contentHash,
+          requiredRedactions: [],
+          requestedAt:
+            reference.egressAuthorization.request.requestedAt,
+        },
+        reference.egressAuthorizationHash,
+      );
       if (
         bundle.jobId !== reference.jobId ||
         bundle.runId !== reference.runId ||

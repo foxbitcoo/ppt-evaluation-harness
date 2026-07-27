@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
@@ -61,9 +62,10 @@ export class InMemoryPayloadInventory implements PayloadInventoryPort {
   constructor(
     private readonly tombstones: Pick<
       TombstoneLedgerPort,
-      "findByJobId" | "runIfActive"
+      "findByJobId" | "runIfActive" | "ledgerId"
     >,
-    inventoryId = "in-memory-payload-inventory",
+    inventoryId =
+      `in-memory-payload-inventory:${tombstones.ledgerId}:${randomUUID()}`,
   ) {
     this.inventoryId = inventoryId;
   }
@@ -104,7 +106,9 @@ export class InMemoryTombstoneLedger implements TombstoneLedgerPort {
   readonly #deletionEvidence: RetentionDeletionEvidence[] = [];
   readonly #jobLocks = new Map<string, Promise<void>>();
 
-  constructor(ledgerId = "in-memory-tombstone-ledger") {
+  constructor(
+    ledgerId = `in-memory-tombstone-ledger:${randomUUID()}`,
+  ) {
     this.ledgerId = ledgerId;
   }
 

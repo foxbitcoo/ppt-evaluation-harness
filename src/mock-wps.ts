@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import type {
   Artifact,
@@ -13,6 +14,7 @@ import {
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import type {
   ProductAttemptResult,
+  ProductAdapterImplementationPackage,
   ProductAdapterPort,
   ProductPackageSnapshot,
   ProductRunCommand,
@@ -21,6 +23,15 @@ import { calculateRenderManifestHash } from "./render-manifest.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const mockAdapterModuleContent = readFileSync(new URL(import.meta.url));
+const MOCK_ADAPTER_IMPLEMENTATION_PACKAGE =
+  Object.freeze<ProductAdapterImplementationPackage>({
+    packageName: "src/mock-wps.ts",
+    contentHash: `sha256:${createHash("sha256")
+      .update(mockAdapterModuleContent)
+      .digest("hex")}`,
+    content: mockAdapterModuleContent,
+  });
 
 interface ZipEntry {
   readonly name: string;
@@ -604,6 +615,7 @@ export function renderStaticArtifact(
 }
 
 export class MockWpsProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage = MOCK_ADAPTER_IMPLEMENTATION_PACKAGE;
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
     packageId: "MOCK-wps-package-v1",
     vendorId: "wps",
@@ -632,6 +644,7 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
 }
 
 export class MockQwenProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage = MOCK_ADAPTER_IMPLEMENTATION_PACKAGE;
   readonly #scenario: MockAdapterScenario;
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
@@ -672,6 +685,7 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
 }
 
 export class MockDoubaoProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage = MOCK_ADAPTER_IMPLEMENTATION_PACKAGE;
   readonly #scenario: MockAdapterScenario;
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({

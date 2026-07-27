@@ -30,6 +30,8 @@ import type {
   EgressAuthorizationPort,
 } from "./egress-authorization.ts";
 import {
+  approvedEgressAuthorizationHash,
+  assertPersistedApprovedEgressAuthorization,
   requireEgressAuthorization,
   SYSTEM_CLOCK,
 } from "./egress-authorization.ts";
@@ -110,6 +112,7 @@ export interface OperationalLedgerExportReference {
   readonly encryption: string;
   readonly retentionExpiresAt: string;
   readonly egressAuthorization: ApprovedEgressAuthorization;
+  readonly egressAuthorizationHash: `sha256:${string}`;
 }
 
 export interface ExportOperationalLedgerCommand {
@@ -369,6 +372,19 @@ function createExport(
         );
       }
       if (
+        !isDeepStrictEqual(
+          {
+            artifactId: record.artifact.artifactId,
+            runId: record.artifact.runId,
+            contentHash: record.artifact.contentHash,
+            mimeType: record.artifact.mimeType,
+            byteSize: record.artifact.byteSize,
+            pageCount: record.artifact.pageCount,
+            capturedAt: record.artifact.capturedAt,
+            filename: record.artifact.filename,
+          },
+          packageManifest.artifact,
+        ) ||
         record.renderManifest.renderManifestId !==
           packageManifest.renderManifestId ||
         record.renderManifest.contentHash !==
@@ -674,6 +690,8 @@ export function createOperationalLedgerRecoveryService({
       await recoveryStore.putImmutable(key, content, {
         jobId: command.jobId,
         contentHash,
+        writeAttemptId:
+          `operational-ledger-export:${command.jobId}:${command.exportId}:${contentHash}`,
       });
       const readback = await recoveryStore.read(key);
       if (readback === null || sha256Bytes(readback) !== contentHash) {
@@ -695,6 +713,8 @@ export function createOperationalLedgerRecoveryService({
         encryption: command.encryption,
         retentionExpiresAt: command.retentionExpiresAt,
         egressAuthorization: authorization,
+        egressAuthorizationHash:
+          approvedEgressAuthorizationHash(authorization),
       };
     },
 
@@ -715,6 +735,18 @@ export function createOperationalLedgerRecoveryService({
       }
       if (exportReference.storeId !== recoveryStore.storeId) {
         throw new Error("Operational ledger recovery store mismatch");
+      }
+      if (
+        exportReference.schemaVersion !==
+          "operational-ledger-export-reference-v1" ||
+        exportReference.exportSchemaVersion !==
+          "operational-ledger-recovery-v1" ||
+        exportReference.key !==
+          `ledger-exports/${exportReference.jobId}/${exportReference.exportId}`
+      ) {
+        throw new Error(
+          "Operational ledger recovery export lineage mismatch",
+        );
       }
       if (
         exportReference.egressAuthorization.request.payloadHash !==
@@ -746,6 +778,41 @@ export function createOperationalLedgerRecoveryService({
         );
       }
       const ledger = parseExport(content);
+      assertPersistedApprovedEgressAuthorization(
+        exportReference.egressAuthorization,
+        {
+          ...exportReference.egressAuthorization.request,
+          requestId:
+            `operational-ledger-export:${exportReference.exportId}:${exportReference.contentHash}`,
+          jobId: exportReference.jobId,
+          runId: null,
+          attemptId: null,
+          processingPurpose: "operational_ledger_recovery_export",
+          targetKind: "storage",
+          targetService: recoveryStore.egressDestination.targetService,
+          targetAccount: recoveryStore.egressDestination.targetAccount,
+          targetRegion: recoveryStore.egressDestination.targetRegion,
+          subprocessors: recoveryStore.egressDestination.subprocessors,
+          contentFields: [
+            "cases",
+            "run_records",
+            "attempt_events",
+            "artifact_manifests",
+            "scorecards",
+            "adjudication_history",
+            "review_history",
+            "gap_card_workflow_history",
+            "github_issue_delivery_reservations",
+            "github_issue_link_history",
+            "comparisons",
+            "product_gap_cards",
+            "reports",
+          ],
+          payloadHash: exportReference.contentHash,
+          requiredRedactions: [],
+        },
+        exportReference.egressAuthorizationHash,
+      );
       if (
         ledger.exportId !== exportReference.exportId ||
         ledger.jobId !== exportReference.jobId ||
@@ -1000,12 +1067,23 @@ export function createOperationalLedgerRecoveryService({
           "Recovered Artifact package set is incomplete",
         );
       }
+      const completedAt = clock.now();
+      const completedAtTime = Date.parse(completedAt);
+      if (
+        !Number.isFinite(completedAtTime) ||
+        completedAtTime < rehearsalTime ||
+        completedAtTime >= retentionExpiry
+      ) {
+        throw new Error(
+          `Recovery blocked: export ${exportReference.exportId} expired during rehearsal`,
+        );
+      }
 
       return {
         rehearsalId: `recovery-rehearsal:${exportReference.exportId}`,
         complete: true,
         jobId: ledger.jobId,
-        rehearsedAt: trustedRehearsedAt,
+        rehearsedAt: completedAt,
         recordCount: ledger.recordCount,
         recoveredJob: {
           job,

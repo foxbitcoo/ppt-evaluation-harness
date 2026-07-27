@@ -16,6 +16,7 @@ import type {
   TerminalReason,
 } from "./domain.ts";
 import {
+  InMemoryArtifactCaptureJournal,
   InMemoryImmutableBlobStore,
   createArtifactVault,
   type ArtifactPackageManifest,
@@ -54,6 +55,7 @@ import {
   type OpenAiJudgePort,
 } from "./openai-judge.ts";
 import type {
+  ProductAdapterImplementationPackage,
   ProductAdapterPort,
   ProductAttemptResult,
   ProductPackageSnapshot,
@@ -245,6 +247,10 @@ const DEFAULT_EGRESS_AUDITS = new WeakMap<
   FeishuProjectionPort,
   EgressAuthorizationAuditPort
 >();
+const DEFAULT_ARTIFACT_CAPTURE_JOURNALS = new WeakMap<
+  FeishuProjectionPort,
+  InMemoryArtifactCaptureJournal
+>();
 const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
 let nextDependencyIdentity = 1;
 
@@ -267,6 +273,13 @@ function defaultArtifactVault(
   if (existing !== undefined) return existing;
   const identity = dependencyIdentity(feishu);
   const tombstones = defaultTombstoneLedger(feishu);
+  let captureJournal = DEFAULT_ARTIFACT_CAPTURE_JOURNALS.get(feishu);
+  if (captureJournal === undefined) {
+    captureJournal = new InMemoryArtifactCaptureJournal(
+      `mock-artifact-capture-journal:${identity}`,
+    );
+    DEFAULT_ARTIFACT_CAPTURE_JOURNALS.set(feishu, captureJournal);
+  }
   const created = createArtifactVault({
     primary: new InMemoryImmutableBlobStore(
       `mock-primary-artifact-store:${identity}`,
@@ -277,6 +290,7 @@ function defaultArtifactVault(
       tombstones,
     ),
     egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
+    captureJournal,
     payloadInventory: defaultPayloadInventory(feishu),
   });
   DEFAULT_ARTIFACT_VAULTS.set(feishu, created);
@@ -468,6 +482,7 @@ interface CapturedVendorResult {
 
 interface SelectedProductAdapter {
   readonly adapter: ProductAdapterPort;
+  readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
 }
@@ -493,8 +508,17 @@ function snapshotProductSelections(
           structuredClone(adapter.productPackage.egressDestination),
         ),
       });
+      const implementationPackage =
+        Object.freeze<ProductAdapterImplementationPackage>({
+          packageName: adapter.implementationPackage.packageName,
+          contentHash: adapter.implementationPackage.contentHash,
+          content: Uint8Array.from(
+            adapter.implementationPackage.content,
+          ),
+        });
       return Object.freeze({
         adapter,
+        implementationPackage,
         productPackage,
         runId: runIdForPackage(productPackage.packageId),
       });
@@ -502,34 +526,33 @@ function snapshotProductSelections(
   );
 }
 
-function adapterImplementationDigest(
-  adapter: ProductAdapterPort,
-): `sha256:${string}` {
-  const prototype = Object.getPrototypeOf(adapter) as object | null;
-  const prototypeMethods =
-    prototype === null
-      ? []
-      : Object.getOwnPropertyNames(prototype)
-          .filter((name) => name !== "constructor")
-          .map((name) => {
-            const value = Reflect.get(prototype, name) as unknown;
-            return typeof value === "function"
-              ? { name, source: value.toString() }
-              : null;
-          })
-          .filter(
-            (
-              entry,
-            ): entry is { readonly name: string; readonly source: string } =>
-              entry !== null,
-          );
-  return sha256Bytes(
-    canonicalJsonBytes({
-      constructorSource: adapter.constructor.toString(),
-      executeSource: adapter.execute.toString(),
-      prototypeMethods,
-    }),
+function adapterImplementationEvidence(
+  implementationPackage: ProductAdapterImplementationPackage,
+  productPackageId: string,
+): {
+  readonly implementationDigest: `sha256:${string}`;
+  readonly implementationPackageName: string;
+  readonly implementationPackageByteSize: number;
+} {
+  const implementationDigest = sha256Bytes(
+    implementationPackage.content,
   );
+  if (
+    implementationDigest !==
+      implementationPackage.contentHash ||
+    implementationPackage.packageName.trim().length === 0
+  ) {
+    throw new Error(
+      `Adapter implementation package is invalid: ${productPackageId}`,
+    );
+  }
+  return {
+    implementationDigest,
+    implementationPackageName:
+      implementationPackage.packageName,
+    implementationPackageByteSize:
+      implementationPackage.content.byteLength,
+  };
 }
 
 function replayedBakeoffOutcome(
@@ -625,8 +648,9 @@ function replayedBakeoffOutcome(
             vendorId: selection.productPackage.vendorId,
             egressDestination:
               selection.productPackage.egressDestination,
-            implementationDigest: adapterImplementationDigest(
-              selection.adapter,
+            ...adapterImplementationEvidence(
+              selection.implementationPackage,
+              selection.productPackage.packageId,
             ),
           }),
         )
@@ -1373,7 +1397,17 @@ export function createBakeoffHarness({
             tombstones,
           ),
           egressAuthorization,
+          captureJournal:
+            DEFAULT_ARTIFACT_CAPTURE_JOURNALS.get(feishu) ??
+            (() => {
+              const journal = new InMemoryArtifactCaptureJournal(
+                `mock-artifact-capture-journal:${dependencyIdentity(feishu)}`,
+              );
+              DEFAULT_ARTIFACT_CAPTURE_JOURNALS.set(feishu, journal);
+              return journal;
+            })(),
           payloadInventory,
+          clock,
         }));
   const runSpecificationVault =
     configuredRunSpecificationVault ??
@@ -1467,7 +1501,11 @@ export function createBakeoffHarness({
         RunSpecificationReference
       >(
         await Promise.all(
-          selections.map(async ({ adapter, productPackage, runId }) => {
+          selections.map(async ({
+            implementationPackage,
+            productPackage,
+            runId,
+          }) => {
             const reference = await runSpecificationVault.capture({
               jobId: MOCK_SCENARIO.jobId,
               runId,
@@ -1475,8 +1513,8 @@ export function createBakeoffHarness({
               evaluationCase: VOLCANO_EVALUATION_CASE,
               productPackage,
               protocolSnapshot,
-              adapterImplementationDigest:
-                adapterImplementationDigest(adapter),
+              adapterImplementationPackage:
+                implementationPackage,
             });
             return [runId, reference] as const;
           }),

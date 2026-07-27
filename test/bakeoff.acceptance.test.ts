@@ -317,6 +317,7 @@ test("the Feishu domain tables keep Artifact capture independent from scoring an
 test("the public product adapter port can be replaced without changing the Bakeoff Job seam", async () => {
   const fixedMockAdapter = new MockWpsProductAdapter();
   const replacementAdapter: ProductAdapterPort = {
+    implementationPackage: fixedMockAdapter.implementationPackage,
     productPackage: {
       ...fixedMockAdapter.productPackage,
       packageId: "MOCK-replacement-package-v1",
@@ -359,6 +360,7 @@ test("the public product adapter port can be replaced without changing the Bakeo
 test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match its content hash", async () => {
   const fixedMockAdapter = new MockWpsProductAdapter();
   const tamperingAdapter: ProductAdapterPort = {
+    implementationPackage: fixedMockAdapter.implementationPackage,
     productPackage: fixedMockAdapter.productPackage,
     async execute(command: ProductRunCommand): Promise<Artifact> {
       const artifact = await fixedMockAdapter.execute(command);
@@ -387,6 +389,7 @@ test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match it
 test("Artifact byte changes with a valid new hash drive new static renders and evidence-based scores", async () => {
   const fixedMockAdapter = new MockWpsProductAdapter();
   const variantAdapter: ProductAdapterPort = {
+    implementationPackage: fixedMockAdapter.implementationPackage,
     productPackage: {
       ...fixedMockAdapter.productPackage,
       packageId: "MOCK-content-variant-package-v1",

@@ -40,7 +40,14 @@ export interface ProductAttemptResult {
   readonly artifactCandidates: readonly ArtifactCandidate[];
 }
 
+export interface ProductAdapterImplementationPackage {
+  readonly packageName: string;
+  readonly contentHash: `sha256:${string}`;
+  readonly content: Uint8Array;
+}
+
 export interface ProductAdapterPort {
   readonly productPackage: ProductPackageSnapshot;
+  readonly implementationPackage: ProductAdapterImplementationPackage;
   execute(command: ProductRunCommand): Promise<Artifact | ProductAttemptResult>;
 }

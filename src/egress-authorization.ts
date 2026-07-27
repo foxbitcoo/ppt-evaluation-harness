@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 export type EgressProcessingPurpose =
@@ -96,7 +97,9 @@ export class InMemoryEgressAuthorizationAudit
   readonly auditId: string;
   readonly #decisions: ApprovedEgressAuthorization[] = [];
 
-  constructor(auditId = "in-memory-egress-authorization-audit") {
+  constructor(
+    auditId = `in-memory-egress-authorization-audit:${randomUUID()}`,
+  ) {
     this.auditId = auditId;
   }
 
@@ -117,6 +120,57 @@ export class InMemoryEgressAuthorizationAudit
 
   list(): readonly ApprovedEgressAuthorization[] {
     return structuredClone(this.#decisions);
+  }
+}
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalValue(entry)]),
+    );
+  }
+  return value;
+}
+
+export function approvedEgressAuthorizationHash(
+  decision: ApprovedEgressAuthorization,
+): `sha256:${string}` {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalValue(decision)))
+    .digest("hex")}`;
+}
+
+export function assertPersistedApprovedEgressAuthorization(
+  decision: ApprovedEgressAuthorization,
+  expectedRequest: EgressAuthorizationRequest,
+  expectedIntegrityHash: `sha256:${string}`,
+): void {
+  const runtimeDecision = decision as EgressAuthorizationDecision;
+  if (
+    runtimeDecision.status !== "approved" ||
+    !isDeepStrictEqual(runtimeDecision.request, expectedRequest) ||
+    approvedEgressAuthorizationHash(decision) !== expectedIntegrityHash ||
+    decision.decisionId.trim().length === 0 ||
+    decision.policyVersion.trim().length === 0 ||
+    decision.legalSecurityBasis.trim().length === 0
+  ) {
+    throw new Error("Persisted egress authorization decision is invalid");
+  }
+  const requestedAt = Date.parse(decision.request.requestedAt);
+  const approvedAt = Date.parse(decision.approvedAt);
+  const expiresAt = Date.parse(decision.expiresAt);
+  if (
+    !Number.isFinite(requestedAt) ||
+    !Number.isFinite(approvedAt) ||
+    !Number.isFinite(expiresAt) ||
+    approvedAt > requestedAt ||
+    requestedAt >= expiresAt ||
+    decision.request.requiredRedactions.length > 0
+  ) {
+    throw new Error("Persisted egress authorization decision is invalid");
   }
 }
 

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type { Artifact, RenderManifest } from "./domain.ts";
@@ -8,7 +8,9 @@ import {
 } from "./render-manifest.ts";
 import {
   requireEgressAuthorization,
+  SYSTEM_CLOCK,
   type ApprovedEgressAuthorization,
+  type ClockPort,
   type EgressDestinationMetadata,
   type EgressAuthorizationPort,
 } from "./egress-authorization.ts";
@@ -17,6 +19,7 @@ import type { PayloadInventoryPort } from "./retention.ts";
 export interface ImmutableBlobWriteContext {
   readonly jobId: string;
   readonly contentHash: `sha256:${string}`;
+  readonly writeAttemptId: string;
 }
 
 export interface JobTombstoneLookupPort {
@@ -33,6 +36,7 @@ export interface ImmutableBlobStorePort {
     context: ImmutableBlobWriteContext,
   ): Promise<void>;
   read(key: string): Promise<Uint8Array | null>;
+  releaseWriteClaim(key: string, writeAttemptId: string): Promise<void>;
   delete(key: string): Promise<void>;
 }
 
@@ -53,6 +57,7 @@ export interface ArtifactCaptureJournalEvent {
 }
 
 export interface ArtifactCaptureJournalPort {
+  readonly journalId: string;
   beginAttempt(input: {
     readonly jobId: string;
     readonly artifactId: string;
@@ -64,8 +69,15 @@ export interface ArtifactCaptureJournalPort {
 export class InMemoryArtifactCaptureJournal
   implements ArtifactCaptureJournalPort
 {
+  readonly journalId: string;
   readonly #events: ArtifactCaptureJournalEvent[] = [];
   readonly #attemptCounts = new Map<string, number>();
+
+  constructor(
+    journalId = `in-memory-artifact-capture-journal:${randomUUID()}`,
+  ) {
+    this.journalId = journalId;
+  }
 
   async beginAttempt(input: {
     readonly jobId: string;
@@ -76,7 +88,7 @@ export class InMemoryArtifactCaptureJournal
     const attemptNumber = (this.#attemptCounts.get(identity) ?? 0) + 1;
     this.#attemptCounts.set(identity, attemptNumber);
     const captureAttemptId =
-      `artifact-capture-attempt:${input.jobId}:${input.artifactId}:${attemptNumber}`;
+      `artifact-capture-attempt:${this.journalId}:${input.jobId}:${input.artifactId}:${attemptNumber}`;
     await this.append({
       eventId: `${captureAttemptId}:started`,
       captureAttemptId,
@@ -121,6 +133,7 @@ export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
   readonly storeId: string;
   readonly egressDestination: EgressDestinationMetadata;
   readonly #blobs = new Map<string, Uint8Array>();
+  readonly #writeClaims = new Map<string, Set<string>>();
 
   constructor(
     storeId: string,
@@ -154,14 +167,18 @@ export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
       );
     }
     const write = async () => {
-    const existing = this.#blobs.get(key);
-    if (existing !== undefined) {
-      if (!isDeepStrictEqual(existing, content)) {
-        throw new Error(`Immutable blob conflict: ${this.storeId}/${key}`);
+      const existing = this.#blobs.get(key);
+      if (existing !== undefined) {
+        if (!isDeepStrictEqual(existing, content)) {
+          throw new Error(`Immutable blob conflict: ${this.storeId}/${key}`);
+        }
+        const claims = this.#writeClaims.get(key) ?? new Set<string>();
+        claims.add(context.writeAttemptId);
+        this.#writeClaims.set(key, claims);
+        return;
       }
-      return;
-    }
-    this.#blobs.set(key, Uint8Array.from(content));
+      this.#blobs.set(key, Uint8Array.from(content));
+      this.#writeClaims.set(key, new Set([context.writeAttemptId]));
     };
     if (this.tombstones === undefined) {
       await write();
@@ -188,8 +205,22 @@ export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
     return content === undefined ? null : Uint8Array.from(content);
   }
 
+  async releaseWriteClaim(
+    key: string,
+    writeAttemptId: string,
+  ): Promise<void> {
+    const claims = this.#writeClaims.get(key);
+    if (claims === undefined) return;
+    claims.delete(writeAttemptId);
+    if (claims.size === 0) {
+      this.#writeClaims.delete(key);
+      this.#blobs.delete(key);
+    }
+  }
+
   async delete(key: string): Promise<void> {
     this.#blobs.delete(key);
+    this.#writeClaims.delete(key);
   }
 
   listKeys(): readonly string[] {
@@ -238,6 +269,8 @@ export interface RetentionPayloadLocation {
 export interface ArtifactPackageManifest {
   readonly schemaVersion: "artifact-package-manifest-v1";
   readonly manifestHash: `sha256:${string}`;
+  readonly captureJournalId: string;
+  readonly captureAttemptId: string;
   readonly jobId: string;
   readonly artifact: ArtifactMetadata;
   readonly renderManifestId: string;
@@ -276,8 +309,9 @@ export interface ArtifactVaultDependencies {
   readonly primary: ImmutableBlobStorePort;
   readonly secondary: ImmutableBlobStorePort;
   readonly egressAuthorization?: EgressAuthorizationPort;
-  readonly captureJournal?: ArtifactCaptureJournalPort;
+  readonly captureJournal: ArtifactCaptureJournalPort;
   readonly payloadInventory: PayloadInventoryPort;
+  readonly clock?: ClockPort;
 }
 
 function sha256(content: Uint8Array): `sha256:${string}` {
@@ -380,8 +414,9 @@ export function createArtifactVault({
   primary,
   secondary,
   egressAuthorization,
-  captureJournal = new InMemoryArtifactCaptureJournal(),
+  captureJournal,
   payloadInventory,
+  clock = SYSTEM_CLOCK,
 }: ArtifactVaultDependencies): ArtifactVault {
   if (primary.storeId === secondary.storeId) {
     throw new Error("ArtifactVault requires two distinct controlled stores");
@@ -548,23 +583,6 @@ export function createArtifactVault({
         })),
       );
       for (const planned of writePlan) {
-        authorizations.push(
-          await requireEgressAuthorization(
-            egressAuthorization,
-            storageRequest({
-              jobId: command.jobId,
-              runId: artifact.runId,
-              artifactId: artifact.artifactId,
-              dataClassification: command.dataClassification,
-              sourceOwner: command.sourceOwner,
-              storeId: planned.store.storeId,
-              key: planned.key,
-              contentHash: planned.contentHash,
-              contentField: planned.contentField,
-              destination: planned.store.egressDestination,
-            }),
-          ),
-        );
         payloadLocations.push({
           storeId: planned.store.storeId,
           key: planned.key,
@@ -582,6 +600,24 @@ export function createArtifactVault({
       const createdLocations = new Set<string>();
       try {
         for (const planned of writePlan) {
+          authorizations.push(
+            await requireEgressAuthorization(
+              egressAuthorization,
+              storageRequest({
+                jobId: command.jobId,
+                runId: artifact.runId,
+                artifactId: artifact.artifactId,
+                dataClassification: command.dataClassification,
+                sourceOwner: command.sourceOwner,
+                storeId: planned.store.storeId,
+                key: planned.key,
+                contentHash: planned.contentHash,
+                contentField: planned.contentField,
+                destination: planned.store.egressDestination,
+              }),
+              clock,
+            ),
+          );
           const locationIdentity =
             `${planned.store.storeId}\u0000${planned.key}`;
           const before = await planned.store.read(planned.key);
@@ -590,6 +626,7 @@ export function createArtifactVault({
             await planned.store.putImmutable(planned.key, planned.content, {
               jobId: command.jobId,
               contentHash: planned.contentHash,
+              writeAttemptId: captureAttemptId,
             });
           } else if (sha256(before) !== planned.contentHash) {
             throw new Error(
@@ -634,8 +671,15 @@ export function createArtifactVault({
             `${planned.store.storeId}\u0000${planned.key}`;
           if (!createdLocations.has(locationIdentity)) continue;
           try {
-            await planned.store.delete(planned.key);
-            if ((await planned.store.read(planned.key)) !== null) {
+            await planned.store.releaseWriteClaim(
+              planned.key,
+              captureAttemptId,
+            );
+            const remaining = await planned.store.read(planned.key);
+            if (
+              remaining !== null &&
+              sha256(remaining) !== planned.contentHash
+            ) {
               cleanupFailures.push(
                 `${planned.store.storeId}/${planned.key}`,
               );
@@ -678,7 +722,7 @@ export function createArtifactVault({
           eventType: "cleanup_verified",
           storeId: null,
           key: null,
-          detail: `absent:${writePlan.length}`,
+          detail: `claims-released:${writePlan.length}`,
         });
         throw error;
       }
@@ -686,6 +730,8 @@ export function createArtifactVault({
       return Object.freeze({
         schemaVersion: "artifact-package-manifest-v1",
         manifestHash,
+        captureJournalId: captureJournal.journalId,
+        captureAttemptId,
         jobId: command.jobId,
         artifact: artifactMetadata,
         renderManifestId: renderManifest.renderManifestId,
