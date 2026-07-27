@@ -240,6 +240,69 @@ class SuccessfulQwenBrowserFake implements QwenBrowserDriverPort {
   }
 }
 
+async function retainedQwenReplaySession(
+  fixture: Artifact,
+  evidenceBindings: Readonly<{
+    package: `ev_${string}`;
+    model: `ev_${string}`;
+    configuration: `ev_${string}`;
+  }>,
+): Promise<QwenBrowserExecution> {
+  const captured = await new SuccessfulQwenBrowserFake(fixture).execute({
+    attemptSeq: 1,
+    entryUrl: "https://www.qianwen.com/",
+    prompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+    pageCount: 16,
+    networking: "enabled",
+    packageSelection: "best_available_zero_added_cost",
+    modelSelection: "best_available_zero_added_cost",
+    expertMode: "best_available_zero_added_cost",
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+  });
+  return {
+    ...captured,
+    observedConfiguration: {
+      ...captured.observedConfiguration,
+      evidenceBindings,
+    },
+    milestones: [
+      captured.milestones[0]!,
+      {
+        eventType: "package_observed" as const,
+        observedAt: "2026-07-27T10:00:10.000Z",
+        url: "https://www.qianwen.com/chat/observable-task",
+      },
+      {
+        eventType: "model_observed" as const,
+        observedAt: "2026-07-27T10:00:15.000Z",
+        url: "https://www.qianwen.com/chat/observable-task",
+      },
+      {
+        eventType: "configuration_applied" as const,
+        observedAt: "2026-07-27T10:00:20.000Z",
+        url: "https://www.qianwen.com/chat/observable-task",
+      },
+      ...captured.milestones.slice(1),
+    ].map((milestone, index) => ({
+      ...milestone,
+      evidenceId:
+        `ev_${String(index + 1).repeat(16)}` as `ev_${string}`,
+      ...(milestone.eventType === "page_opened"
+        ? {}
+        : {
+            vendorTaskId:
+              "task_qwen_capture_1234" as `task_${string}`,
+            taskStateVersion:
+              milestone.eventType === "submission_observed"
+                ? "submitted@1"
+                : "artifact_ready@2",
+          }),
+    })),
+    staticRenders: [],
+  };
+}
+
 test("the Qwen workflow captures the first downloaded PPTX with hash, 16 static pages, and allowlisted observable trace", async () => {
   const fixture = await qwenPptxFixture();
   const executor = createQwenProductAdapterExecutorForTest(
@@ -437,7 +500,12 @@ test("Qwen rejects completed output whose submission claim contradicts its obser
       return {
         ...result,
         milestones: result.milestones.filter(
-          ({ eventType }) => eventType !== "submission_observed",
+          ({ eventType }) =>
+            ![
+              "submission_observed",
+              "generation_ready",
+              "export_ready",
+            ].includes(eventType),
         ),
       };
     },
@@ -591,7 +659,7 @@ test("the public production start path rejects a caller-supplied Qwen browser cl
   assert.equal(calls, 0);
 });
 
-test("a restarted Qwen replay reads durable checkpoints and reconciles before any retained session executes", async () => {
+test("a restarted Qwen replay reuses its durable reconciliation result idempotently", async () => {
   const attemptId = "attempt-qwen-recovery-1";
   const checkpointStore = new InMemoryAttemptCheckpointStore(
     "qwen-recovery-checkpoints",
@@ -647,7 +715,7 @@ test("a restarted Qwen replay reads durable checkpoints and reconciles before an
     },
   );
 
-  const result = await executor({
+  const command = {
     jobId: checkpoint.jobId,
     runId: checkpoint.runId,
     attemptId,
@@ -655,7 +723,8 @@ test("a restarted Qwen replay reads durable checkpoints and reconciles before an
     timeoutMs: 30 * 60 * 1_000,
     signal: new AbortController().signal,
     evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
-  });
+  };
+  const result = await executor(command);
 
   assert.ok(!("content" in result));
   assert.equal(result.terminalReason, "download_failure");
@@ -668,6 +737,15 @@ test("a restarted Qwen replay reads durable checkpoints and reconciles before an
     result.observableEvents?.at(-1)
       ?.reconciliationArtifactReference,
     "qwen-task:task_qwen_recovery_1234",
+  );
+  const persistedAfterFirstRestart =
+    await checkpointStore.readAttempt(attemptId);
+  const restartedAgain = await executor(command);
+
+  assert.deepEqual(restartedAgain, result);
+  assert.deepEqual(
+    await checkpointStore.readAttempt(attemptId),
+    persistedAfterFirstRestart,
   );
 });
 
@@ -732,59 +810,216 @@ test("Qwen replay rejects unknown final evidence after a durable submission chec
   );
 });
 
+test("Qwen replay treats generation-ready evidence as submitted and rejects an unknown final claim", async () => {
+  const descriptor = new QwenReplayProductAdapter();
+  const executor = resolveHarnessProductAdapterExecutor(
+    descriptor.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      descriptor.executionConfigurationPackage,
+    ),
+    {
+      qwenBrowserDriver: createQwenRealProviderReplayPackage({
+        sessions: [
+          {
+            status: "terminal",
+            terminalReason: "technical_failure",
+            blockReason: null,
+            submissionEvidence: "unknown",
+            elapsedMs: 60_000,
+            observedAt: "2026-07-27T10:02:00.000Z",
+            observedConfiguration: null,
+            milestones: [
+              {
+                eventType: "generation_ready",
+                observedAt: "2026-07-27T10:01:30.000Z",
+                url: "https://www.qianwen.com/chat/observable-task",
+                evidenceId: "ev_5555555555555555",
+                vendorTaskId: "task_qwen_generation_1234",
+                taskStateVersion: "generation_ready@2",
+              },
+            ],
+            manualActions: [],
+          },
+        ],
+      }),
+      attemptCheckpointStore: new InMemoryAttemptCheckpointStore(
+        "qwen-generation-ready-checkpoints",
+      ),
+    },
+  );
+
+  await assert.rejects(
+    executor({
+      jobId: "job-qwen-generation-ready",
+      runId: "run-qwen-generation-ready",
+      attemptId: "attempt-qwen-generation-ready-1",
+      attemptSeq: 1,
+      timeoutMs: 30 * 60 * 1_000,
+      signal: new AbortController().signal,
+      evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+    }),
+    /post-submit milestone.*submission evidence/i,
+  );
+});
+
+test("Qwen replay rejects unsafe structured evidence before persisting any checkpoint", async (t) => {
+  const observedAt = "2026-07-27T10:01:30.000Z";
+  const baseExecution = {
+    status: "terminal",
+    terminalReason: "technical_failure",
+    blockReason: null,
+    submissionEvidence: "submitted",
+    elapsedMs: 60_000,
+    observedAt: "2026-07-27T10:02:00.000Z",
+    observedConfiguration: null,
+    milestones: [
+      {
+        eventType: "submission_observed",
+        observedAt,
+        url: "https://www.qianwen.com/chat/observable-task",
+        evidenceId: "ev_6666666666666666",
+        vendorTaskId: "task_qwen_structured_1234",
+        taskStateVersion: "submitted@2",
+      },
+    ],
+    manualActions: [],
+  } satisfies QwenBrowserExecution;
+  const unsafeExecutions = [
+    {
+      label: "manual action",
+      execution: {
+        ...baseExecution,
+        manualActions: [
+          {
+            action: "Bearer authorization token",
+            observedAt,
+          },
+        ],
+      },
+    },
+    {
+      label: "vendor task ID",
+      execution: {
+        ...baseExecution,
+        milestones: [
+          {
+            ...baseExecution.milestones[0],
+            vendorTaskId: "task_bearer_authorization_token",
+          },
+        ],
+      },
+    },
+    {
+      label: "task state version",
+      execution: {
+        ...baseExecution,
+        milestones: [
+          {
+            ...baseExecution.milestones[0],
+            taskStateVersion: `Bearer ${"x".repeat(160)}`,
+          },
+        ],
+      },
+    },
+    {
+      label: "evidence reference",
+      execution: {
+        ...baseExecution,
+        milestones: [
+          {
+            ...baseExecution.milestones[0],
+            evidenceId: "ev_bearer_authorization_token",
+          },
+        ],
+      },
+    },
+  ] as const;
+
+  for (const { label, execution } of unsafeExecutions) {
+    await t.test(label, async () => {
+      const checkpointStore = new InMemoryAttemptCheckpointStore(
+        `qwen-unsafe-${label}`,
+      );
+      const descriptor = new QwenReplayProductAdapter();
+      const executor = resolveHarnessProductAdapterExecutor(
+        descriptor.implementationPackage,
+        parseAdapterExecutionConfiguration(
+          descriptor.executionConfigurationPackage,
+        ),
+        {
+          qwenBrowserDriver: createQwenRealProviderReplayPackage({
+            sessions: [
+              execution as unknown as QwenBrowserExecution,
+            ],
+          }),
+          attemptCheckpointStore: checkpointStore,
+        },
+      );
+      const attemptId = `attempt-qwen-unsafe-${label}`;
+
+      await assert.rejects(
+        executor({
+          jobId: `job-qwen-unsafe-${label}`,
+          runId: `run-qwen-unsafe-${label}`,
+          attemptId,
+          attemptSeq: 1,
+          timeoutMs: 30 * 60 * 1_000,
+          signal: new AbortController().signal,
+          evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+        }),
+        /unsafe|allowlisted|opaque/i,
+      );
+      assert.deepEqual(
+        await checkpointStore.readAttempt(attemptId),
+        [],
+      );
+    });
+  }
+});
+
+test("Qwen configuration evidence cannot be borrowed from a submission milestone", async () => {
+  const fixture = await qwenPptxFixture();
+  const replaySession = await retainedQwenReplaySession(fixture, {
+    package: "ev_2222222222222222",
+    model: "ev_5555555555555555",
+    configuration: "ev_4444444444444444",
+  });
+  const descriptor = new QwenReplayProductAdapter();
+
+  await assert.rejects(
+    resolveHarnessProductAdapterExecutor(
+      descriptor.implementationPackage,
+      parseAdapterExecutionConfiguration(
+        descriptor.executionConfigurationPackage,
+      ),
+      {
+        qwenBrowserDriver: createQwenRealProviderReplayPackage({
+          sessions: [replaySession],
+        }),
+        attemptCheckpointStore: new InMemoryAttemptCheckpointStore(
+          "qwen-misbound-configuration-checkpoints",
+        ),
+      },
+    )({
+      jobId: "job-qwen-misbound-configuration",
+      runId: "run-qwen-misbound-configuration",
+      attemptId: "attempt-qwen-misbound-configuration-1",
+      attemptSeq: 1,
+      timeoutMs: 30 * 60 * 1_000,
+      signal: new AbortController().signal,
+      evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+    }),
+    /configuration evidence.*dedicated.*milestone/i,
+  );
+});
+
 test("a retained Qwen capture produces PRODUCTION_REPLAY Artifact and bound opaque execution evidence", async () => {
   const fixture = await qwenPptxFixture();
-  const captured = await new SuccessfulQwenBrowserFake(fixture).execute({
-    attemptSeq: 1,
-    entryUrl: "https://www.qianwen.com/",
-    prompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
-    pageCount: 16,
-    networking: "enabled",
-    packageSelection: "best_available_zero_added_cost",
-    modelSelection: "best_available_zero_added_cost",
-    expertMode: "best_available_zero_added_cost",
-    timeoutMs: 30 * 60 * 1_000,
-    signal: new AbortController().signal,
+  const replaySession = await retainedQwenReplaySession(fixture, {
+    package: "ev_2222222222222222",
+    model: "ev_3333333333333333",
+    configuration: "ev_4444444444444444",
   });
-  const replaySession = {
-    ...captured,
-    observedConfiguration: {
-      ...captured.observedConfiguration,
-      evidenceIds: [
-        "ev_2222222222222222",
-        "ev_3333333333333333",
-      ] as const,
-    },
-    milestones: [
-      captured.milestones[0]!,
-      {
-        eventType: "package_observed" as const,
-        observedAt: "2026-07-27T10:00:10.000Z",
-        url: "https://www.qianwen.com/chat/observable-task",
-      },
-      {
-        eventType: "configuration_applied" as const,
-        observedAt: "2026-07-27T10:00:20.000Z",
-        url: "https://www.qianwen.com/chat/observable-task",
-      },
-      ...captured.milestones.slice(1),
-    ].map((milestone, index) => ({
-      ...milestone,
-      evidenceId:
-        `ev_${String(index + 1).repeat(16)}` as `ev_${string}`,
-      ...(milestone.eventType === "page_opened"
-        ? {}
-        : {
-            vendorTaskId:
-              "task_qwen_capture_1234" as `task_${string}`,
-            taskStateVersion:
-              milestone.eventType === "submission_observed"
-                ? "submitted@1"
-                : "artifact_ready@2",
-          }),
-    })),
-    staticRenders: [],
-  };
   const descriptor = new QwenReplayProductAdapter();
   const checkpointStore = new InMemoryAttemptCheckpointStore(
     "qwen-capture-checkpoints",

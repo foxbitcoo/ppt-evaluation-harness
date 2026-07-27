@@ -74,16 +74,34 @@ export interface QwenObservedConfiguration {
   readonly expertMode: "enabled" | "disabled" | "unavailable";
   readonly networking: "enabled";
   readonly pageCount: 16;
-  readonly evidenceIds?: readonly `ev_${string}`[];
+  readonly evidenceBindings?: Readonly<{
+    readonly package: `ev_${string}`;
+    readonly model: `ev_${string}`;
+    readonly configuration: `ev_${string}`;
+  }>;
 }
 
 export type QwenBrowserMilestoneType =
   | "page_opened"
   | "package_observed"
+  | "model_observed"
   | "configuration_applied"
   | "submission_observed"
   | "generation_ready"
   | "export_ready";
+
+const QWEN_MILESTONE_PHASE = Object.freeze({
+  page_opened: "pre_submit",
+  package_observed: "pre_submit",
+  model_observed: "pre_submit",
+  configuration_applied: "pre_submit",
+  submission_observed: "submission",
+  generation_ready: "post_submit",
+  export_ready: "post_submit",
+} satisfies Record<
+  QwenBrowserMilestoneType,
+  "pre_submit" | "submission" | "post_submit"
+>);
 
 export interface QwenBrowserMilestone {
   readonly eventType: QwenBrowserMilestoneType;
@@ -101,6 +119,17 @@ export type QwenManualActionType =
   | "confirmed_page_count"
   | "confirmed_template"
   | "confirmed_export";
+
+const QWEN_MANUAL_ACTION_TYPES = new Set<QwenManualActionType>([
+  "confirmed_visible_package",
+  "confirmed_model",
+  "confirmed_networking",
+  "confirmed_page_count",
+  "confirmed_template",
+  "confirmed_export",
+]);
+const QWEN_SENSITIVE_REPLAY_PATTERN =
+  /cookie|authorization|bearer|access[_ -]?token|refresh[_ -]?token|localstorage|sessionstorage|session[_ -]?id|password|secret|qwen[_ -]?sid|chain[_ -]?of[_ -]?thought|hidden[_ -]?(?:reasoning|thought)/i;
 
 export interface QwenManualAction {
   readonly action: QwenManualActionType;
@@ -554,14 +583,20 @@ function validateObservedConfiguration(
   }
   if (
     production &&
-    (configuration.evidenceIds === undefined ||
-      configuration.evidenceIds.length === 0 ||
-      configuration.evidenceIds.some(
-        (evidenceId) => !/^ev_[a-f0-9]{16,64}$/.test(evidenceId),
+    (configuration.evidenceBindings === undefined ||
+      Object.keys(configuration.evidenceBindings).sort().join(",") !==
+        "configuration,model,package" ||
+      new Set(
+        Object.values(configuration.evidenceBindings),
+      ).size !== 3 ||
+      Object.values(configuration.evidenceBindings).some(
+        (evidenceId) =>
+          !/^ev_[a-f0-9]{16,64}$/.test(evidenceId) ||
+          QWEN_SENSITIVE_REPLAY_PATTERN.test(evidenceId),
       ))
   ) {
     throw new Error(
-      "Production Qwen configuration requires opaque evidence IDs",
+      "Production Qwen configuration requires three distinct opaque evidence bindings",
     );
   }
   return Object.freeze({
@@ -729,7 +764,9 @@ async function persistedObservableEvents(
     if (!/^ev_[a-f0-9]{16,64}$/.test(evidenceId)) {
       throw new Error("Qwen browser evidence ID must be opaque");
     }
-    if (milestone.eventType === "submission_observed") {
+    if (
+      QWEN_MILESTONE_PHASE[milestone.eventType] !== "pre_submit"
+    ) {
       submitted = true;
     }
     if (
@@ -797,7 +834,8 @@ function assertSubmissionEvidenceMatchesMilestones(
   execution: QwenBrowserExecution,
 ): void {
   const submissionObserved = execution.milestones.some(
-    ({ eventType }) => eventType === "submission_observed",
+    ({ eventType }) =>
+      QWEN_MILESTONE_PHASE[eventType] !== "pre_submit",
   );
   if (
     (execution.submissionEvidence === "submitted" &&
@@ -806,7 +844,125 @@ function assertSubmissionEvidenceMatchesMilestones(
       submissionObserved)
   ) {
     throw new Error(
-      "Qwen submission evidence contradicts observable checkpoints",
+      "Qwen post-submit milestone submission evidence contradicts observable checkpoints",
+    );
+  }
+}
+
+function assertSafeQwenReplayInput(
+  execution: QwenBrowserExecution,
+): void {
+  for (const action of execution.manualActions) {
+    if (
+      typeof action.action !== "string" ||
+      !QWEN_MANUAL_ACTION_TYPES.has(
+        action.action as QwenManualActionType,
+      ) ||
+      QWEN_SENSITIVE_REPLAY_PATTERN.test(action.action)
+    ) {
+      throw new Error(
+        "Qwen replay manual action is not allowlisted safe evidence",
+      );
+    }
+    assertIsoTimestamp(action.observedAt, "manual-action time");
+  }
+  for (const milestone of execution.milestones) {
+    if (
+      typeof milestone.eventType !== "string" ||
+      !Object.hasOwn(QWEN_MILESTONE_PHASE, milestone.eventType)
+    ) {
+      throw new Error(
+        "Qwen replay milestone type is not allowlisted safe evidence",
+      );
+    }
+    assertIsoTimestamp(milestone.observedAt, "milestone time");
+    safeQwenUrl(milestone.url);
+    if (
+      milestone.evidenceId !== undefined &&
+      (!/^ev_[a-f0-9]{16,64}$/.test(milestone.evidenceId) ||
+        QWEN_SENSITIVE_REPLAY_PATTERN.test(milestone.evidenceId))
+    ) {
+      throw new Error(
+        "Qwen replay evidence reference must be opaque safe evidence",
+      );
+    }
+    if (
+      milestone.vendorTaskId !== undefined &&
+      milestone.vendorTaskId !== null &&
+      (!/^task_[a-z0-9][a-z0-9_-]{7,123}$/.test(
+        milestone.vendorTaskId,
+      ) ||
+        QWEN_SENSITIVE_REPLAY_PATTERN.test(
+          milestone.vendorTaskId,
+        ))
+    ) {
+      throw new Error(
+        "Qwen replay vendor task ID is unsafe structured evidence",
+      );
+    }
+    if (
+      milestone.taskStateVersion !== undefined &&
+      milestone.taskStateVersion !== null &&
+      (!/^[A-Za-z0-9._:@/-]{1,128}$/.test(
+        milestone.taskStateVersion,
+      ) ||
+        QWEN_SENSITIVE_REPLAY_PATTERN.test(
+          milestone.taskStateVersion,
+        ))
+    ) {
+      throw new Error(
+        "Qwen replay task state version is unsafe structured evidence",
+      );
+    }
+  }
+}
+
+function terminalReasonForQwenReconciliation(
+  observedState: ObservableAttemptEvent["reconciliationObservedState"],
+): "task_state_unknown" | "download_failure" | "technical_failure" {
+  if (observedState === "artifact_ready") return "download_failure";
+  if (observedState === "failed") return "technical_failure";
+  return "task_state_unknown";
+}
+
+function artifactReferenceForQwenReconciliation(
+  observedState: ObservableAttemptEvent["reconciliationObservedState"],
+  vendorTaskId: string,
+): string | null {
+  return observedState === "artifact_ready"
+    ? `qwen-task:${vendorTaskId}`
+    : null;
+}
+
+function assertDurableQwenReconciliation(
+  event: ObservableAttemptEvent,
+): void {
+  const observedState = event.reconciliationObservedState;
+  if (
+    observedState === undefined ||
+    !["unknown", "submitted", "artifact_ready", "failed"].includes(
+      observedState,
+    ) ||
+    event.vendorTaskId === null ||
+    event.vendorTaskId === undefined ||
+    event.taskStateVersion === null ||
+    event.taskStateVersion === undefined
+  ) {
+    throw new Error(
+      "Durable Qwen reconciliation result is structurally incomplete",
+    );
+  }
+  if (
+    event.reconciliationTerminalReason !==
+      terminalReasonForQwenReconciliation(observedState) ||
+    (event.reconciliationArtifactReference ?? null) !==
+      artifactReferenceForQwenReconciliation(
+        observedState,
+        event.vendorTaskId,
+      )
+  ) {
+    throw new Error(
+      "Durable Qwen reconciliation result is internally inconsistent",
     );
   }
 }
@@ -853,6 +1009,40 @@ function qwenExecutor(
             "Recovered Qwen checkpoint lineage does not match the Attempt",
           );
         }
+      }
+      const latestDurableReconciliation = [...recoveredEvents]
+        .reverse()
+        .find(
+          ({ eventType }) =>
+            eventType === "task_reconciliation_result",
+        );
+      if (latestDurableReconciliation !== undefined) {
+        assertDurableQwenReconciliation(
+          latestDurableReconciliation,
+        );
+        const restoredEvents = Object.freeze(
+          recoveredEvents.map((event) =>
+            Object.freeze(structuredClone(event)),
+          ),
+        );
+        return Object.freeze({
+          terminalReason:
+            latestDurableReconciliation.reconciliationTerminalReason!,
+          blockReason: null,
+          submissionEvidence: restoredEvents.some(
+            ({ submissionEvidenceAtCheckpoint }) =>
+              submissionEvidenceAtCheckpoint === "submitted",
+          )
+            ? "submitted"
+            : "unknown",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: restoredEvents,
+          observedConfiguration: null,
+          trace: Object.freeze([]),
+          manualActions: Object.freeze([]),
+          staticRenders: Object.freeze([]),
+        });
       }
       const latestTaskCheckpoint = [...recoveredEvents].reverse().find(
         (event) =>
@@ -905,15 +1095,14 @@ function qwenExecutor(
         artifactId: null,
         reconciliationObservedState: reconciliation.observedState,
         reconciliationTerminalReason:
-          reconciliation.observedState === "artifact_ready"
-            ? "download_failure" as const
-            : reconciliation.observedState === "failed"
-              ? "technical_failure" as const
-              : "task_state_unknown" as const,
+          terminalReasonForQwenReconciliation(
+            reconciliation.observedState,
+          ),
         reconciliationArtifactReference:
-          reconciliation.observedState === "artifact_ready"
-            ? `qwen-task:${reconciliation.query.vendorTaskId}`
-            : null,
+          artifactReferenceForQwenReconciliation(
+            reconciliation.observedState,
+            reconciliation.query.vendorTaskId,
+          ),
       });
       await checkpointStore?.append(reconciliationEvent);
       const reconciledEvents = Object.freeze([
@@ -953,6 +1142,7 @@ function qwenExecutor(
       timeoutMs: command.timeoutMs,
       signal: command.signal,
     });
+    assertSafeQwenReplayInput(execution);
     const observableEvents = await persistedObservableEvents(
       command,
       execution,
@@ -990,31 +1180,28 @@ function qwenExecutor(
         execution.observedConfiguration,
         provenance !== "MOCK",
       );
-    if (
-      provenance !== "MOCK" &&
-      (!execution.milestones.some(
-        ({ eventType }) => eventType === "package_observed",
-      ) ||
-        !execution.milestones.some(
-          ({ eventType }) =>
-            eventType === "configuration_applied",
-        ))
-    ) {
-      throw new Error(
-        "Production Qwen capture requires package and configuration evidence checkpoints",
-      );
-    }
-    if (
-      provenance !== "MOCK" &&
-      !observedConfiguration.evidenceIds?.every((evidenceId) =>
-        execution.milestones.some(
-          (milestone) => milestone.evidenceId === evidenceId,
-        ),
-      )
-    ) {
-      throw new Error(
-        "Production Qwen configuration evidence is not bound to observable checkpoints",
-      );
+    if (provenance !== "MOCK") {
+      const evidenceBindings =
+        observedConfiguration.evidenceBindings!;
+      const dedicatedMilestones = [
+        ["package", "package_observed"],
+        ["model", "model_observed"],
+        ["configuration", "configuration_applied"],
+      ] as const;
+      if (
+        dedicatedMilestones.some(
+          ([binding, eventType]) =>
+            !execution.milestones.some(
+              (milestone) =>
+                milestone.eventType === eventType &&
+                milestone.evidenceId === evidenceBindings[binding],
+            ),
+        )
+      ) {
+        throw new Error(
+          "Production Qwen configuration evidence requires dedicated package, model, and configuration milestones",
+        );
+      }
     }
     const artifact = artifactFromDownload(
       command,
