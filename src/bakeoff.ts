@@ -512,9 +512,19 @@ async function executeVendor(
         (scorecard.judgeLineage === null ||
           scorecard.judgeLineage.provider !== "openai")))
   ) {
-    throw new Error(
+    const lineageError = new Error(
       "Judge returned an inconsistent or non-OpenAI Scorecard lineage",
     );
+    if (judge === undefined) {
+      throw lineageError;
+    }
+    scorecard = null;
+    judgeFailure = Object.freeze({
+      failureClass: "judge_failure",
+      submissionStatus: "unknown",
+      message: lineageError.message,
+      egressAttempt: null,
+    });
   }
   return {
     productPackage,

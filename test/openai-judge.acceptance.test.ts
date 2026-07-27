@@ -981,29 +981,39 @@ test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the
   );
 });
 
-test("Bakeoff rejects a supplied Judge scorecard without OpenAI lineage", async () => {
-  await assert.rejects(
-    createBakeoffHarness({
-      feishu: new InMemoryFeishuProjection(),
-      productAdapter: new MockWpsProductAdapter(),
-      judge: {
-        async score(command) {
-          return scoreRenderedArtifact(
-            command.artifact,
-            command.renderManifest,
-            {
-              jobId: command.jobId,
-              runId: command.runId,
-              scorecardId: command.scorecardId,
-              referencePack: command.referencePack,
-            },
-          );
-        },
+test("Bakeoff rejects an invalid injected Judge score while retaining its captured output", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const referencePackStore = new InMemoryReferencePackStore();
+  const outcome = await createBakeoffHarness({
+    feishu,
+    referencePackStore,
+    productAdapter: new MockWpsProductAdapter(),
+    judge: {
+      async score(command) {
+        return scoreRenderedArtifact(command.artifact, command.renderManifest, {
+          jobId: command.jobId,
+          runId: command.runId,
+          scorecardId: command.scorecardId,
+          referencePack: command.referencePack,
+        });
       },
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_EVALUATION_CASE.caseId,
-    }),
+    },
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+  });
+
+  assert.equal(outcome.job.status, "failed");
+  assert.equal(outcome.artifacts.length, 1);
+  assert.equal(outcome.scorecards.length, 0);
+  assert.equal(feishu.snapshot().capturedArtifactTable.length, 1);
+  assert.equal(feishu.snapshot().artifactScoreTable.length, 0);
+  assert.equal(referencePackStore.snapshot().used.length, 1);
+  const vendorRun = feishu
+    .snapshot()
+    .runRecordTable.find((record) => record.recordType === "vendor_run");
+  assert.match(
+    vendorRun?.judgeFailure?.message ?? "",
     /non-OpenAI Scorecard lineage/i,
   );
 });
