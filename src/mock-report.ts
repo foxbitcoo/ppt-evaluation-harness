@@ -8,6 +8,7 @@ import type {
   TerminalReason,
 } from "./domain.ts";
 import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
+import type { EnvironmentOrigin } from "./environment-origin.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 
 export interface MockReportVendorResult {
@@ -33,6 +34,15 @@ export function createMockReportDraft(
   jobId: string,
   jobStatus: "active" | "completed" | "partial" | "failed",
   results: readonly MockReportVendorResult[],
+  lineage: {
+    readonly provenance: "MOCK" | "PRODUCTION";
+    readonly environmentOrigin: EnvironmentOrigin;
+    readonly createdAt: string;
+  } = {
+    provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    createdAt: MOCK_SCENARIO.fixedTime,
+  },
 ): FeishuReportDraft {
   const firstResult = results[0];
   if (firstResult === undefined) {
@@ -89,9 +99,10 @@ ${scoreRows}`;
       },
     )
     .join("\n\n");
-  const markdown = `# MOCK｜火山 Case Sample 三厂商评测报告
+  const reportPrefix = lineage.provenance === "MOCK" ? "MOCK｜" : "";
+  const markdown = `# ${reportPrefix}火山 Case Sample 三厂商评测报告
 
-> **MOCK 测试数据，禁止作为真实厂商结论。**
+${lineage.provenance === "MOCK" ? "> **MOCK 测试数据，禁止作为真实厂商结论。**" : "> **真实单次 Case Sample，仅记录当前运行，不外推为稳定厂商结论。**"}
 
 - Bakeoff Job：\`${jobId}\`
 - Job 状态：\`${jobStatus}\`
@@ -103,9 +114,9 @@ Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分
 `;
   return {
     reportId: MOCK_SCENARIO.reportId,
-    provenance: "MOCK",
-    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-    title: "MOCK｜火山 Case Sample 三厂商评测报告",
+    provenance: lineage.provenance,
+    environmentOrigin: lineage.environmentOrigin,
+    title: `${reportPrefix}火山 Case Sample 三厂商评测报告`,
     jobId,
     runIds: results.map(({ runId }) => runId),
     artifactIds: results.flatMap(({ artifact }) =>
@@ -113,6 +124,6 @@ Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分
     ),
     claimLevel: "case_sample",
     markdown,
-    createdAt: MOCK_SCENARIO.fixedTime,
+    createdAt: lineage.createdAt,
   };
 }

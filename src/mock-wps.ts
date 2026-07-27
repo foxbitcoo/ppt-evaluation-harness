@@ -16,6 +16,7 @@ import {
 } from "./fixtures/mock-wps-deck.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import type {
+  AttemptCheckpointPort,
   ProductAttemptResult,
   ProductAdapterImplementationPackage,
   ProductAdapterExecutionConfiguration,
@@ -28,8 +29,8 @@ import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
 import {
   resolveWpsAiPptProductAdapterExecutor,
-  type WpsAiPptBrowserDriverPort,
 } from "./wps-aippt.ts";
+import type { WpsAiPptBrowserDriverPort } from "./wps-aippt-driver.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -676,6 +677,7 @@ function executeMockScenario(
 export function renderStaticArtifact(
   artifact: Artifact,
   renderManifestId: string = MOCK_SCENARIO.renderManifestId,
+  rendererAuthorizationDecisionId = "mock-renderer-authorized",
 ): RenderManifest {
   const presentation = presentationFromArtifact(artifact);
   const slides = presentation.slides.map((slide, index) =>
@@ -696,6 +698,12 @@ export function renderStaticArtifact(
       subprocessors: [],
     },
     renderer: "mock-static-svg@1" as const,
+    rendererAuthorizationDecisionId,
+    renderOutcome: "faithful" as const,
+    fidelity: {
+      status: "verified" as const,
+      notes: [],
+    },
     pageCount: slides.length,
     renderPolicy: {
       fontPack: "mock-font-pack@1",
@@ -832,6 +840,9 @@ export function resolveHarnessProductAdapterExecutor(
     readonly wpsAiPptBrowserDriver?:
       | WpsAiPptBrowserDriverPort
       | undefined;
+    readonly attemptCheckpointStore?:
+      | AttemptCheckpointPort
+      | undefined;
   } = {},
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
@@ -840,6 +851,7 @@ export function resolveHarnessProductAdapterExecutor(
       implementationPackage,
       executionConfiguration,
       dependencies.wpsAiPptBrowserDriver,
+      dependencies.attemptCheckpointStore,
     );
   }
   if (

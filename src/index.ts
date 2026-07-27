@@ -1,5 +1,6 @@
 export {
   VENDOR_GENERATION_TIMEOUT_MS,
+  ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
   createBakeoffHarness,
   type AttemptDeadlinePort,
   type AttemptDeadlineResult,
@@ -143,7 +144,9 @@ export {
   type MockAdapterScenario,
 } from "./mock-wps.ts";
 export {
+  InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
+  type AttemptCheckpointPort,
   type ArtifactCandidate,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
@@ -161,7 +164,6 @@ export {
   resolveWpsAiPptProductAdapterExecutor,
   type WpsAiPptBrowserArtifactCapture,
   type WpsAiPptBrowserCommand,
-  type WpsAiPptBrowserDriverPort,
   type WpsAiPptBrowserEvent,
   type WpsAiPptBrowserRenderCapture,
   type WpsAiPptBrowserResult,
@@ -170,6 +172,14 @@ export {
   type WpsAiPptFailedBrowserResult,
   type WpsAiPptObservedConfiguration,
 } from "./wps-aippt.ts";
+export {
+  WPS_AIPPT_BROWSER_DRIVER_VERSION,
+  WPS_AIPPT_BROWSER_PROFILE_DIGEST,
+  createWpsAiPptBrowserDriverPackage,
+  registeredWpsAiPptBrowserDriverEvidence,
+  type WpsAiPptBrowserDriverEvidence,
+  type WpsAiPptBrowserDriverPort,
+} from "./wps-aippt-driver.ts";
 export type {
   Artifact,
   AdjudicationEventRecord,

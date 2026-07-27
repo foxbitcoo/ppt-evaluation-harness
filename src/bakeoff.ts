@@ -25,6 +25,7 @@ import {
 import { createComparisonReportService } from "./comparison-report.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
+  PRODUCTION_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
 } from "./environment-origin.ts";
 import {
@@ -43,6 +44,7 @@ import type {
 } from "./feishu.ts";
 import { InMemoryFeishuProjection } from "./feishu.ts";
 import {
+  PRODUCTION_VOLCANO_EVALUATION_CASE,
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
 } from "./fixtures/volcano-case.ts";
@@ -58,7 +60,9 @@ import {
   type OpenAiJudgePort,
 } from "./openai-judge.ts";
 import {
+  InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
+  type AttemptCheckpointPort,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
   type ProductAdapterImplementationPackage,
@@ -87,7 +91,12 @@ import {
   type PayloadInventoryPort,
   type TombstoneLedgerPort,
 } from "./retention.ts";
-import type { WpsAiPptBrowserDriverPort } from "./wps-aippt.ts";
+import { createAuthorizedSafeRasterManifest } from "./safe-raster.ts";
+import {
+  registeredWpsAiPptBrowserDriverEvidence,
+  type WpsAiPptBrowserDriverEvidence,
+  type WpsAiPptBrowserDriverPort,
+} from "./wps-aippt-driver.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_SPEC_COMMIT_SHA = "9e68de5801bc14f00c187336000c83ce8cc37efa";
@@ -97,6 +106,13 @@ const MOCK_RENDERER_DESTINATION: EgressDestinationMetadata = Object.freeze({
   targetRegion: "test",
   subprocessors: [],
 });
+export const ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION:
+  EgressDestinationMetadata = Object.freeze({
+    targetService: "isolated-offline-png-rasterizer",
+    targetAccount: "local-sandbox",
+    targetRegion: "local",
+    subprocessors: [],
+  });
 const MOCK_JUDGE_DESTINATION: EgressDestinationMetadata = Object.freeze({
   targetService: "mock-openai-judge",
   targetAccount: "mock-openai-judge-account",
@@ -126,6 +142,37 @@ const MOCK_BAKEOFF_PROTOCOL_SNAPSHOT: BakeoffProtocolSnapshot =
     resultSelectionPolicy: "first_policy_compliant_artifact",
     cancellationPolicy: "independent_vendor_runs_continue",
   });
+
+interface BakeoffExecutionContext {
+  readonly jobId: string;
+  readonly evaluationCase: typeof VOLCANO_EVALUATION_CASE;
+  readonly provenance: "MOCK" | "PRODUCTION";
+  readonly environmentOrigin:
+    | typeof MOCK_TEST_ENVIRONMENT_ORIGIN
+    | typeof PRODUCTION_ENVIRONMENT_ORIGIN;
+  readonly fixedTime: string;
+}
+
+function executionContext(
+  environment: "test" | "production",
+  fixedTime: string,
+): BakeoffExecutionContext {
+  return environment === "production"
+    ? Object.freeze({
+        jobId: "production-job-volcano-wps-v1",
+        evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+        provenance: "PRODUCTION",
+        environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
+        fixedTime,
+      })
+    : Object.freeze({
+        jobId: MOCK_SCENARIO.jobId,
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+        provenance: "MOCK",
+        environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+        fixedTime: MOCK_SCENARIO.fixedTime,
+      });
+}
 
 function bakeoffProtocolSnapshot(
   referencePackMode: NonNullable<
@@ -218,6 +265,7 @@ export interface BakeoffHarnessDependencies {
   readonly egressAudit?: EgressAuthorizationAuditPort;
   readonly specCommitSha?: string;
   readonly wpsAiPptBrowserDriver?: WpsAiPptBrowserDriverPort;
+  readonly attemptCheckpointStore?: AttemptCheckpointPort;
 }
 
 interface InFlightBakeoffJob {
@@ -255,12 +303,39 @@ const DEFAULT_EGRESS_AUDITS = new WeakMap<
   FeishuProjectionPort,
   EgressAuthorizationAuditPort
 >();
+const DEFAULT_ATTEMPT_CHECKPOINT_STORES = new WeakMap<
+  FeishuProjectionPort,
+  AttemptCheckpointPort
+>();
 const DEFAULT_ARTIFACT_CAPTURE_JOURNALS = new WeakMap<
   FeishuProjectionPort,
   InMemoryArtifactCaptureJournal
 >();
 const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
 let nextDependencyIdentity = 1;
+const WPS_BROWSER_PROFILE_LOCKS = new Map<string, Promise<void>>();
+
+async function withWpsBrowserProfileLock<T>(
+  key: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  let release!: () => void;
+  const currentGate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = WPS_BROWSER_PROFILE_LOCKS.get(key) ?? Promise.resolve();
+  const currentTail = previous.then(() => currentGate);
+  WPS_BROWSER_PROFILE_LOCKS.set(key, currentTail);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (WPS_BROWSER_PROFILE_LOCKS.get(key) === currentTail) {
+      WPS_BROWSER_PROFILE_LOCKS.delete(key);
+    }
+  }
+}
 
 function defaultReferencePackStore(
   feishu: FeishuProjectionPort,
@@ -357,6 +432,18 @@ function defaultEgressAudit(
   return created;
 }
 
+function defaultAttemptCheckpointStore(
+  feishu: FeishuProjectionPort,
+): AttemptCheckpointPort {
+  const existing = DEFAULT_ATTEMPT_CHECKPOINT_STORES.get(feishu);
+  if (existing !== undefined) return existing;
+  const created = new InMemoryAttemptCheckpointStore(
+    `attempt-checkpoints:${dependencyIdentity(feishu)}`,
+  );
+  DEFAULT_ATTEMPT_CHECKPOINT_STORES.set(feishu, created);
+  return created;
+}
+
 function dependencyIdentity(dependency: object | undefined): string | null {
   if (dependency === undefined) return null;
   const existing = DEPENDENCY_IDENTITIES.get(dependency);
@@ -398,6 +485,7 @@ function bakeoffJobIdentity(
     readonly wpsAiPptBrowserDriver:
       | WpsAiPptBrowserDriverPort
       | undefined;
+    readonly attemptCheckpointStore: AttemptCheckpointPort;
   },
 ): string {
   return JSON.stringify({
@@ -409,6 +497,7 @@ function bakeoffJobIdentity(
     ),
     selections: selections.map(
       ({
+        browserDriverEvidence,
         executionConfiguration,
         executionConfigurationPackage,
         executionEntrypointDigest,
@@ -431,6 +520,7 @@ function bakeoffJobIdentity(
           executionConfigurationPackage,
           executionConfiguration,
           productPackage.packageId,
+          browserDriverEvidence,
         ),
       }),
     ),
@@ -460,6 +550,8 @@ function bakeoffJobIdentity(
       wpsAiPptBrowserDriver: dependencyIdentity(
         dependencies.wpsAiPptBrowserDriver,
       ),
+      attemptCheckpointStore:
+        dependencies.attemptCheckpointStore.checkpointStoreId,
     },
   });
 }
@@ -518,6 +610,7 @@ interface SelectedProductAdapter {
   readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly productPackage: ProductPackageSnapshot;
+  readonly browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null;
   readonly runId: string;
 }
 
@@ -537,6 +630,7 @@ function snapshotProductSelections(
     readonly wpsAiPptBrowserDriver:
       | WpsAiPptBrowserDriverPort
       | undefined;
+    readonly attemptCheckpointStore: AttemptCheckpointPort;
   },
 ): readonly SelectedProductAdapter[] {
   return Object.freeze(
@@ -569,6 +663,12 @@ function snapshotProductSelections(
         parseAdapterExecutionConfiguration(
           executionConfigurationPackage,
         );
+      const browserDriverEvidence =
+        executionConfiguration.adapterKind === "wps-aippt-browser"
+          ? registeredWpsAiPptBrowserDriverEvidence(
+              dependencies.wpsAiPptBrowserDriver,
+            )
+          : null;
       const selectedExecute =
         resolveHarnessProductAdapterExecutor(
           implementationPackage,
@@ -585,7 +685,11 @@ function snapshotProductSelections(
         executionConfigurationPackage,
         implementationPackage,
         productPackage,
-        runId: runIdForPackage(productPackage.packageId),
+        browserDriverEvidence,
+        runId: runIdForPackage(
+          productPackage.packageId,
+          productPackage.provenance,
+        ),
       });
     }),
   );
@@ -597,6 +701,7 @@ function adapterImplementationEvidence(
   executionConfigurationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   productPackageId: string,
+  browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null = null,
 ): {
   readonly implementationDigest: `sha256:${string}`;
   readonly executionEntrypointDigest: `sha256:${string}`;
@@ -606,6 +711,7 @@ function adapterImplementationEvidence(
   readonly executionConfiguration: ProductAdapterExecutionConfiguration;
   readonly implementationPackageName: string;
   readonly implementationPackageByteSize: number;
+  readonly browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null;
 } {
   const implementationDigest = sha256Bytes(
     implementationPackage.content,
@@ -646,10 +752,12 @@ function adapterImplementationEvidence(
       implementationPackage.packageName,
     implementationPackageByteSize:
       implementationPackage.content.byteLength,
+    browserDriverEvidence,
   };
 }
 
 function replayedBakeoffOutcome(
+  context: BakeoffExecutionContext,
   command: StartBakeoffJobCommand,
   selections: readonly SelectedProductAdapter[],
   source: ComparisonReportSource,
@@ -748,6 +856,7 @@ function replayedBakeoffOutcome(
               selection.executionConfigurationPackage,
               selection.executionConfiguration,
               selection.productPackage.packageId,
+              selection.browserDriverEvidence,
             ),
           }),
         )
@@ -821,8 +930,8 @@ function replayedBakeoffOutcome(
       caseId: source.job.caseId,
       environment: command.environment,
       status: source.job.status,
-      provenance: "MOCK",
-      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      provenance: context.provenance,
+      environmentOrigin: context.environmentOrigin,
     },
     artifact: captures[0]?.artifact ?? null,
     renderManifest: captures[0]?.renderManifest ?? null,
@@ -863,9 +972,16 @@ function vendorSlug(packageId: string): string {
   return `${readableSlug}-${hash}`;
 }
 
-function runIdForPackage(packageId: string): string {
+function runIdForPackage(
+  packageId: string,
+  provenance: "MOCK" | "PRODUCTION",
+): string {
   const scenario = KNOWN_VENDOR_SCENARIOS.get(packageId);
-  return scenario?.runId ?? `MOCK-run-${vendorSlug(packageId)}-volcano-v1`;
+  if (provenance === "MOCK" && scenario !== undefined) {
+    return scenario.runId;
+  }
+  const prefix = provenance === "PRODUCTION" ? "production" : "MOCK";
+  return `${prefix}-run-${vendorSlug(packageId)}-volcano-v1`;
 }
 
 function isArtifact(
@@ -903,9 +1019,12 @@ function statusFromTerminalReason(reason: TerminalReason): RunStatus {
   return "failed";
 }
 
-function fixedTimestampAfter(elapsedMs: number): string {
+function fixedTimestampAfter(
+  elapsedMs: number,
+  fixedTime: string = MOCK_SCENARIO.fixedTime,
+): string {
   return new Date(
-    Date.parse(MOCK_SCENARIO.fixedTime) + elapsedMs,
+    Date.parse(fixedTime) + elapsedMs,
   ).toISOString();
 }
 
@@ -918,14 +1037,15 @@ function sha256Json(value: unknown): `sha256:${string}` {
 function comparisonCompatibilityFingerprint(
   scorecard: ArtifactScorecard,
   protocolSnapshot: BakeoffProtocolSnapshot,
+  evaluationCase = VOLCANO_EVALUATION_CASE,
 ) {
   const judge = scorecard.judgeLineage;
   return Object.freeze({
-    caseManifestHash: sha256Json(VOLCANO_EVALUATION_CASE),
+    caseManifestHash: sha256Json(evaluationCase),
     caseInputHash: sha256Json({
-      vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+      vendorPrompt: evaluationCase.vendorPrompt,
     }),
-    track: VOLCANO_EVALUATION_CASE.track,
+    track: evaluationCase.track,
     protocolHash: sha256Json(protocolSnapshot),
     rubricVersion: scorecard.rubricVersion,
     scenarioWeightProfile: null,
@@ -944,11 +1064,20 @@ function comparisonCompatibilityFingerprint(
           }),
     renderPipelineHash: sha256Json({
       renderer: scorecard.evaluationInputManifest.renderer,
+      renderOutcome:
+        scorecard.deliveryQualityGates.find(
+          ({ gate }) => gate === "sufficient_faithful_visual_input",
+        )?.status ?? "NOT_ASSESSABLE",
     }),
     designJudgmentSurfaceHash: sha256Json({
       surfaceClass: "canonical",
       renderer: scorecard.evaluationInputManifest.renderer,
-      compatibilityStatus: "compatible",
+      compatibilityStatus:
+        scorecard.deliveryQualityGates.find(
+          ({ gate }) => gate === "sufficient_faithful_visual_input",
+        )?.status === "PASS"
+          ? "compatible"
+          : "visual_comparison_prohibited",
     }),
     referencePackHash:
       scorecard.evaluationInputManifest.referencePackHash,
@@ -956,6 +1085,7 @@ function comparisonCompatibilityFingerprint(
 }
 
 function attemptRecord(input: {
+  readonly context: BakeoffExecutionContext;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
   readonly attemptId: string;
@@ -971,7 +1101,7 @@ function attemptRecord(input: {
   return {
     recordId: input.attemptId,
     recordType: "evaluation_attempt",
-    jobId: MOCK_SCENARIO.jobId,
+    jobId: input.context.jobId,
     parentRecordId: input.runId,
     caseId: input.caseId,
     product: input.productPackage.displayName,
@@ -996,14 +1126,17 @@ function attemptRecord(input: {
     humanWaitMs: null,
     timingPausedAt:
       input.terminalReason === "human_wait"
-        ? fixedTimestampAfter(input.measuredElapsedMs)
+        ? fixedTimestampAfter(
+            input.measuredElapsedMs,
+            input.context.fixedTime,
+          )
         : null,
     observableEvents:
       input.result.observableEvents ??
       [
         {
           eventId: `${input.attemptId}-event-1`,
-          jobId: MOCK_SCENARIO.jobId,
+          jobId: input.context.jobId,
           caseId: input.caseId,
           runId: input.runId,
           attemptId: input.attemptId,
@@ -1012,8 +1145,14 @@ function attemptRecord(input: {
             input.terminalReason === "human_wait"
               ? "waiting_for_human"
               : `terminal:${input.terminalReason}`,
-          sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
-          observedAt: fixedTimestampAfter(input.measuredElapsedMs),
+          sourceAt: fixedTimestampAfter(
+            input.measuredElapsedMs,
+            input.context.fixedTime,
+          ),
+          observedAt: fixedTimestampAfter(
+            input.measuredElapsedMs,
+            input.context.fixedTime,
+          ),
           writerId: "mock-runner@1",
           evidenceRef: `mock://${vendorSlug(
             input.productPackage.packageId,
@@ -1028,8 +1167,8 @@ function attemptRecord(input: {
     },
     provenance: input.productPackage.provenance,
     environmentOrigin: input.productPackage.environmentOrigin,
-    createdAt: MOCK_SCENARIO.fixedTime,
-    lastSyncedAt: MOCK_SCENARIO.fixedTime,
+    createdAt: input.context.fixedTime,
+    lastSyncedAt: input.context.fixedTime,
     reportUrl: null,
     auxiliaryReportUrls: null,
     artifactId: null,
@@ -1039,6 +1178,7 @@ function attemptRecord(input: {
 }
 
 async function executeVendor(
+  context: BakeoffExecutionContext,
   selection: SelectedProductAdapter,
   caseId: string,
   targetEnvironment: "test" | "production",
@@ -1088,11 +1228,11 @@ async function executeVendor(
       egressAuthorizations.push(
         await requireEgressAuthorization(egressAuthorization, {
           requestId: `vendor-generation:${attemptId}`,
-          jobId: MOCK_SCENARIO.jobId,
+          jobId: context.jobId,
           runId,
           attemptId,
-          dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
-          sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
+          dataClassification: context.evaluationCase.dataClassification,
+          sourceOwner: context.evaluationCase.sourceOwner,
           processingPurpose: "vendor_generation",
           targetKind: "vendor",
           targetService:
@@ -1109,12 +1249,12 @@ async function executeVendor(
             "attempt_policy",
           ],
           payloadHash: sha256Json({
-            jobId: MOCK_SCENARIO.jobId,
+            jobId: context.jobId,
             runId,
             attemptId,
             attemptSeq,
             timeoutMs: attemptTimeoutMs,
-            evaluationCase: VOLCANO_EVALUATION_CASE,
+            evaluationCase: context.evaluationCase,
           }),
           requiredRedactions: [],
         }, clock),
@@ -1124,13 +1264,13 @@ async function executeVendor(
         const deadlineResult = await attemptDeadline.run(
           (signal) =>
             execute({
-              jobId: MOCK_SCENARIO.jobId,
+              jobId: context.jobId,
               runId,
               attemptId,
               attemptSeq,
               timeoutMs: attemptTimeoutMs,
               signal,
-              evaluationCase: VOLCANO_EVALUATION_CASE,
+              evaluationCase: context.evaluationCase,
             }),
           attemptTimeoutMs,
         );
@@ -1170,6 +1310,7 @@ async function executeVendor(
     status = statusFromTerminalReason(terminalReason);
     attempts.push(
       attemptRecord({
+        context,
         productPackage,
         runId,
         attemptId,
@@ -1250,14 +1391,15 @@ async function executeVendor(
     targetEnvironment,
     `Artifact ${artifact.artifactId}`,
   );
-  egressAuthorizations.push(
-    await requireEgressAuthorization(egressAuthorization, {
+  const rendererAuthorization = await requireEgressAuthorization(
+    egressAuthorization,
+    {
       requestId: `artifact-rendering:${artifact.artifactId}`,
-      jobId: MOCK_SCENARIO.jobId,
+      jobId: context.jobId,
       runId,
       attemptId: attempts.at(-1)?.recordId ?? null,
-      dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
-      sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
+      dataClassification: context.evaluationCase.dataClassification,
+      sourceOwner: context.evaluationCase.sourceOwner,
       processingPurpose: "artifact_rendering",
       targetKind: "renderer",
       targetService: rendererDestination.targetService,
@@ -1267,15 +1409,38 @@ async function executeVendor(
       contentFields: ["artifact_binary"],
       payloadHash: artifact.contentHash,
       requiredRedactions: [],
-    }, clock),
+    },
+    clock,
   );
-  const renderManifest =
-    selectedArtifact.renderManifest ??
-    renderStaticArtifact(
-      artifact,
-      scenario?.renderManifestId ??
-        runId.replace(/^MOCK-run-/, "MOCK-render-"),
+  egressAuthorizations.push(rendererAuthorization);
+  const rendererAuthorizationDecisionId =
+    targetEnvironment === "production"
+      ? rendererAuthorization.decisionId
+      : "mock-renderer-authorized";
+  if (
+    productPackage.provenance === "PRODUCTION" &&
+    selectedArtifact.renderManifest !== undefined
+  ) {
+    throw new Error(
+      "Production Artifact cannot inject a pre-rendered manifest",
     );
+  }
+  const renderManifest =
+    selectedArtifact.safeRasterCandidate !== undefined
+      ? createAuthorizedSafeRasterManifest({
+          artifact,
+          candidate: selectedArtifact.safeRasterCandidate,
+          renderManifestId: `${artifact.artifactId}-render`,
+          rendererAuthorizationDecisionId:
+            rendererAuthorizationDecisionId,
+        })
+      : selectedArtifact.renderManifest ??
+        renderStaticArtifact(
+          artifact,
+          scenario?.renderManifestId ??
+            runId.replace(/^MOCK-run-/, "MOCK-render-"),
+          rendererAuthorizationDecisionId,
+        );
   if (
     renderManifest.artifactId !== artifact.artifactId ||
     renderManifest.provenance !== artifact.provenance ||
@@ -1288,9 +1453,9 @@ async function executeVendor(
   let artifactPackageManifest: ArtifactPackageManifest;
   try {
     artifactPackageManifest = await artifactVault.capture({
-      jobId: MOCK_SCENARIO.jobId,
-      dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
-      sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
+      jobId: context.jobId,
+      dataClassification: context.evaluationCase.dataClassification,
+      sourceOwner: context.evaluationCase.sourceOwner,
       artifact,
       renderManifest,
     });
@@ -1316,31 +1481,35 @@ async function executeVendor(
   );
   const scorecardId =
     scenario?.scorecardId ?? runId.replace(/^MOCK-run-/, "MOCK-scorecard-");
+  const visualScoringAllowed = renderManifest.renderOutcome === "faithful";
   const evaluationAttemptKind =
-    judge === undefined ? "mock-score-attempt" : "judge-attempt";
-  const evaluationAttemptId = `${evaluationAttemptKind}:${MOCK_SCENARIO.jobId}:${runId}:${artifact.artifactId}`;
+    judge === undefined || !visualScoringAllowed
+      ? "local-gated-score-attempt"
+      : "judge-attempt";
+  const evaluationAttemptId = `${evaluationAttemptKind}:${context.jobId}:${runId}:${artifact.artifactId}`;
   if (referencePack !== null) {
     onReferencePackUse(evaluationAttemptId);
   }
   let scorecard: ArtifactScorecard | null;
   let judgeFailure: JudgeFailureLineage | null = null;
-  if (judge === undefined) {
+  if (judge === undefined || !visualScoringAllowed) {
     scorecard = scoreRenderedArtifact(artifact, renderManifest, {
-      jobId: MOCK_SCENARIO.jobId,
+      jobId: context.jobId,
       runId,
       referencePack,
       scorecardId,
+      createdAt: context.fixedTime,
     });
   } else {
     try {
       egressAuthorizations.push(
         await requireEgressAuthorization(egressAuthorization, {
           requestId: `judge-evaluation:${evaluationAttemptId}`,
-          jobId: MOCK_SCENARIO.jobId,
+          jobId: context.jobId,
           runId,
           attemptId: evaluationAttemptId,
-          dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
-          sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
+          dataClassification: context.evaluationCase.dataClassification,
+          sourceOwner: context.evaluationCase.sourceOwner,
           processingPurpose: "judge_evaluation",
           targetKind: "judge",
           targetService: judgeDestination.targetService,
@@ -1354,7 +1523,7 @@ async function executeVendor(
             "static_slide_images",
           ],
           payloadHash: sha256Json({
-            evaluationCase: VOLCANO_EVALUATION_CASE,
+            evaluationCase: context.evaluationCase,
             artifactHash: artifact.contentHash,
             renderManifestHash: renderManifest.contentHash,
             referencePackHash: referencePack?.contentHash ?? null,
@@ -1363,11 +1532,11 @@ async function executeVendor(
         }, clock),
       );
       scorecard = await judge.score({
-        jobId: MOCK_SCENARIO.jobId,
+        jobId: context.jobId,
         runId,
         scorecardId,
         evaluationAttemptId,
-        evaluationCase: VOLCANO_EVALUATION_CASE,
+        evaluationCase: context.evaluationCase,
         artifact,
         renderManifest,
         referencePack,
@@ -1392,7 +1561,7 @@ async function executeVendor(
   if (
     scorecard !== null &&
     (scorecard.scorecardId !== scorecardId ||
-      scorecard.jobId !== MOCK_SCENARIO.jobId ||
+      scorecard.jobId !== context.jobId ||
       scorecard.runId !== runId ||
       scorecard.artifactId !== artifact.artifactId ||
       scorecard.provenance !== artifact.provenance ||
@@ -1403,13 +1572,14 @@ async function executeVendor(
       scorecard.evaluationInputManifest.referencePackHash !==
         (referencePack?.contentHash ?? null) ||
       (judge !== undefined &&
+        visualScoringAllowed &&
         (scorecard.judgeLineage === null ||
           scorecard.judgeLineage.provider !== "openai")))
   ) {
     const lineageError = new Error(
       "Judge returned an inconsistent or non-OpenAI Scorecard lineage",
     );
-    if (judge === undefined) {
+    if (judge === undefined || !visualScoringAllowed) {
       throw lineageError;
     }
     scorecard = null;
@@ -1440,14 +1610,17 @@ async function executeVendor(
   };
 }
 
-function sharedRunFields(caseId: string) {
+function sharedRunFields(
+  caseId: string,
+  context: BakeoffExecutionContext,
+) {
   return {
-    jobId: MOCK_SCENARIO.jobId,
+    jobId: context.jobId,
     caseId,
-    provenance: "MOCK" as const,
-    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-    createdAt: MOCK_SCENARIO.fixedTime,
-    lastSyncedAt: MOCK_SCENARIO.fixedTime,
+    provenance: context.provenance,
+    environmentOrigin: context.environmentOrigin,
+    createdAt: context.fixedTime,
+    lastSyncedAt: context.fixedTime,
     reportUrl: null,
     auxiliaryReportUrls: null,
   };
@@ -1471,7 +1644,8 @@ export function createBakeoffHarness({
   tombstones: configuredTombstones,
   egressAudit: configuredEgressAudit,
   wpsAiPptBrowserDriver,
-  specCommitSha = DEFAULT_SPEC_COMMIT_SHA,
+  attemptCheckpointStore: configuredAttemptCheckpointStore,
+  specCommitSha: configuredSpecCommitSha,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
     configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
@@ -1485,6 +1659,9 @@ export function createBakeoffHarness({
     configuredTombstones ?? defaultTombstoneLedger(feishu);
   const egressAudit =
     configuredEgressAudit ?? defaultEgressAudit(feishu);
+  const attemptCheckpointStore =
+    configuredAttemptCheckpointStore ??
+    defaultAttemptCheckpointStore(feishu);
   const payloadInventory =
     configuredPayloadInventory ??
     (configuredTombstones === undefined
@@ -1553,12 +1730,26 @@ export function createBakeoffHarness({
   if (selectedProductAdapters.length === 0) {
     throw new Error("A Bakeoff Job requires at least one Product Adapter");
   }
+  const specCommitShaFor = (
+    environment: "test" | "production",
+  ): string => {
+    if (configuredSpecCommitSha !== undefined) {
+      return configuredSpecCommitSha;
+    }
+    if (environment === "production") {
+      throw new Error(
+        "Production Bakeoff requires an explicit frozen spec commit SHA",
+      );
+    }
+    return DEFAULT_SPEC_COMMIT_SHA;
+  };
 
   const executor = {
     async startBakeoffJob(
       command: StartBakeoffJobCommand,
       selections: readonly SelectedProductAdapter[],
     ): Promise<BakeoffJobOutcome> {
+      const context = executionContext(command.environment, clock.now());
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
       }
@@ -1585,10 +1776,11 @@ export function createBakeoffHarness({
         );
       }
       assertEnvironmentOriginAllowed(
-        VOLCANO_EVALUATION_CASE.environmentOrigin,
+        context.evaluationCase.environmentOrigin,
         command.environment,
-        `Evaluation Case ${VOLCANO_EVALUATION_CASE.caseId}`,
+        `Evaluation Case ${context.evaluationCase.caseId}`,
       );
+      const specCommitSha = specCommitShaFor(command.environment);
       if (
         command.environment === "production" &&
         configuredEgressAuthorization === undefined
@@ -1597,20 +1789,36 @@ export function createBakeoffHarness({
           "Production Bakeoff requires an explicit egress authorization port; calls blocked",
         );
       }
+      if (
+        command.environment === "production" &&
+        (configuredRendererDestination === undefined ||
+          configuredRendererDestination.targetService !==
+            ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION.targetService ||
+          configuredRendererDestination.targetAccount !==
+            ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION.targetAccount ||
+          configuredRendererDestination.targetRegion !==
+            ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION.targetRegion ||
+          configuredRendererDestination.subprocessors.length !== 0)
+      ) {
+        throw new Error(
+          "Production Bakeoff requires the isolated offline PNG renderer destination",
+        );
+      }
 
       const protocolSnapshot = bakeoffProtocolSnapshot(
         command.referencePackMode ?? "automatic",
       );
-      if ((await tombstones.findByJobId(MOCK_SCENARIO.jobId)) !== null) {
+      if ((await tombstones.findByJobId(context.jobId)) !== null) {
         throw new Error(
-          `Bakeoff Job ${MOCK_SCENARIO.jobId} is tombstoned and cannot be replayed`,
+          `Bakeoff Job ${context.jobId} is tombstoned and cannot be replayed`,
         );
       }
       const existingSource = await feishu.findComparisonReportSource(
-        MOCK_SCENARIO.jobId,
+        context.jobId,
       );
       if (existingSource !== null) {
         return replayedBakeoffOutcome(
+          context,
           command,
           selections,
           existingSource,
@@ -1630,14 +1838,15 @@ export function createBakeoffHarness({
             implementationPackage,
             executionEntrypointDigest,
             executionConfigurationPackage,
+            browserDriverEvidence,
             productPackage,
             runId,
           }) => {
             const reference = await runSpecificationVault.capture({
-              jobId: MOCK_SCENARIO.jobId,
+              jobId: context.jobId,
               runId,
               specCommitSha,
-              evaluationCase: VOLCANO_EVALUATION_CASE,
+              evaluationCase: context.evaluationCase,
               productPackage,
               protocolSnapshot,
               adapterImplementationPackage:
@@ -1646,6 +1855,7 @@ export function createBakeoffHarness({
                 executionEntrypointDigest,
               adapterExecutionConfigurationPackage:
                 executionConfigurationPackage,
+              browserDriverEvidence,
             });
             return [runId, reference] as const;
           }),
@@ -1653,7 +1863,7 @@ export function createBakeoffHarness({
       );
 
       const referencePackSelection = resolveReferencePackForCase({
-        evaluationCase: VOLCANO_EVALUATION_CASE,
+        evaluationCase: context.evaluationCase,
         ...(command.referencePackMode === undefined
           ? {}
           : { mode: command.referencePackMode }),
@@ -1663,13 +1873,15 @@ export function createBakeoffHarness({
         referencePackSelection.pack === null
           ? null
           : referencePackStore.stage(referencePackSelection.pack, {
-              jobId: MOCK_SCENARIO.jobId,
+              jobId: context.jobId,
             });
       const jobDeadlineAtEpochMs = Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
       const evaluationAttemptIdsThatUsedPack = new Set<string>();
       const settledResults = await Promise.allSettled(
-        selections.map((selection) =>
-          executeVendor(
+        selections.map((selection) => {
+          const operation = () =>
+            executeVendor(
+            context,
             selection,
             command.caseId,
             command.environment,
@@ -1685,8 +1897,15 @@ export function createBakeoffHarness({
             (evaluationAttemptId) => {
               evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
             },
-          ),
-        ),
+          );
+          const evidence = selection.browserDriverEvidence;
+          return evidence === null
+            ? operation()
+            : withWpsBrowserProfileLock(
+                `${evidence.browserProfileDigest}:${selection.productPackage.egressDestination.targetAccount}`,
+                operation,
+              );
+        }),
       );
       const completedResults = settledResults.flatMap((result) =>
         result.status === "fulfilled" ? [result.value] : [],
@@ -1696,7 +1915,7 @@ export function createBakeoffHarness({
           referencePackStore.deleteUnused(stagedReferencePack.stagingId);
         } else {
           referencePackStore.retainUsed(stagedReferencePack.stagingId, {
-            jobId: MOCK_SCENARIO.jobId,
+            jobId: context.jobId,
             scorecardIds: completedResults.flatMap(({ scorecard }) =>
               scorecard === null ? [] : [scorecard.scorecardId],
             ),
@@ -1760,9 +1979,9 @@ export function createBakeoffHarness({
       const writeProjection = async (
         projection: FeishuProjectionPort,
       ) => {
-      await projection.upsertCase(VOLCANO_EVALUATION_CASE);
+      await projection.upsertCase(context.evaluationCase);
       await projection.appendRunRecord({
-        recordId: MOCK_SCENARIO.jobId,
+        recordId: context.jobId,
         recordType: "bakeoff_job",
         parentRecordId: null,
         product: null,
@@ -1779,7 +1998,10 @@ export function createBakeoffHarness({
         retryOfAttemptId: null,
         selectedRunIds: results.map(({ runId }) => runId),
         protocolSnapshot,
-        deadlineAt: fixedTimestampAfter(VENDOR_GENERATION_TIMEOUT_MS),
+        deadlineAt: fixedTimestampAfter(
+          VENDOR_GENERATION_TIMEOUT_MS,
+          context.fixedTime,
+        ),
         vendorGenerationMs: null,
         vendorReportedElapsedMs: null,
         humanWaitMs: null,
@@ -1792,13 +2014,13 @@ export function createBakeoffHarness({
         scorecardId: null,
         egressAuthorizations: [],
         securityContextHash,
-        ...sharedRunFields(command.caseId),
+        ...sharedRunFields(command.caseId, context),
       });
       for (const result of results) {
         await projection.appendRunRecord({
           recordId: result.runId,
           recordType: "vendor_run",
-          parentRecordId: MOCK_SCENARIO.jobId,
+          parentRecordId: context.jobId,
           product: result.productPackage.displayName,
           productVendorId: result.productPackage.vendorId,
           productPackageId: result.productPackage.packageId,
@@ -1839,7 +2061,7 @@ export function createBakeoffHarness({
             runSpecificationReferences.get(result.runId) ?? null,
           artifactPackageManifest: result.artifactPackageManifest,
           egressAuthorizations: result.egressAuthorizations,
-          ...sharedRunFields(command.caseId),
+          ...sharedRunFields(command.caseId, context),
         });
         for (const attempt of result.attemptRecords) {
           await projection.appendRunRecord(attempt);
@@ -1848,11 +2070,11 @@ export function createBakeoffHarness({
           await projection.appendCapturedArtifact({
             recordId: `artifact-capture:${result.artifact.artifactId}`,
             caseId: command.caseId,
-            jobId: MOCK_SCENARIO.jobId,
+            jobId: context.jobId,
             runId: result.runId,
             artifactId: result.artifact.artifactId,
-            provenance: "MOCK",
-            environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+            provenance: context.provenance,
+            environmentOrigin: context.environmentOrigin,
             artifact: result.artifact,
             renderManifest: result.renderManifest,
           });
@@ -1865,11 +2087,11 @@ export function createBakeoffHarness({
           await projection.appendArtifactScore({
             recordId: result.scorecard.scorecardId,
             caseId: command.caseId,
-            jobId: MOCK_SCENARIO.jobId,
+            jobId: context.jobId,
             runId: result.runId,
             artifactId: result.artifact.artifactId,
-            provenance: "MOCK",
-            environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+            provenance: context.provenance,
+            environmentOrigin: context.environmentOrigin,
             artifact: result.artifact,
             renderManifest: result.renderManifest,
             scorecard: result.scorecard,
@@ -1877,6 +2099,7 @@ export function createBakeoffHarness({
               comparisonCompatibilityFingerprint(
                 result.scorecard,
                 protocolSnapshot,
+                context.evaluationCase,
               ),
           });
         }
@@ -1888,20 +2111,24 @@ export function createBakeoffHarness({
       const hasDefaultComparison =
         successfulVendorIds.has("wps") &&
         (successfulVendorIds.has("qwen") ||
-          successfulVendorIds.has("doubao"));
+          successfulVendorIds.has("doubao")) &&
+        successful.every(
+          ({ renderManifest }) =>
+            renderManifest.renderOutcome === "faithful",
+        );
       let report;
       if (hasDefaultComparison) {
         report = (
           await createComparisonReportService({
             feishu: projection,
           }).createReport({
-            jobId: MOCK_SCENARIO.jobId,
+            jobId: context.jobId,
           })
         ).report;
       } else {
         report = await projection.createReport(
           createMockReportDraft(
-            MOCK_SCENARIO.jobId,
+            context.jobId,
             jobStatus,
             results.map((result) => ({
               product: result.productPackage.displayName,
@@ -1912,10 +2139,15 @@ export function createBakeoffHarness({
               scorecard: result.scorecard,
               judgeFailure: result.judgeFailure ?? null,
             })),
+            {
+              provenance: context.provenance,
+              environmentOrigin: context.environmentOrigin,
+              createdAt: context.fixedTime,
+            },
           ),
         );
         await projection.linkReportToBakeoffJob(
-          MOCK_SCENARIO.jobId,
+          context.jobId,
           report.url,
         );
       }
@@ -1934,12 +2166,12 @@ export function createBakeoffHarness({
       const projectionAuthorization = await requireEgressAuthorization(
         egressAuthorization,
         {
-          requestId: `operational-ledger-projection:${MOCK_SCENARIO.jobId}:${projectionBatchHash}`,
-          jobId: MOCK_SCENARIO.jobId,
+          requestId: `operational-ledger-projection:${context.jobId}:${projectionBatchHash}`,
+          jobId: context.jobId,
           runId: null,
           attemptId: null,
-          dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
-          sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
+          dataClassification: context.evaluationCase.dataClassification,
+          sourceOwner: context.evaluationCase.sourceOwner,
           processingPurpose: "operational_ledger_projection_storage",
           targetKind: "storage",
           targetService: feishu.egressDestination.targetService,
@@ -1965,7 +2197,7 @@ export function createBakeoffHarness({
         clock,
       );
       await egressAudit.append(projectionAuthorization);
-      await tombstones.runIfActive(MOCK_SCENARIO.jobId, () =>
+      await tombstones.runIfActive(context.jobId, () =>
         feishu.commitAuthorizedSnapshot(
           projectionBatch,
           projectionAuthorization,
@@ -1974,12 +2206,12 @@ export function createBakeoffHarness({
 
       return {
         job: {
-          jobId: MOCK_SCENARIO.jobId,
+          jobId: context.jobId,
           caseId: command.caseId,
           environment: command.environment,
           status: jobStatus,
-          provenance: "MOCK",
-          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+          provenance: context.provenance,
+          environmentOrigin: context.environmentOrigin,
         },
         artifact: captured[0]?.artifact ?? null,
         renderManifest: captured[0]?.renderManifest ?? null,
@@ -1994,9 +2226,15 @@ export function createBakeoffHarness({
   return {
     startBakeoffJob(command) {
       const commandSnapshot = snapshotBakeoffCommand(command);
+      const context = executionContext(
+        commandSnapshot.environment,
+        clock.now(),
+      );
+      const specCommitSha =
+        configuredSpecCommitSha ?? DEFAULT_SPEC_COMMIT_SHA;
       const selections = snapshotProductSelections(
         selectedProductAdapters,
-        { wpsAiPptBrowserDriver },
+        { wpsAiPptBrowserDriver, attemptCheckpointStore },
       );
       const jobIdentity = bakeoffJobIdentity(
         commandSnapshot,
@@ -2017,11 +2255,12 @@ export function createBakeoffHarness({
           egressAudit,
           specCommitSha,
           wpsAiPptBrowserDriver,
+          attemptCheckpointStore,
         },
       );
       return coalesceBakeoffJob(
         feishu,
-        MOCK_SCENARIO.jobId,
+        context.jobId,
         jobIdentity,
         () => executor.startBakeoffJob(commandSnapshot, selections),
       );

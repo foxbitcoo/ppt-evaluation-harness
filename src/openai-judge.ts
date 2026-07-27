@@ -572,7 +572,7 @@ function parseDimensions(
     const deductionBasis = record.deductionBasis;
     if (
       typeof deductionBasis !== "string" ||
-      !DEDUCTION_BASES.includes(deductionBasis as DimensionDeductionBasis)
+      !(DEDUCTION_BASES as readonly string[]).includes(deductionBasis)
     ) {
       throw new Error("OpenAI Judge invalid deduction basis");
     }

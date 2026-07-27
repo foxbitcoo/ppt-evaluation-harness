@@ -32,6 +32,7 @@ import {
   type ProductPackageSnapshot,
 } from "./product-adapter.ts";
 import type { PayloadInventoryPort } from "./retention.ts";
+import type { WpsAiPptBrowserDriverEvidence } from "./wps-aippt-driver.ts";
 
 export interface RunSpecificationVersionReferences {
   readonly caseVersion: string;
@@ -73,6 +74,7 @@ export interface RunSpecificationBundle {
     readonly executionConfiguration: ProductAdapterExecutionConfiguration;
     readonly implementationPackageName: string;
     readonly implementationPackageByteSize: number;
+    readonly browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null;
   };
   readonly schemaSnapshot: {
     readonly schemaVersion: "evaluation-framework-v0.8";
@@ -143,6 +145,7 @@ export interface CaptureRunSpecificationCommand {
   readonly adapterExecutionEntrypointDigest: `sha256:${string}`;
   readonly adapterExecutionConfigurationPackage:
     ProductAdapterImplementationPackage;
+  readonly browserDriverEvidence?: WpsAiPptBrowserDriverEvidence | null;
 }
 
 export interface RunSpecificationVault {
@@ -342,6 +345,8 @@ export function createRunSpecificationVault({
             command.adapterImplementationPackage.packageName,
           implementationPackageByteSize:
             command.adapterImplementationPackage.content.byteLength,
+          browserDriverEvidence:
+            command.browserDriverEvidence ?? null,
         }),
         schemaSnapshot: Object.freeze({
           schemaVersion: "evaluation-framework-v0.8" as const,

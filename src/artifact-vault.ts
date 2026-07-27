@@ -339,6 +339,8 @@ export interface ArtifactPackageManifest {
   readonly artifact: ArtifactMetadata;
   readonly renderManifestId: string;
   readonly renderManifestHash: `sha256:${string}`;
+  readonly renderOutcome: RenderManifest["renderOutcome"];
+  readonly fidelity: RenderManifest["fidelity"];
   readonly derivatives: readonly ArtifactDerivativeLineage[];
   readonly payloadLocations: readonly RetentionPayloadLocation[];
   readonly egressAuthorizations: readonly ApprovedEgressAuthorization[];
@@ -383,8 +385,10 @@ function sha256(content: Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
-function contentBytes(content: string): Uint8Array {
-  return new TextEncoder().encode(content);
+function contentBytes(content: string | Uint8Array): Uint8Array {
+  return typeof content === "string"
+    ? new TextEncoder().encode(content)
+    : Uint8Array.from(content);
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -404,6 +408,8 @@ function manifestIdentity(input: {
   readonly artifact: ArtifactMetadata;
   readonly renderManifestId: string;
   readonly renderManifestHash: `sha256:${string}`;
+  readonly renderOutcome: RenderManifest["renderOutcome"];
+  readonly fidelity: RenderManifest["fidelity"];
   readonly derivatives: readonly ArtifactDerivativeLineage[];
 }) {
   return {
@@ -412,6 +418,8 @@ function manifestIdentity(input: {
     artifact: input.artifact,
     renderManifestId: input.renderManifestId,
     renderManifestHash: input.renderManifestHash,
+    renderOutcome: input.renderOutcome,
+    fidelity: input.fidelity,
     derivatives: input.derivatives,
   };
 }
@@ -611,6 +619,8 @@ export function createArtifactVault({
         artifact: artifactMetadata,
         renderManifestId: renderManifest.renderManifestId,
         renderManifestHash: renderManifest.contentHash,
+        renderOutcome: renderManifest.renderOutcome,
+        fidelity: renderManifest.fidelity,
         derivatives,
       });
       const frozenIdentity = identityBytes(identity);
@@ -838,6 +848,8 @@ export function createArtifactVault({
         artifact: artifactMetadata,
         renderManifestId: renderManifest.renderManifestId,
         renderManifestHash: renderManifest.contentHash,
+        renderOutcome: renderManifest.renderOutcome,
+        fidelity: renderManifest.fidelity,
         derivatives: Object.freeze(derivatives),
         payloadLocations: Object.freeze(payloadLocations),
         egressAuthorizations: Object.freeze(authorizations),
@@ -963,6 +975,8 @@ export function createArtifactVault({
           artifact: manifest.artifact,
           renderManifestId: manifest.renderManifestId,
           renderManifestHash: manifest.renderManifestHash,
+          renderOutcome: manifest.renderOutcome,
+          fidelity: manifest.fidelity,
           derivatives: manifest.derivatives,
         }),
       );

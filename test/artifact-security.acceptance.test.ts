@@ -416,6 +416,9 @@ function fixtureRenderManifest(): RenderManifest {
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     renderer: "mock-static-svg@1",
+    rendererAuthorizationDecisionId: "fixture-render-authorized",
+    renderOutcome: "faithful",
+    fidelity: { status: "verified", notes: [] },
     pageCount: 2,
     renderPolicy: {
       fontPack: "mock-font-pack@1",

@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { inflateRawSync } from "node:zlib";
 
 import type {
   Artifact,
   ObservableAttemptEvent,
-  RenderManifest,
-  StaticSlideRender,
   SubmissionEvidence,
 } from "./domain.ts";
 import {
@@ -14,6 +13,7 @@ import {
 } from "./environment-origin.ts";
 import {
   parseAdapterExecutionConfiguration,
+  type AttemptCheckpointPort,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
   type ProductAdapterImplementationPackage,
@@ -21,8 +21,12 @@ import {
   type ProductExperienceConfiguration,
   type ProductPackageSnapshot,
   type ProductRunCommand,
+  type SafeRasterCandidate,
 } from "./product-adapter.ts";
-import { calculateRenderManifestHash } from "./render-manifest.ts";
+import {
+  resolveRegisteredWpsAiPptBrowserDriver,
+  type WpsAiPptBrowserDriverPort,
+} from "./wps-aippt-driver.ts";
 
 export const WPS_AIPPT_URL = "https://aippt.wps.cn/aippt/" as const;
 export const WPS_AIPPT_ADAPTER_VERSION = "wps-aippt-browser@1" as const;
@@ -38,6 +42,8 @@ export const WPS_AIPPT_EXPERIENCE_CONFIGURATION:
   ProductExperienceConfiguration = Object.freeze({
     productUrl: WPS_AIPPT_URL,
     accountScope: "current_authenticated_account",
+    accountIdentityObservation: "unknown",
+    commercialPlanObservation: "unknown",
     packageSelection: "best_available_zero_incremental_cost",
     incrementalCost: 0,
     mode: "professional",
@@ -78,14 +84,16 @@ function executionConfigurationPackage():
 
 export interface WpsAiPptObservedConfiguration
   extends ProductExperienceConfiguration {
-  readonly evidenceRefs: readonly string[];
+  readonly evidenceIds: readonly `ev_${string}`[];
 }
 
 export interface WpsAiPptBrowserEvent {
   readonly eventType: string;
   readonly sourceAt: string;
   readonly observedAt: string;
-  readonly evidenceRef: string;
+  readonly evidenceId: `ev_${string}`;
+  readonly sourceUrl: string | null;
+  readonly submissionEvidenceAtCheckpoint: SubmissionEvidence;
 }
 
 export interface WpsAiPptBrowserCommand {
@@ -95,6 +103,7 @@ export interface WpsAiPptBrowserCommand {
   readonly attemptSeq: number;
   readonly timeoutMs: number;
   readonly signal: AbortSignal;
+  readonly evaluationProvenance: "MOCK" | "PRODUCTION";
   readonly url: typeof WPS_AIPPT_URL;
   readonly prompt: string;
   readonly accountScope: "current_authenticated_account";
@@ -116,8 +125,8 @@ export interface WpsAiPptBrowserArtifactCapture {
 export interface WpsAiPptBrowserStaticSlide {
   readonly pageNumber: number;
   readonly filename: string;
-  readonly mimeType: "image/svg+xml";
-  readonly content: string;
+  readonly mimeType: "image/png";
+  readonly content: Uint8Array;
   readonly extractedText: string;
 }
 
@@ -127,11 +136,16 @@ export interface WpsAiPptBrowserRenderCapture {
   readonly resolution: string;
   readonly colorProfile: string;
   readonly redactionStatus: "passed";
+  readonly renderOutcome: "faithful" | "degraded";
+  readonly fidelity: {
+    readonly status: "verified" | "degraded" | "unknown";
+    readonly notes: readonly string[];
+  };
   readonly slides: readonly WpsAiPptBrowserStaticSlide[];
   readonly contactSheet: {
     readonly filename: string;
-    readonly mimeType: "image/svg+xml";
-    readonly content: string;
+    readonly mimeType: "image/png";
+    readonly content: Uint8Array;
   };
 }
 
@@ -158,20 +172,18 @@ export interface WpsAiPptFailedBrowserResult
     | "payment"
     | "quota"
     | "authentication"
+    | "captcha"
+    | "capacity"
+    | "ui_drift"
+    | "export_failure"
+    | "download_failure"
+    | "task_state_unknown"
     | "human_wait";
 }
 
 export type WpsAiPptBrowserResult =
   | WpsAiPptCapturedBrowserResult
   | WpsAiPptFailedBrowserResult;
-
-export interface WpsAiPptBrowserDriverPort {
-  readonly driverId: string;
-  readonly provenance: "PRODUCTION" | "TEST_FAKE";
-  run(
-    command: WpsAiPptBrowserCommand,
-  ): Promise<WpsAiPptBrowserResult>;
-}
 
 function assertRegisteredImplementationPackage(
   implementation: ProductAdapterImplementationPackage,
@@ -200,21 +212,37 @@ function assertSafeTraceValue(value: string, label: string): void {
   }
 }
 
-function observableEvents(
+function sanitizedSourceUrl(value: string | null): string | null {
+  if (value === null) return null;
+  const parsed = new URL(value);
+  if (parsed.protocol !== "https:") {
+    throw new Error("WPS browser event URL must use HTTPS");
+  }
+  parsed.username = "";
+  parsed.password = "";
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+async function observableEvents(
   command: ProductRunCommand,
   events: readonly WpsAiPptBrowserEvent[],
-): readonly ObservableAttemptEvent[] {
-  return Object.freeze(
-    events.map((event, index) => {
+  checkpointStore: AttemptCheckpointPort | undefined,
+): Promise<readonly ObservableAttemptEvent[]> {
+  const persisted: ObservableAttemptEvent[] = [];
+  for (const [index, event] of events.entries()) {
       assertSafeTraceValue(event.eventType, "event type");
-      assertSafeTraceValue(event.evidenceRef, "evidence reference");
+      if (!/^ev_[a-f0-9]{16,64}$/.test(event.evidenceId)) {
+        throw new Error("WPS browser evidence ID must be opaque");
+      }
       if (
         !Number.isFinite(Date.parse(event.sourceAt)) ||
         !Number.isFinite(Date.parse(event.observedAt))
       ) {
         throw new Error("WPS browser event timestamps are invalid");
       }
-      return Object.freeze({
+      const checkpoint = Object.freeze({
         eventId: `${command.attemptId}-wps-event-${index + 1}`,
         jobId: command.jobId,
         caseId: command.evaluationCase.caseId,
@@ -225,10 +253,15 @@ function observableEvents(
         sourceAt: event.sourceAt,
         observedAt: event.observedAt,
         writerId: WPS_AIPPT_ADAPTER_VERSION,
-        evidenceRef: event.evidenceRef,
+        evidenceRef: event.evidenceId,
+        sourceUrl: sanitizedSourceUrl(event.sourceUrl),
+        submissionEvidenceAtCheckpoint:
+          event.submissionEvidenceAtCheckpoint,
       });
-    }),
-  );
+      await checkpointStore?.append(checkpoint);
+      persisted.push(checkpoint);
+  }
+  return Object.freeze(persisted);
 }
 
 function checkedManualActions(
@@ -245,22 +278,56 @@ function checkedManualActions(
 function assertObservedConfiguration(
   observed: WpsAiPptObservedConfiguration,
 ): void {
-  const { evidenceRefs, ...configuration } = observed;
+  const { evidenceIds, ...configuration } = observed;
   if (
     JSON.stringify(configuration) !==
       JSON.stringify(WPS_AIPPT_EXPERIENCE_CONFIGURATION) ||
-    evidenceRefs.length === 0
+    evidenceIds.length === 0
   ) {
     throw new Error(
       "WPS browser did not prove the frozen production configuration",
     );
   }
-  for (const evidenceRef of evidenceRefs) {
-    assertSafeTraceValue(evidenceRef, "configuration evidence");
+  for (const evidenceId of evidenceIds) {
+    if (!/^ev_[a-f0-9]{16,64}$/.test(evidenceId)) {
+      throw new Error("WPS configuration evidence ID must be opaque");
+    }
   }
 }
 
-function centralDirectoryEntryNames(content: Uint8Array): string[] {
+interface ValidatedZipEntry {
+  readonly name: string;
+  readonly content: Uint8Array;
+}
+
+const CRC32_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value =
+      (value & 1) === 1
+        ? 0xedb88320 ^ (value >>> 1)
+        : value >>> 1;
+  }
+  return value >>> 0;
+});
+
+function crc32(content: Uint8Array): number {
+  let value = 0xffffffff;
+  for (const byte of content) {
+    value = CRC32_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
+  }
+  return (value ^ 0xffffffff) >>> 0;
+}
+
+function validatedZipEntries(content: Uint8Array): readonly ValidatedZipEntry[] {
+  const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
+  const MAX_ENTRY_COUNT = 4_096;
+  const MAX_ENTRY_BYTES = 32 * 1024 * 1024;
+  const MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
+  const MAX_COMPRESSION_RATIO = 200;
+  if (content.byteLength < 22 || content.byteLength > MAX_ARCHIVE_BYTES) {
+    throw new Error("WPS Artifact ZIP size is outside the safe limit");
+  }
   const view = new DataView(
     content.buffer,
     content.byteOffset,
@@ -277,9 +344,25 @@ function centralDirectoryEntryNames(content: Uint8Array): string[] {
   if (endOffset === -1) {
     throw new Error("WPS Artifact is not an openable PPTX ZIP");
   }
+  const diskNumber = view.getUint16(endOffset + 4, true);
+  const centralDirectoryDisk = view.getUint16(endOffset + 6, true);
+  const diskEntryCount = view.getUint16(endOffset + 8, true);
   const entryCount = view.getUint16(endOffset + 10, true);
+  const centralDirectorySize = view.getUint32(endOffset + 12, true);
   let offset = view.getUint32(endOffset + 16, true);
-  const names: string[] = [];
+  if (
+    diskNumber !== 0 ||
+    centralDirectoryDisk !== 0 ||
+    diskEntryCount !== entryCount ||
+    entryCount === 0 ||
+    entryCount > MAX_ENTRY_COUNT ||
+    offset + centralDirectorySize > endOffset
+  ) {
+    throw new Error("WPS Artifact ZIP central directory is unsafe");
+  }
+  const entries: ValidatedZipEntry[] = [];
+  const names = new Set<string>();
+  let totalUncompressedBytes = 0;
   for (let index = 0; index < entryCount; index += 1) {
     if (
       offset + 46 > content.byteLength ||
@@ -287,22 +370,156 @@ function centralDirectoryEntryNames(content: Uint8Array): string[] {
     ) {
       throw new Error("WPS Artifact central directory is invalid");
     }
+    const flags = view.getUint16(offset + 8, true);
+    const compressionMethod = view.getUint16(offset + 10, true);
+    const expectedCrc = view.getUint32(offset + 16, true);
+    const compressedSize = view.getUint32(offset + 20, true);
+    const uncompressedSize = view.getUint32(offset + 24, true);
     const nameLength = view.getUint16(offset + 28, true);
     const extraLength = view.getUint16(offset + 30, true);
     const commentLength = view.getUint16(offset + 32, true);
+    const localHeaderOffset = view.getUint32(offset + 42, true);
     const nameStart = offset + 46;
     const nameEnd = nameStart + nameLength;
     if (nameEnd > content.byteLength) {
       throw new Error("WPS Artifact central directory is truncated");
     }
-    names.push(
-      new TextDecoder("utf-8", { fatal: true }).decode(
-        content.subarray(nameStart, nameEnd),
-      ),
+    const name = new TextDecoder("utf-8", { fatal: true }).decode(
+      content.subarray(nameStart, nameEnd),
     );
+    if (
+      name.length === 0 ||
+      name.startsWith("/") ||
+      name.includes("\\") ||
+      name.split("/").includes("..") ||
+      names.has(name) ||
+      (flags & 0x1) !== 0 ||
+      (compressionMethod !== 0 && compressionMethod !== 8) ||
+      uncompressedSize > MAX_ENTRY_BYTES ||
+      totalUncompressedBytes + uncompressedSize >
+        MAX_TOTAL_UNCOMPRESSED_BYTES ||
+      (compressedSize === 0
+        ? uncompressedSize !== 0
+        : uncompressedSize / compressedSize > MAX_COMPRESSION_RATIO)
+    ) {
+      throw new Error(`WPS Artifact ZIP entry is unsafe: ${name}`);
+    }
+    names.add(name);
+    if (
+      localHeaderOffset + 30 > content.byteLength ||
+      view.getUint32(localHeaderOffset, true) !== 0x04034b50
+    ) {
+      throw new Error(`WPS Artifact local ZIP header is invalid: ${name}`);
+    }
+    const localFlags = view.getUint16(localHeaderOffset + 6, true);
+    const localMethod = view.getUint16(localHeaderOffset + 8, true);
+    const localNameLength = view.getUint16(localHeaderOffset + 26, true);
+    const localExtraLength = view.getUint16(localHeaderOffset + 28, true);
+    const localNameStart = localHeaderOffset + 30;
+    const localNameEnd = localNameStart + localNameLength;
+    const localName = new TextDecoder("utf-8", { fatal: true }).decode(
+      content.subarray(localNameStart, localNameEnd),
+    );
+    const compressedStart = localNameEnd + localExtraLength;
+    const compressedEnd = compressedStart + compressedSize;
+    if (
+      localFlags !== flags ||
+      localMethod !== compressionMethod ||
+      localName !== name ||
+      compressedEnd > content.byteLength ||
+      compressedEnd > offset
+    ) {
+      throw new Error(`WPS Artifact local ZIP header mismatch: ${name}`);
+    }
+    const compressed = content.subarray(compressedStart, compressedEnd);
+    let uncompressed: Uint8Array;
+    try {
+      uncompressed =
+        compressionMethod === 0
+          ? Uint8Array.from(compressed)
+          : Uint8Array.from(
+              inflateRawSync(compressed, {
+                maxOutputLength: MAX_ENTRY_BYTES,
+              }),
+            );
+    } catch {
+      throw new Error(`WPS Artifact ZIP entry cannot be opened: ${name}`);
+    }
+    if (
+      uncompressed.byteLength !== uncompressedSize ||
+      crc32(uncompressed) !== expectedCrc
+    ) {
+      throw new Error(`WPS Artifact ZIP CRC mismatch: ${name}`);
+    }
+    totalUncompressedBytes += uncompressed.byteLength;
+    entries.push(Object.freeze({ name, content: uncompressed }));
     offset = nameEnd + extraLength + commentLength;
   }
-  return names;
+  if (offset !== view.getUint32(endOffset + 16, true) + centralDirectorySize) {
+    throw new Error("WPS Artifact ZIP central directory length mismatch");
+  }
+  return Object.freeze(entries);
+}
+
+function validatedOpcSlideNames(
+  content: Uint8Array,
+): readonly string[] {
+  const entries = validatedZipEntries(content);
+  const byName = new Map(entries.map((entry) => [entry.name, entry.content]));
+  const required = [
+    "[Content_Types].xml",
+    "_rels/.rels",
+    "ppt/presentation.xml",
+    "ppt/_rels/presentation.xml.rels",
+  ];
+  if (required.some((name) => !byName.has(name))) {
+    throw new Error("WPS Artifact OPC package is missing required parts");
+  }
+  if (
+    entries.some(({ name }) =>
+      /(?:^|\/)(?:vbaproject\.bin|vbaData\.xml)$/i.test(name),
+    ) ||
+    entries.some(({ name }) => /^ppt\/embeddings\//i.test(name))
+  ) {
+    throw new Error("WPS Artifact OPC package contains active content");
+  }
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const contentTypes = decoder.decode(byName.get("[Content_Types].xml"));
+  if (
+    !contentTypes.includes(
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
+    ) ||
+    /macroEnabled|vbaProject/i.test(contentTypes)
+  ) {
+    throw new Error("WPS Artifact OPC content types are unsafe");
+  }
+  for (const entry of entries.filter(({ name }) => /\.rels$/i.test(name))) {
+    const relationships = decoder.decode(entry.content);
+    if (
+      /TargetMode\s*=\s*["']External["']/i.test(relationships) ||
+      /Target\s*=\s*["'](?:https?|file|ftp):/i.test(relationships)
+    ) {
+      throw new Error("WPS Artifact OPC external relationship is forbidden");
+    }
+  }
+  const presentationRelationships = decoder.decode(
+    byName.get("ppt/_rels/presentation.xml.rels"),
+  );
+  const slideTargets = [
+    ...presentationRelationships.matchAll(
+      /<Relationship\b(?=[^>]*\bType=["'][^"']*\/slide["'])(?=[^>]*\bTarget=["']slides\/(slide\d+\.xml)["'])[^>]*\/?>/gi,
+    ),
+  ].map((match) => `ppt/slides/${match[1]}`);
+  if (
+    slideTargets.length !== 16 ||
+    new Set(slideTargets).size !== 16 ||
+    slideTargets.some((name) => !byName.has(name))
+  ) {
+    throw new Error(
+      "WPS Artifact OPC presentation relationships do not resolve exactly 16 slides",
+    );
+  }
+  return Object.freeze(slideTargets);
 }
 
 function assertOpenableSixteenPagePptx(
@@ -317,34 +534,12 @@ function assertOpenableSixteenPagePptx(
   ) {
     throw new Error("WPS Artifact metadata is invalid");
   }
-  const slideNames = centralDirectoryEntryNames(artifact.content).filter(
-    (name) => /^ppt\/slides\/slide\d+\.xml$/i.test(name),
-  );
+  const slideNames = validatedOpcSlideNames(artifact.content);
   if (slideNames.length !== 16) {
     throw new Error(
       `WPS Artifact page count mismatch: expected 16, found ${slideNames.length}`,
     );
   }
-}
-
-function staticSlide(
-  slide: WpsAiPptBrowserStaticSlide,
-  expectedPage: number,
-): StaticSlideRender {
-  if (
-    slide.pageNumber !== expectedPage ||
-    slide.mimeType !== "image/svg+xml" ||
-    slide.content.trim().length === 0 ||
-    slide.extractedText.trim().length === 0
-  ) {
-    throw new Error(
-      `WPS static render page ${expectedPage} is invalid`,
-    );
-  }
-  return Object.freeze({
-    ...slide,
-    contentHash: sha256(textEncoder.encode(slide.content)),
-  });
 }
 
 function capturedResult(
@@ -353,14 +548,15 @@ function capturedResult(
   result: WpsAiPptCapturedBrowserResult,
 ): {
   readonly artifact: Artifact;
-  readonly renderManifest: RenderManifest;
+  readonly safeRasterCandidate: SafeRasterCandidate;
 } {
   assertObservedConfiguration(result.observedConfiguration);
   assertOpenableSixteenPagePptx(result.artifact);
   if (
     result.render.redactionStatus !== "passed" ||
     result.render.slides.length !== 16 ||
-    result.render.renderer.trim().length === 0
+    result.render.renderer.trim().length === 0 ||
+    result.render.contactSheet.mimeType !== "image/png"
   ) {
     throw new Error("WPS static render capture is invalid");
   }
@@ -384,49 +580,33 @@ function capturedResult(
     capturedAt: result.artifact.capturedAt,
     content: Uint8Array.from(result.artifact.content),
   });
-  const slides = Object.freeze(
-    result.render.slides.map((slide, index) =>
-      staticSlide(slide, index + 1),
-    ),
-  );
-  const contactSheetContent = result.render.contactSheet.content;
-  if (
-    result.render.contactSheet.mimeType !== "image/svg+xml" ||
-    contactSheetContent.trim().length === 0
-  ) {
-    throw new Error("WPS static render contact sheet is invalid");
-  }
-  const manifestWithoutHash: Omit<RenderManifest, "contentHash"> = {
-    renderManifestId: `${artifact.artifactId}-render`,
-    artifactId: artifact.artifactId,
-    provenance,
-    environmentOrigin,
+  const safeRasterCandidate: SafeRasterCandidate = Object.freeze({
     renderer: result.render.renderer,
-    pageCount: 16,
-    renderPolicy: {
-      fontPack: result.render.fontPack,
-      resolution: result.render.resolution,
-      colorProfile: result.render.colorProfile,
-      animationPolicy: "first_frame",
-      externalAssetPolicy: "network_disabled",
-    },
+    fontPack: result.render.fontPack,
+    resolution: result.render.resolution,
+    colorProfile: result.render.colorProfile,
+    renderOutcome: result.render.renderOutcome,
+    fidelity: Object.freeze({
+      status: result.render.fidelity.status,
+      notes: Object.freeze([...result.render.fidelity.notes]),
+    }),
+    slides: Object.freeze(
+      result.render.slides.map((slide) =>
+        Object.freeze({
+          ...slide,
+          content: Uint8Array.from(slide.content),
+        }),
+      ),
+    ),
     contactSheet: {
       filename: result.render.contactSheet.filename,
-      mimeType: "image/svg+xml",
-      contentHash: sha256(textEncoder.encode(contactSheetContent)),
-      content: contactSheetContent,
+      mimeType: "image/png" as const,
+      content: Uint8Array.from(result.render.contactSheet.content),
     },
-    slides,
-  };
+  });
   return {
     artifact,
-    renderManifest: Object.freeze({
-      ...manifestWithoutHash,
-      contentHash: calculateRenderManifestHash(
-        artifact.contentHash,
-        manifestWithoutHash,
-      ),
-    }),
+    safeRasterCandidate,
   };
 }
 
@@ -434,6 +614,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
   implementation: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   browserDriver: WpsAiPptBrowserDriverPort | undefined,
+  checkpointStore?: AttemptCheckpointPort,
 ): ProductAdapterExecutor {
   if (
     executionConfiguration.adapterKind !== "wps-aippt-browser" ||
@@ -447,7 +628,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
       "WPS production adapter requires an explicit browser driver",
     );
   }
-  assertSafeTraceValue(browserDriver.driverId, "driver id");
+  const runBrowser = resolveRegisteredWpsAiPptBrowserDriver(browserDriver);
   return Object.freeze(async (command: ProductRunCommand) => {
     if (
       command.evaluationCase.targetPageCount !== 16 ||
@@ -457,13 +638,14 @@ export function resolveWpsAiPptProductAdapterExecutor(
         "WPS production adapter supports only the frozen 16-page, 30-minute protocol",
       );
     }
-    const result = await browserDriver.run({
+    const result = await runBrowser({
       jobId: command.jobId,
       runId: command.runId,
       attemptId: command.attemptId,
       attemptSeq: command.attemptSeq,
       timeoutMs: command.timeoutMs,
       signal: command.signal,
+      evaluationProvenance: command.evaluationCase.provenance,
       url: WPS_AIPPT_URL,
       prompt: command.evaluationCase.vendorPrompt,
       accountScope: "current_authenticated_account",
@@ -472,7 +654,23 @@ export function resolveWpsAiPptProductAdapterExecutor(
       networking: "enabled",
       pageCount: 16,
     });
-    const events = observableEvents(command, result.events);
+    const events = await observableEvents(
+      command,
+      result.events,
+      checkpointStore,
+    );
+    if (
+      result.outcome === "task_state_unknown" &&
+      !events.some(
+        ({ eventType, submissionEvidenceAtCheckpoint }) =>
+          eventType === "task_reconciliation_checked" &&
+          submissionEvidenceAtCheckpoint === "unknown",
+      )
+    ) {
+      throw new Error(
+        "WPS unknown task state requires an explicit reconciliation checkpoint",
+      );
+    }
     const manualActions = checkedManualActions(result.manualActions);
     if (result.outcome !== "captured") {
       return {
@@ -495,7 +693,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
         "WPS captured Artifact requires submitted evidence",
       );
     }
-    const { artifact, renderManifest } = capturedResult(
+    const { artifact, safeRasterCandidate } = capturedResult(
       command,
       browserDriver,
       result,
@@ -508,7 +706,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
       artifactCandidates: [
         {
           artifact,
-          renderManifest,
+          safeRasterCandidate,
           policyCompliant: true,
         },
       ],

@@ -4,7 +4,9 @@ import type {
   Artifact,
   EvaluationCaseRecord,
   ObservableAttemptEvent,
+  RenderFidelity,
   RenderManifest,
+  RenderOutcome,
 } from "./domain.ts";
 import type {
   BlockReason,
@@ -28,6 +30,8 @@ export interface ProductPackageSnapshot {
 export interface ProductExperienceConfiguration {
   readonly productUrl: string;
   readonly accountScope: "current_authenticated_account";
+  readonly accountIdentityObservation: "unknown";
+  readonly commercialPlanObservation: "unknown";
   readonly packageSelection:
     "best_available_zero_incremental_cost";
   readonly incrementalCost: 0;
@@ -50,6 +54,28 @@ export interface ArtifactCandidate {
   readonly artifact: Artifact;
   readonly policyCompliant: boolean;
   readonly renderManifest?: RenderManifest;
+  readonly safeRasterCandidate?: SafeRasterCandidate;
+}
+
+export interface SafeRasterCandidate {
+  readonly renderer: string;
+  readonly fontPack: string;
+  readonly resolution: string;
+  readonly colorProfile: string;
+  readonly renderOutcome: RenderOutcome;
+  readonly fidelity: RenderFidelity;
+  readonly slides: readonly {
+    readonly pageNumber: number;
+    readonly filename: string;
+    readonly mimeType: "image/png";
+    readonly content: Uint8Array;
+    readonly extractedText: string;
+  }[];
+  readonly contactSheet: {
+    readonly filename: string;
+    readonly mimeType: "image/png";
+    readonly content: Uint8Array;
+  };
 }
 
 export interface ProductAttemptResult {
@@ -60,6 +86,39 @@ export interface ProductAttemptResult {
   readonly artifactCandidates: readonly ArtifactCandidate[];
   readonly observableEvents?: readonly ObservableAttemptEvent[];
   readonly manualActions?: readonly string[];
+}
+
+export interface AttemptCheckpointPort {
+  readonly checkpointStoreId: string;
+  append(event: ObservableAttemptEvent): Promise<void>;
+}
+
+export class InMemoryAttemptCheckpointStore
+  implements AttemptCheckpointPort
+{
+  readonly checkpointStoreId: string;
+  readonly #events: ObservableAttemptEvent[] = [];
+
+  constructor(
+    checkpointStoreId = "in-memory-attempt-checkpoints",
+  ) {
+    this.checkpointStoreId = checkpointStoreId;
+  }
+
+  async append(event: ObservableAttemptEvent): Promise<void> {
+    if (
+      this.#events.some(({ eventId }) => eventId === event.eventId)
+    ) {
+      throw new Error(`Attempt checkpoint identity conflict: ${event.eventId}`);
+    }
+    this.#events.push(Object.freeze(structuredClone(event)));
+  }
+
+  snapshot(): readonly ObservableAttemptEvent[] {
+    return Object.freeze(
+      this.#events.map((event) => Object.freeze(structuredClone(event))),
+    );
+  }
 }
 
 export interface ProductAdapterImplementationPackage {
