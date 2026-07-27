@@ -59,6 +59,17 @@ function requireNonBlank(value: string, field: string): void {
   }
 }
 
+function assertModelScoreAdjudicable(
+  assessmentStatus: "ASSESSED" | "NOT_ASSESSABLE",
+  value: ScoreValue | null,
+): asserts value is ScoreValue {
+  if (assessmentStatus !== "ASSESSED" || value === null) {
+    throw new Error(
+      "Invalid adjudication for NOT_ASSESSABLE: human adjudication cannot invent assessability without an allowed domain rule; create a new Scorecard that freezes the reviewed Reference Pack",
+    );
+  }
+}
+
 function causalAdjudicationHead(
   events: readonly AdjudicationEventRecord[],
 ): AdjudicationEventRecord | undefined {
@@ -159,6 +170,12 @@ function effectiveScorecard(
           "Invalid adjudication causal history: model-original lineage mismatch",
         );
       }
+      if (matching.length > 0) {
+        assertModelScoreAdjudicable(
+          modelOriginal.assessmentStatus,
+          modelOriginal.value,
+        );
+      }
       const latest = causalAdjudicationHead(matching);
       const acceptedByHuman = reviews.some((review) =>
         review.reviewedDimensions.includes(modelOriginal.dimension),
@@ -245,14 +262,10 @@ export function createScoreAdjudicationService({
           `Score dimension not found: ${command.dimension}`,
         );
       }
-      if (
-        modelOriginal.assessmentStatus !== "ASSESSED" ||
-        modelOriginal.value === null
-      ) {
-        throw new Error(
-          "Human adjudication cannot invent assessability without an allowed domain rule; create a new Scorecard that freezes the reviewed Reference Pack",
-        );
-      }
+      assertModelScoreAdjudicable(
+        modelOriginal.assessmentStatus,
+        modelOriginal.value,
+      );
       const evidencePages =
         command.evidencePages ?? modelOriginal.evidencePages;
       if (

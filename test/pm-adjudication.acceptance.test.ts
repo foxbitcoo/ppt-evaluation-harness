@@ -359,6 +359,40 @@ test("human adjudication preserves NOT_ASSESSABLE until a new scorecard freezes 
     /cannot invent assessability.*new scorecard.*reference pack/i,
   );
   assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
+  const storedScore = feishu.snapshot().artifactScoreTable[0];
+  assert.ok(storedScore);
+  const legacyEvent: AdjudicationEventRecord = {
+    recordType: "adjudication_event",
+    schemaVersion: "adjudication-event-v1",
+    adjudicationEventId: "legacy-factual-adjudication",
+    scorecardId,
+    artifactId: storedScore.artifactId,
+    runId: storedScore.runId,
+    jobId: storedScore.jobId,
+    dimension: "factual_accuracy_and_content_quality",
+    modelOriginalAssessmentStatus: "NOT_ASSESSABLE",
+    modelOriginalScore: null,
+    humanFinalAssessmentStatus: "ASSESSED",
+    humanFinalScore: 4,
+    evidencePages: [3, 5, 9],
+    actorId: "legacy-pm",
+    occurredAt: "2026-07-27T05:19:00.000Z",
+    createdAt: "2026-07-27T05:19:00.000Z",
+    lastSyncedAt: "2026-07-27T05:19:00.000Z",
+    reason: "旧实现遗留的非法可评估化记录。",
+    priorAdjudicationEventId: null,
+    provenance: storedScore.provenance,
+    environmentOrigin: storedScore.environmentOrigin,
+  };
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: withAdjudicationEvents(
+        feishu,
+        () => [legacyEvent],
+      ),
+    }).getEffectiveScorecard(scorecardId),
+    /invalid adjudication.*NOT_ASSESSABLE/i,
+  );
 
   const effective = await service.getEffectiveScorecard(scorecardId);
   const factual = effective.dimensions.find(
