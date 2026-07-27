@@ -87,6 +87,7 @@ import {
   type PayloadInventoryPort,
   type TombstoneLedgerPort,
 } from "./retention.ts";
+import type { WpsAiPptBrowserDriverPort } from "./wps-aippt.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 const DEFAULT_SPEC_COMMIT_SHA = "9e68de5801bc14f00c187336000c83ce8cc37efa";
@@ -216,6 +217,7 @@ export interface BakeoffHarnessDependencies {
   readonly tombstones?: TombstoneLedgerPort;
   readonly egressAudit?: EgressAuthorizationAuditPort;
   readonly specCommitSha?: string;
+  readonly wpsAiPptBrowserDriver?: WpsAiPptBrowserDriverPort;
 }
 
 interface InFlightBakeoffJob {
@@ -393,6 +395,9 @@ function bakeoffJobIdentity(
     readonly judgeDestination: EgressDestinationMetadata;
     readonly egressAudit: EgressAuthorizationAuditPort;
     readonly specCommitSha: string;
+    readonly wpsAiPptBrowserDriver:
+      | WpsAiPptBrowserDriverPort
+      | undefined;
   },
 ): string {
   return JSON.stringify({
@@ -452,6 +457,9 @@ function bakeoffJobIdentity(
       judgeDestination: dependencies.judgeDestination,
       egressAudit: dependencyIdentity(dependencies.egressAudit),
       specCommitSha: dependencies.specCommitSha,
+      wpsAiPptBrowserDriver: dependencyIdentity(
+        dependencies.wpsAiPptBrowserDriver,
+      ),
     },
   });
 }
@@ -525,6 +533,11 @@ class ArtifactPackageIdentityConflictError extends Error {
 
 function snapshotProductSelections(
   adapters: readonly ProductAdapterPort[],
+  dependencies: {
+    readonly wpsAiPptBrowserDriver:
+      | WpsAiPptBrowserDriverPort
+      | undefined;
+  },
 ): readonly SelectedProductAdapter[] {
   return Object.freeze(
     adapters.map((adapter) => {
@@ -560,6 +573,7 @@ function snapshotProductSelections(
         resolveHarnessProductAdapterExecutor(
           implementationPackage,
           executionConfiguration,
+          dependencies,
         );
       const executionEntrypointDigest = sha256Bytes(
         new TextEncoder().encode(selectedExecute.toString()),
@@ -984,34 +998,36 @@ function attemptRecord(input: {
       input.terminalReason === "human_wait"
         ? fixedTimestampAfter(input.measuredElapsedMs)
         : null,
-    observableEvents: [
-      {
-        eventId: `${input.attemptId}-event-1`,
-        jobId: MOCK_SCENARIO.jobId,
-        caseId: input.caseId,
-        runId: input.runId,
-        attemptId: input.attemptId,
-        attemptSeq: input.attemptSeq,
-        eventType:
-          input.terminalReason === "human_wait"
-            ? "waiting_for_human"
-            : `terminal:${input.terminalReason}`,
-        sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
-        observedAt: fixedTimestampAfter(input.measuredElapsedMs),
-        writerId: "mock-runner@1",
-        evidenceRef: `mock://${vendorSlug(
-          input.productPackage.packageId,
-        )}/attempt-${input.attemptSeq}`,
-      },
-    ],
-    manualActions: [],
+    observableEvents:
+      input.result.observableEvents ??
+      [
+        {
+          eventId: `${input.attemptId}-event-1`,
+          jobId: MOCK_SCENARIO.jobId,
+          caseId: input.caseId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          attemptSeq: input.attemptSeq,
+          eventType:
+            input.terminalReason === "human_wait"
+              ? "waiting_for_human"
+              : `terminal:${input.terminalReason}`,
+          sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
+          observedAt: fixedTimestampAfter(input.measuredElapsedMs),
+          writerId: "mock-runner@1",
+          evidenceRef: `mock://${vendorSlug(
+            input.productPackage.packageId,
+          )}/attempt-${input.attemptSeq}`,
+        },
+      ],
+    manualActions: input.result.manualActions ?? [],
     costEvidence: {
       classification: "unknown",
       amount: null,
       currency: null,
     },
-    provenance: "MOCK",
-    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    provenance: input.productPackage.provenance,
+    environmentOrigin: input.productPackage.environmentOrigin,
     createdAt: MOCK_SCENARIO.fixedTime,
     lastSyncedAt: MOCK_SCENARIO.fixedTime,
     reportUrl: null,
@@ -1194,10 +1210,10 @@ async function executeVendor(
     };
   }
 
-  const artifact = result.artifactCandidates.find(
+  const selectedArtifact = result.artifactCandidates.find(
     ({ policyCompliant }) => policyCompliant,
-  )?.artifact;
-  if (artifact === undefined) {
+  );
+  if (selectedArtifact === undefined) {
     return {
       productPackage,
       runId,
@@ -1220,8 +1236,14 @@ async function executeVendor(
       ),
     };
   }
-  if (artifact.runId !== runId || artifact.provenance !== "MOCK") {
-    throw new Error("Test Bakeoff Job requires MOCK Artifact lineage");
+  const artifact = selectedArtifact.artifact;
+  if (
+    artifact.runId !== runId ||
+    artifact.provenance !== productPackage.provenance
+  ) {
+    throw new Error(
+      "Bakeoff Job requires Artifact lineage to match its Product Package",
+    );
   }
   assertEnvironmentOriginAllowed(
     artifact.environmentOrigin,
@@ -1247,10 +1269,22 @@ async function executeVendor(
       requiredRedactions: [],
     }, clock),
   );
-  const renderManifest = renderStaticArtifact(
-    artifact,
-    scenario?.renderManifestId ?? runId.replace(/^MOCK-run-/, "MOCK-render-"),
-  );
+  const renderManifest =
+    selectedArtifact.renderManifest ??
+    renderStaticArtifact(
+      artifact,
+      scenario?.renderManifestId ??
+        runId.replace(/^MOCK-run-/, "MOCK-render-"),
+    );
+  if (
+    renderManifest.artifactId !== artifact.artifactId ||
+    renderManifest.provenance !== artifact.provenance ||
+    renderManifest.environmentOrigin !== artifact.environmentOrigin
+  ) {
+    throw new Error(
+      "Bakeoff Job requires static render lineage to match its Artifact",
+    );
+  }
   let artifactPackageManifest: ArtifactPackageManifest;
   try {
     artifactPackageManifest = await artifactVault.capture({
@@ -1436,6 +1470,7 @@ export function createBakeoffHarness({
   judgeDestination: configuredJudgeDestination,
   tombstones: configuredTombstones,
   egressAudit: configuredEgressAudit,
+  wpsAiPptBrowserDriver,
   specCommitSha = DEFAULT_SPEC_COMMIT_SHA,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
@@ -1961,6 +1996,7 @@ export function createBakeoffHarness({
       const commandSnapshot = snapshotBakeoffCommand(command);
       const selections = snapshotProductSelections(
         selectedProductAdapters,
+        { wpsAiPptBrowserDriver },
       );
       const jobIdentity = bakeoffJobIdentity(
         commandSnapshot,
@@ -1980,6 +2016,7 @@ export function createBakeoffHarness({
           judgeDestination,
           egressAudit,
           specCommitSha,
+          wpsAiPptBrowserDriver,
         },
       );
       return coalesceBakeoffJob(

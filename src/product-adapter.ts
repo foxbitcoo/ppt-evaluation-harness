@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 
-import type { Artifact, EvaluationCaseRecord } from "./domain.ts";
+import type {
+  Artifact,
+  EvaluationCaseRecord,
+  ObservableAttemptEvent,
+  RenderManifest,
+} from "./domain.ts";
 import type {
   BlockReason,
   SubmissionEvidence,
@@ -17,6 +22,18 @@ export interface ProductPackageSnapshot {
   readonly provenance: "MOCK" | "PRODUCTION";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly egressDestination: EgressDestinationMetadata;
+  readonly experienceConfiguration?: ProductExperienceConfiguration;
+}
+
+export interface ProductExperienceConfiguration {
+  readonly productUrl: string;
+  readonly accountScope: "current_authenticated_account";
+  readonly packageSelection:
+    "best_available_zero_incremental_cost";
+  readonly incrementalCost: 0;
+  readonly mode: "professional";
+  readonly networking: "enabled";
+  readonly pageCount: 16;
 }
 
 export interface ProductRunCommand {
@@ -32,6 +49,7 @@ export interface ProductRunCommand {
 export interface ArtifactCandidate {
   readonly artifact: Artifact;
   readonly policyCompliant: boolean;
+  readonly renderManifest?: RenderManifest;
 }
 
 export interface ProductAttemptResult {
@@ -40,6 +58,8 @@ export interface ProductAttemptResult {
   readonly submissionEvidence: SubmissionEvidence;
   readonly elapsedMs: number;
   readonly artifactCandidates: readonly ArtifactCandidate[];
+  readonly observableEvents?: readonly ObservableAttemptEvent[];
+  readonly manualActions?: readonly string[];
 }
 
 export interface ProductAdapterImplementationPackage {

@@ -149,9 +149,27 @@ export {
   type ProductAdapterExecutor,
   type ProductAttemptResult,
   type ProductAdapterPort,
+  type ProductExperienceConfiguration,
   type ProductPackageSnapshot,
   type ProductRunCommand,
 } from "./product-adapter.ts";
+export {
+  WPS_AIPPT_ADAPTER_VERSION,
+  WPS_AIPPT_EXPERIENCE_CONFIGURATION,
+  WPS_AIPPT_URL,
+  WpsAiPptProductAdapter,
+  resolveWpsAiPptProductAdapterExecutor,
+  type WpsAiPptBrowserArtifactCapture,
+  type WpsAiPptBrowserCommand,
+  type WpsAiPptBrowserDriverPort,
+  type WpsAiPptBrowserEvent,
+  type WpsAiPptBrowserRenderCapture,
+  type WpsAiPptBrowserResult,
+  type WpsAiPptBrowserStaticSlide,
+  type WpsAiPptCapturedBrowserResult,
+  type WpsAiPptFailedBrowserResult,
+  type WpsAiPptObservedConfiguration,
+} from "./wps-aippt.ts";
 export type {
   Artifact,
   AdjudicationEventRecord,

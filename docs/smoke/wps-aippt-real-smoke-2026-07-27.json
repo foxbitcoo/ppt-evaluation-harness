@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "wps-aippt-real-smoke-v1",
+  "observedDateLocal": "2026-07-27",
+  "timezone": "Asia/Shanghai",
+  "status": "passed_with_degraded_static_render",
+  "scope": "observable UI events and downloaded Artifact validation only",
+  "productPackage": {
+    "productUrl": "https://aippt.wps.cn/aippt/",
+    "accountScope": "current_authenticated_account",
+    "packageSelection": "best_available_zero_incremental_cost",
+    "incrementalCost": 0,
+    "mode": "professional",
+    "networking": "enabled",
+    "pageCount": 16
+  },
+  "execution": {
+    "timeoutPolicyMinutes": 30,
+    "submitCount": 1,
+    "retryCount": 0,
+    "resultSelectionPolicy": "first_policy_compliant_artifact"
+  },
+  "observableEvents": [
+    {
+      "sequence": 1,
+      "eventType": "home_loaded",
+      "evidence": "visible_ui"
+    },
+    {
+      "sequence": 2,
+      "eventType": "professional_mode_observed",
+      "evidence": "visible_ui"
+    },
+    {
+      "sequence": 3,
+      "eventType": "query_submitted",
+      "evidence": "visible_ui_navigation"
+    },
+    {
+      "sequence": 4,
+      "eventType": "network_search_observed",
+      "evidence": "visible_ui"
+    },
+    {
+      "sequence": 5,
+      "eventType": "intent_confirmed",
+      "evidence": "manual_action"
+    },
+    {
+      "sequence": 6,
+      "eventType": "outline_completed_16_pages",
+      "evidence": "visible_ui"
+    },
+    {
+      "sequence": 7,
+      "eventType": "artifact_generation_completed",
+      "evidence": "visible_ui_16_pages"
+    },
+    {
+      "sequence": 8,
+      "eventType": "cloud_editor_opened",
+      "evidence": "visible_ui_1_of_16"
+    },
+    {
+      "sequence": 9,
+      "eventType": "artifact_downloaded",
+      "evidence": "browser_download"
+    },
+    {
+      "sequence": 10,
+      "eventType": "static_render_completed_degraded",
+      "evidence": "local_hash_and_page_count_validation"
+    }
+  ],
+  "manualActions": [
+    "entered frozen public synthetic query",
+    "confirmed intent with optional supplement left blank",
+    "started first presentation generation",
+    "opened the completed presentation card",
+    "downloaded the first completed presentation"
+  ],
+  "artifact": {
+    "filename": "火山为什么会喷发？(1).pptx",
+    "mimeType": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "byteSize": 1805544,
+    "pageCount": 16,
+    "zipValidation": "passed",
+    "contentHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86"
+  },
+  "render": {
+    "pipeline": "libreoffice-impress+pdftoppm",
+    "pageCount": 16,
+    "outcome": "degraded",
+    "pdfHash": "sha256:b0830a9511dad88d9f10dda45d17f4b8a6e18f5bd9c9f8b0a358d35c16d2208a",
+    "firstPageHash": "sha256:63a682a8955c6b1ebdc14c12f5a685d63e998b0be453721ee8dc6a73474b27e2",
+    "lastPageHash": "sha256:2be2d6cc60a1b54fa05a00e5c2e5389effee6584aefc192c28c404b176d68392",
+    "fidelityNote": "The native WPS editor view was readable, but the local static renderer substituted or omitted Chinese glyphs."
+  },
+  "security": {
+    "browserStoresRead": false,
+    "credentialsCaptured": false,
+    "hiddenReasoningCaptured": false,
+    "paymentActions": 0,
+    "captchaActions": 0,
+    "newPaidPlanActions": 0
+  },
+  "uncertainty": [
+    "The visible account identity and exact commercial plan name were intentionally not captured.",
+    "The local static render is evidence of 16-page renderability, not a faithful design-scoring surface."
+  ]
+}

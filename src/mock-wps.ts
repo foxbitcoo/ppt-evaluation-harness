@@ -26,6 +26,10 @@ import type {
 } from "./product-adapter.ts";
 import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
+import {
+  resolveWpsAiPptProductAdapterExecutor,
+  type WpsAiPptBrowserDriverPort,
+} from "./wps-aippt.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -824,8 +828,20 @@ function applyRegisteredArtifactScenario(
 export function resolveHarnessProductAdapterExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
+  dependencies: {
+    readonly wpsAiPptBrowserDriver?:
+      | WpsAiPptBrowserDriverPort
+      | undefined;
+  } = {},
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
+  if (adapterKind === "wps-aippt-browser") {
+    return resolveWpsAiPptProductAdapterExecutor(
+      implementationPackage,
+      executionConfiguration,
+      dependencies.wpsAiPptBrowserDriver,
+    );
+  }
   if (
     adapterKind !== "mock-wps" &&
     adapterKind !== "mock-qwen" &&

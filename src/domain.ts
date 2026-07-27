@@ -172,7 +172,7 @@ export interface RenderManifest {
   readonly artifactId: string;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
-  readonly renderer: "mock-static-svg@1";
+  readonly renderer: string;
   readonly pageCount: number;
   readonly renderPolicy: RenderPolicy;
   readonly contactSheet: ContactSheetRender;
@@ -297,7 +297,7 @@ export interface JudgeLineage {
 export interface EvaluationInputManifest {
   readonly artifactHash: `sha256:${string}`;
   readonly renderManifestHash: `sha256:${string}`;
-  readonly renderer: "mock-static-svg@1";
+  readonly renderer: string;
   readonly referencePackHash: `sha256:${string}` | null;
 }
 
