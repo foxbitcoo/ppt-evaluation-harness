@@ -91,12 +91,6 @@ const manifestIdentity = JSON.parse(
     readonly pageNumber?: number | null;
     readonly contentHash?: string;
   }[];
-  readonly payloadLocations?: readonly {
-    readonly storeId?: string;
-    readonly key?: string;
-    readonly contentHash?: string;
-    readonly copyRole?: string;
-  }[];
   readonly productionExecutionEvidence?: {
     readonly executionMode?: string;
     readonly captureSource?: string;
@@ -116,40 +110,18 @@ const runSpecificationBundle = JSON.parse(
 const originalHash = hash(original);
 const artifactId = manifestIdentity.artifact?.artifactId;
 const derivatives = manifestIdentity.derivatives;
-const payloadLocations = manifestIdentity.payloadLocations;
 if (
   artifactId === undefined ||
   manifestIdentity.renderManifestHash === undefined ||
   derivatives === undefined ||
-  derivatives.length !== 33 ||
-  payloadLocations === undefined
+  derivatives.length !== 33
 ) {
   throw new Error(
     "Durable Doubao recovery render manifest or 33-derivative lineage is incomplete",
   );
 }
-const secondaryLocation = (
-  key: string,
-  contentHash: string,
-) => {
-  const matches = payloadLocations.filter(
-    (location) =>
-      location.copyRole === "secondary" &&
-      location.storeId === artifactStoreId &&
-      location.key === key &&
-      location.contentHash === contentHash,
-  );
-  if (matches.length !== 1) {
-    throw new Error(
-      `Durable Doubao recovery derivative location is missing or ambiguous: ${key}`,
-    );
-  }
-  return matches[0]!;
-};
-const renderManifestLocation = secondaryLocation(
-  `artifacts/${artifactId}/render-manifest`,
-  manifestIdentity.renderManifestHash,
-);
+const renderManifestKey =
+  `artifacts/${artifactId}/render-manifest`;
 const derivativeLocations = derivatives.map((lineage) => {
   let suffix: string;
   if (
@@ -179,19 +151,16 @@ const derivativeLocations = derivatives.map((lineage) => {
   }
   return {
     lineage,
-    location: secondaryLocation(
-      `artifacts/${artifactId}/derivatives/${suffix}`,
-      lineage.contentHash,
-    ),
+    key: `artifacts/${artifactId}/derivatives/${suffix}`,
   };
 });
 const [renderManifest, recoveredDerivatives] = await Promise.all([
-  artifactStore.read(renderManifestLocation.key!),
+  artifactStore.read(renderManifestKey),
   Promise.all(
-    derivativeLocations.map(async ({ lineage, location }) => ({
+    derivativeLocations.map(async ({ lineage, key }) => ({
       derivativeId: lineage.derivativeId!,
       expectedHash: lineage.contentHash!,
-      content: await artifactStore.read(location.key!),
+      content: await artifactStore.read(key),
     })),
   ),
 ]);

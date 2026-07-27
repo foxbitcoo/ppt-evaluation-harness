@@ -314,6 +314,35 @@ const recovery = await execFileAsync(
   { cwd: new URL("..", import.meta.url).pathname },
 );
 const recoveryResult = recovery.stdout.trim();
+const parsedRecoveryResult = JSON.parse(recoveryResult) as {
+  readonly registryId: string;
+  readonly manifestHash: `sha256:${string}`;
+  readonly originalHash: `sha256:${string}`;
+  readonly renderManifestHash: `sha256:${string}`;
+  readonly derivativeCount: number;
+  readonly recoveredDerivativeCount: number;
+  readonly derivativeSetHash: `sha256:${string}`;
+  readonly runSpecificationHash: `sha256:${string}`;
+  readonly checkpointCount: number;
+  readonly browserDriverId: string;
+};
+if (
+  parsedRecoveryResult.registryId !== registryId ||
+  parsedRecoveryResult.manifestHash !==
+    manifest.artifactIdentityHash ||
+  parsedRecoveryResult.originalHash !== artifactContentHash ||
+  parsedRecoveryResult.renderManifestHash !==
+    outcome.renderManifest.contentHash ||
+  parsedRecoveryResult.derivativeCount !== 33 ||
+  parsedRecoveryResult.recoveredDerivativeCount !== 33 ||
+  parsedRecoveryResult.runSpecificationHash !==
+    specReference.contentHash ||
+  parsedRecoveryResult.checkpointCount !== checkpoints.length ||
+  parsedRecoveryResult.browserDriverId !==
+    "doubao-real-provider-replay"
+) {
+  throw new Error("Doubao recovery CLI result failed exact lineage verification");
+}
 await writeFile(
   join(
     resolveDurableRoot(registry, roots.operational),
@@ -364,10 +393,19 @@ process.stdout.write(
       registryHash: registry.registryHash,
       rootReferences: roots,
       artifactManifestHash: manifest.manifestHash,
+      cliArtifactIdentityHash:
+        parsedRecoveryResult.manifestHash,
       recoveredOriginalHash: sha256(recoveredArtifact.original),
       derivativeCount: manifest.derivatives.length,
       recoveredDerivativeCount:
         recoveredArtifact.derivatives.length,
+      cliRenderManifestHash:
+        parsedRecoveryResult.renderManifestHash,
+      cliDerivativeCount: parsedRecoveryResult.derivativeCount,
+      cliRecoveredDerivativeCount:
+        parsedRecoveryResult.recoveredDerivativeCount,
+      cliDerivativeSetHash:
+        parsedRecoveryResult.derivativeSetHash,
       runSpecificationHash: specReference.contentHash,
       browserDriverEvidence:
         recoveredSpec.adapterSpecification.browserDriverEvidence,
