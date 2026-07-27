@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   Artifact,
   ArtifactScorecard,
+  BakeoffProtocolSnapshot,
   BakeoffJobOutcome,
   BlockReason,
   JudgeFailureLineage,
@@ -46,6 +47,15 @@ import {
 } from "./reference-pack.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
+
+const MOCK_BAKEOFF_PROTOCOL_SNAPSHOT: BakeoffProtocolSnapshot =
+  Object.freeze({
+    protocolId: "MOCK-query-default-cost-v1",
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    retryPolicy: "one_if_provably_not_submitted",
+    resultSelectionPolicy: "first_policy_compliant_artifact",
+    cancellationPolicy: "independent_vendor_runs_continue",
+  });
 
 export type AttemptDeadlineResult<T> =
   | {
@@ -209,6 +219,51 @@ function fixedTimestampAfter(elapsedMs: number): string {
   ).toISOString();
 }
 
+function sha256Json(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(value))
+    .digest("hex")}`;
+}
+
+function comparisonCompatibilityFingerprint(
+  scorecard: ArtifactScorecard,
+) {
+  const judge = scorecard.judgeLineage;
+  return Object.freeze({
+    caseManifestHash: sha256Json(VOLCANO_EVALUATION_CASE),
+    caseInputHash: sha256Json({
+      vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+    }),
+    track: VOLCANO_EVALUATION_CASE.track,
+    protocolHash: sha256Json(MOCK_BAKEOFF_PROTOCOL_SNAPSHOT),
+    rubricVersion: scorecard.rubricVersion,
+    scenarioWeightProfile: null,
+    judgeConfigurationHash:
+      judge === null
+        ? sha256Json({ scorer: "mock-score@1" })
+        : sha256Json({
+            provider: judge.provider,
+            adapterVersion: judge.adapterVersion,
+            requestedModel: judge.requestedModel,
+            responseModel: judge.responseModel,
+            promptVersion: judge.promptVersion,
+            promptHash: judge.promptHash,
+            configHash: judge.configHash,
+            schemaHash: judge.schemaHash,
+          }),
+    renderPipelineHash: sha256Json({
+      renderer: scorecard.evaluationInputManifest.renderer,
+    }),
+    designJudgmentSurfaceHash: sha256Json({
+      surfaceClass: "canonical",
+      renderer: scorecard.evaluationInputManifest.renderer,
+      compatibilityStatus: "compatible",
+    }),
+    referencePackHash:
+      scorecard.evaluationInputManifest.referencePackHash,
+  });
+}
+
 function attemptRecord(input: {
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
@@ -229,6 +284,7 @@ function attemptRecord(input: {
     parentRecordId: input.runId,
     caseId: input.caseId,
     product: input.productPackage.displayName,
+    productVendorId: input.productPackage.vendorId,
     productPackageId: input.productPackage.packageId,
     adapterVersion: input.productPackage.adapterVersion,
     status: input.status,
@@ -282,6 +338,7 @@ function attemptRecord(input: {
     createdAt: MOCK_SCENARIO.fixedTime,
     lastSyncedAt: MOCK_SCENARIO.fixedTime,
     reportUrl: null,
+    auxiliaryReportUrls: null,
     artifactId: null,
     renderManifestId: null,
     scorecardId: null,
@@ -554,6 +611,7 @@ function sharedRunFields(caseId: string) {
     createdAt: MOCK_SCENARIO.fixedTime,
     lastSyncedAt: MOCK_SCENARIO.fixedTime,
     reportUrl: null,
+    auxiliaryReportUrls: null,
   };
 }
 
@@ -712,6 +770,7 @@ export function createBakeoffHarness({
         recordType: "bakeoff_job",
         parentRecordId: null,
         product: null,
+        productVendorId: null,
         productPackageId: null,
         adapterVersion: null,
         status: jobStatus,
@@ -723,13 +782,7 @@ export function createBakeoffHarness({
         blockReason: null,
         retryOfAttemptId: null,
         selectedRunIds: results.map(({ runId }) => runId),
-        protocolSnapshot: {
-          protocolId: "MOCK-query-default-cost-v1",
-          timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-          retryPolicy: "one_if_provably_not_submitted",
-          resultSelectionPolicy: "first_policy_compliant_artifact",
-          cancellationPolicy: "independent_vendor_runs_continue",
-        },
+        protocolSnapshot: MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
         deadlineAt: fixedTimestampAfter(VENDOR_GENERATION_TIMEOUT_MS),
         vendorGenerationMs: null,
         vendorReportedElapsedMs: null,
@@ -749,6 +802,7 @@ export function createBakeoffHarness({
           recordType: "vendor_run",
           parentRecordId: MOCK_SCENARIO.jobId,
           product: result.productPackage.displayName,
+          productVendorId: result.productPackage.vendorId,
           productPackageId: result.productPackage.packageId,
           adapterVersion: result.productPackage.adapterVersion,
           status: result.status,
@@ -817,17 +871,19 @@ export function createBakeoffHarness({
             artifact: result.artifact,
             renderManifest: result.renderManifest,
             scorecard: result.scorecard,
+            comparisonCompatibilityFingerprint:
+              comparisonCompatibilityFingerprint(result.scorecard),
           });
         }
       }
 
-      const successfulPackageIds = new Set(
-        successful.map(({ productPackage }) => productPackage.packageId),
+      const successfulVendorIds = new Set(
+        successful.map(({ productPackage }) => productPackage.vendorId),
       );
       const hasDefaultComparison =
-        successfulPackageIds.has("MOCK-wps-package-v1") &&
-        (successfulPackageIds.has("MOCK-qwen-package-v1") ||
-          successfulPackageIds.has("MOCK-doubao-package-v1"));
+        successfulVendorIds.has("wps") &&
+        (successfulVendorIds.has("qwen") ||
+          successfulVendorIds.has("doubao"));
       let report;
       if (hasDefaultComparison) {
         report = (

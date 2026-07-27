@@ -79,6 +79,7 @@ export interface RunRecord {
   readonly parentRecordId: string | null;
   readonly caseId: string;
   readonly product: string | null;
+  readonly productVendorId: string | null;
   readonly productPackageId: string | null;
   readonly adapterVersion: string | null;
   readonly status: RunStatus;
@@ -104,6 +105,7 @@ export interface RunRecord {
   readonly createdAt: string;
   readonly lastSyncedAt: string;
   readonly reportUrl: string | null;
+  readonly auxiliaryReportUrls: readonly string[] | null;
   readonly artifactId: string | null;
   readonly renderManifestId: string | null;
   readonly scorecardId: string | null;
@@ -302,6 +304,20 @@ export interface ArtifactScoreTableRecord {
   readonly artifact: Artifact;
   readonly renderManifest: RenderManifest;
   readonly scorecard: ArtifactScorecard;
+  readonly comparisonCompatibilityFingerprint: ComparisonCompatibilityFingerprint;
+}
+
+export interface ComparisonCompatibilityFingerprint {
+  readonly caseManifestHash: `sha256:${string}`;
+  readonly caseInputHash: `sha256:${string}`;
+  readonly track: EvaluationCaseRecord["track"];
+  readonly protocolHash: `sha256:${string}`;
+  readonly rubricVersion: ArtifactScorecard["rubricVersion"];
+  readonly scenarioWeightProfile: null;
+  readonly judgeConfigurationHash: `sha256:${string}`;
+  readonly renderPipelineHash: `sha256:${string}`;
+  readonly designJudgmentSurfaceHash: `sha256:${string}`;
+  readonly referencePackHash: `sha256:${string}` | null;
 }
 
 export interface CapturedArtifactTableRecord {
@@ -332,6 +348,8 @@ export interface ComparisonRecord {
 export interface ComparisonDimensionResult {
   readonly dimension: ScoreDimension;
   readonly assessmentStatus: DimensionAssessmentStatus;
+  readonly leftAssessmentStatus: DimensionAssessmentStatus;
+  readonly rightAssessmentStatus: DimensionAssessmentStatus;
   readonly leftValue: ScoreValue | null;
   readonly rightValue: ScoreValue | null;
   readonly difference: number | null;
@@ -347,7 +365,9 @@ export interface DynamicComparisonView extends ComparisonRecord {
 
 export interface ComparisonPairSelection {
   readonly leftRunId: string;
+  readonly leftScorecardId?: string;
   readonly rightRunId: string;
+  readonly rightScorecardId?: string;
 }
 
 export interface PageEvidenceLink {

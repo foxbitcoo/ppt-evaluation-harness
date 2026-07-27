@@ -9,7 +9,29 @@ import {
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   createComparisonReportService,
+  type ArtifactScoreTableRecord,
+  type ComparisonReportSource,
+  type FeishuProjectionPort,
+  type ProductAdapterPort,
 } from "../src/index.ts";
+
+function withComparisonSourceOverride(
+  feishu: InMemoryFeishuProjection,
+  transform: (
+    source: ComparisonReportSource,
+  ) => ComparisonReportSource,
+): FeishuProjectionPort {
+  return new Proxy(feishu, {
+    get(target, property, receiver) {
+      if (property === "loadComparisonReportSource") {
+        return async (jobId: string) =>
+          transform(await target.loadComparisonReportSource(jobId));
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
 
 test("an already-scored compatible Qwen–Doubao pair can be selected without rescoring", async () => {
   const feishu = new InMemoryFeishuProjection();
@@ -27,6 +49,10 @@ test("an already-scored compatible Qwen–Doubao pair can be selected without re
   const scorecardIdsBefore = feishu
     .snapshot()
     .artifactScoreTable.map(({ scorecard }) => scorecard.scorecardId);
+  const primaryReportUrl = feishu
+    .snapshot()
+    .runRecordTable.find(({ recordType }) => recordType === "bakeoff_job")
+    ?.reportUrl;
 
   const report = await createComparisonReportService({
     feishu,
@@ -62,6 +88,11 @@ test("an already-scored compatible Qwen–Doubao pair can be selected without re
       .artifactScoreTable.map(({ scorecard }) => scorecard.scorecardId),
     scorecardIdsBefore,
   );
+  const parentJob = feishu
+    .snapshot()
+    .runRecordTable.find(({ recordType }) => recordType === "bakeoff_job");
+  assert.equal(parentJob?.reportUrl, primaryReportUrl);
+  assert.deepEqual(parentJob?.auxiliaryReportUrls, [report.report.url]);
 });
 
 test("the report view defaults to WPS–Qwen and WPS–Doubao without making WPS a stored baseline", async () => {
@@ -200,6 +231,8 @@ test("dynamic comparison preserves NOT_ASSESSABLE instead of inventing factual s
   assert.deepEqual(factual, {
     dimension: "factual_accuracy_and_content_quality",
     assessmentStatus: "NOT_ASSESSABLE",
+    leftAssessmentStatus: "NOT_ASSESSABLE",
+    rightAssessmentStatus: "NOT_ASSESSABLE",
     leftValue: null,
     rightValue: null,
     difference: null,
@@ -213,4 +246,310 @@ test("dynamic comparison preserves NOT_ASSESSABLE instead of inventing factual s
     ),
   );
   assert.match(outcome.report.markdown, /NOT_ASSESSABLE/);
+});
+
+test("one-sided NOT_ASSESSABLE preserves the assessed side while suppressing only the difference", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    artifactScores: source.artifactScores.map((record) =>
+      record.runId !== "MOCK-run-doubao-volcano-v1"
+        ? record
+        : {
+            ...record,
+            scorecard: {
+              ...record.scorecard,
+              dimensions: record.scorecard.dimensions.map((dimension) =>
+                dimension.dimension !==
+                "factual_accuracy_and_content_quality"
+                  ? dimension
+                  : {
+                      ...dimension,
+                      assessmentStatus: "NOT_ASSESSABLE" as const,
+                      value: null,
+                      deductionBasis:
+                        "not_assessable_no_reference_pack" as const,
+                      evidencePages: [],
+                      rationale: "该侧没有可用事实判断证据。",
+                    },
+              ),
+            },
+          },
+    ),
+  }));
+
+  const outcome = await createComparisonReportService({
+    feishu: projection,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        rightRunId: "MOCK-run-doubao-volcano-v1",
+      },
+    ],
+  });
+  const factual = outcome.comparisons[0]?.dimensions.find(
+    ({ dimension }) =>
+      dimension === "factual_accuracy_and_content_quality",
+  );
+
+  assert.equal(factual?.leftAssessmentStatus, "ASSESSED");
+  assert.equal(factual?.leftValue, 5);
+  assert.deepEqual(factual?.leftEvidencePages, [3, 5, 7, 9, 13]);
+  assert.equal(factual?.rightAssessmentStatus, "NOT_ASSESSABLE");
+  assert.equal(factual?.rightValue, null);
+  assert.deepEqual(factual?.rightEvidencePages, []);
+  assert.equal(factual?.difference, null);
+});
+
+test("a partial default report keeps every selected vendor delivery outcome beside scored comparisons", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter({ scenario: "quota_blocked" }),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.equal(outcome.job.status, "partial");
+  assert.match(outcome.report.markdown, /Mock WPS AI PPT/);
+  assert.match(outcome.report.markdown, /Mock Qwen PPT/);
+  assert.match(outcome.report.markdown, /Mock Doubao PPT/);
+  assert.match(outcome.report.markdown, /partial/);
+  assert.match(outcome.report.markdown, /quota/);
+  assert.deepEqual(outcome.report.runIds, [
+    "MOCK-run-wps-volcano-v1",
+    "MOCK-run-qwen-volcano-v1",
+    "MOCK-run-doubao-volcano-v1",
+  ]);
+});
+
+test("default WPS-centered views follow stable vendor identity across package versions", async () => {
+  const versionedAdapter = (
+    adapter:
+      | MockWpsProductAdapter
+      | MockQwenProductAdapter
+      | MockDoubaoProductAdapter,
+    packageId: string,
+  ): ProductAdapterPort => ({
+    productPackage: {
+      ...adapter.productPackage,
+      packageId,
+    },
+    execute: (command) => adapter.execute(command),
+  });
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      versionedAdapter(
+        new MockWpsProductAdapter(),
+        "MOCK-wps-package-v2",
+      ),
+      versionedAdapter(
+        new MockQwenProductAdapter(),
+        "MOCK-qwen-package-v3",
+      ),
+      versionedAdapter(
+        new MockDoubaoProductAdapter(),
+        "MOCK-doubao-package-v4",
+      ),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  const report = await createComparisonReportService({
+    feishu,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+  });
+
+  assert.deepEqual(
+    report.comparisons.map(
+      ({ leftProduct, rightProduct }) => [
+        leftProduct,
+        rightProduct,
+      ],
+    ),
+    [
+      ["Mock WPS AI PPT", "Mock Qwen PPT"],
+      ["Mock WPS AI PPT", "Mock Doubao PPT"],
+    ],
+  );
+});
+
+test("both-side static evidence identifies the product that produced each rendered page", async () => {
+  const outcome = await createBakeoffHarness({
+    feishu: new InMemoryFeishuProjection(),
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  const [wps, qwen, doubao] = outcome.renderManifests;
+  assert.match(wps?.slides[0]?.content ?? "", /MOCK WPS AI PPT/);
+  assert.match(qwen?.slides[0]?.content ?? "", /MOCK Qwen PPT/);
+  assert.doesNotMatch(qwen?.slides[0]?.content ?? "", /MOCK WPS AI PPT/);
+  assert.match(doubao?.slides[0]?.content ?? "", /MOCK Doubao PPT/);
+  assert.doesNotMatch(
+    doubao?.slides[0]?.content ?? "",
+    /MOCK WPS AI PPT/,
+  );
+});
+
+test("comparison rejects mismatched persisted compatibility fingerprints before writing projections", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  type ScoreWithFingerprint = ArtifactScoreTableRecord & {
+    readonly comparisonCompatibilityFingerprint: {
+      readonly referencePackHash: `sha256:${string}` | null;
+    };
+  };
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    artifactScores: source.artifactScores.map((record) =>
+      record.runId !== "MOCK-run-doubao-volcano-v1"
+        ? record
+        : {
+            ...record,
+            comparisonCompatibilityFingerprint: {
+              ...(record as ScoreWithFingerprint)
+                .comparisonCompatibilityFingerprint,
+              referencePackHash:
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            },
+          },
+    ),
+  }));
+  const before = feishu.snapshot();
+
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /compatible|compatibility fingerprint/i,
+  );
+  const after = feishu.snapshot();
+  assert.equal(
+    after.productGapCardTable.length,
+    before.productGapCardTable.length,
+  );
+  assert.equal(after.reports.length, before.reports.length);
+});
+
+test("append-only reevaluations require explicit scorecard selection and bind comparison identity to it", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const qwenReevaluationId =
+    "MOCK-scorecard-qwen-volcano-v1-reevaluation";
+  const projection = withComparisonSourceOverride(feishu, (source) => {
+    const qwen = source.artifactScores.find(
+      ({ runId }) => runId === "MOCK-run-qwen-volcano-v1",
+    );
+    assert.ok(qwen);
+    return {
+      ...source,
+      artifactScores: [
+        ...source.artifactScores,
+        {
+          ...qwen,
+          recordId: qwenReevaluationId,
+          scorecard: {
+            ...qwen.scorecard,
+            scorecardId: qwenReevaluationId,
+          },
+        },
+      ],
+    };
+  });
+
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /multiple.*scorecard|explicit.*scorecard/i,
+  );
+
+  const outcome = await createComparisonReportService({
+    feishu: projection,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        leftScorecardId: qwenReevaluationId,
+        rightRunId: "MOCK-run-doubao-volcano-v1",
+        rightScorecardId: "MOCK-scorecard-doubao-volcano-v1",
+      },
+    ],
+  });
+
+  assert.equal(
+    outcome.comparisons[0]?.leftScorecardId,
+    qwenReevaluationId,
+  );
+  assert.match(
+    outcome.comparisons[0]?.comparisonId ?? "",
+    /^comparison-[a-f0-9]{16}$/,
+  );
 });

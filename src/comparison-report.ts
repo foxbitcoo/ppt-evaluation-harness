@@ -5,6 +5,7 @@ import type {
   ComparisonPairSelection,
   ComparisonReportOutcome,
   CauseHypothesis,
+  CapturedArtifactTableRecord,
   DimensionScore,
   DynamicComparisonView,
   FeishuReportDraft,
@@ -49,9 +50,21 @@ function scoredRunById(
   runId: string,
   vendorRuns: readonly RunRecord[],
   scores: readonly ArtifactScoreTableRecord[],
+  scorecardId?: string,
 ): ScoredRun {
   const run = vendorRuns.find(({ recordId }) => recordId === runId);
-  const score = scores.find((record) => record.runId === runId);
+  const candidates = scores.filter((record) => record.runId === runId);
+  if (scorecardId === undefined && candidates.length > 1) {
+    throw new Error(
+      `Run ${runId} has multiple Scorecards; select an explicit Scorecard ID`,
+    );
+  }
+  const score =
+    scorecardId === undefined
+      ? candidates[0]
+      : candidates.find(
+          (record) => record.scorecard.scorecardId === scorecardId,
+        );
   if (run === undefined || score === undefined || run.product === null) {
     throw new Error(`Scored vendor Run not found: ${runId}`);
   }
@@ -101,8 +114,18 @@ function comparePair(
   if (pair.leftRunId === pair.rightRunId) {
     throw new Error("A Comparison View requires two distinct Runs");
   }
-  const left = scoredRunById(pair.leftRunId, vendorRuns, scores);
-  const right = scoredRunById(pair.rightRunId, vendorRuns, scores);
+  const left = scoredRunById(
+    pair.leftRunId,
+    vendorRuns,
+    scores,
+    pair.leftScorecardId,
+  );
+  const right = scoredRunById(
+    pair.rightRunId,
+    vendorRuns,
+    scores,
+    pair.rightScorecardId,
+  );
   if (
     left.score.jobId !== jobId ||
     right.score.jobId !== jobId ||
@@ -112,6 +135,8 @@ function comparePair(
     left.score.renderManifest.renderer !==
       right.score.renderManifest.renderer ||
     left.score.environmentOrigin !== right.score.environmentOrigin ||
+    JSON.stringify(left.score.comparisonCompatibilityFingerprint) !==
+      JSON.stringify(right.score.comparisonCompatibilityFingerprint) ||
     !compatibleJudgeConfiguration(left.score, right.score)
   ) {
     throw new Error("Selected Runs are not compatible for direct comparison");
@@ -125,18 +150,26 @@ function comparePair(
     if (rightDimension === undefined) {
       throw new Error("Selected Scorecards use incompatible dimensions");
     }
-    const assessable =
+    const leftAssessable =
       leftDimension.assessmentStatus === "ASSESSED" &&
+      leftDimension.value !== null;
+    const rightAssessable =
       rightDimension.assessmentStatus === "ASSESSED" &&
-      leftDimension.value !== null &&
       rightDimension.value !== null;
+    const assessable = leftAssessable && rightAssessable;
     return {
       dimension: leftDimension.dimension,
       assessmentStatus: assessable
         ? ("ASSESSED" as const)
         : ("NOT_ASSESSABLE" as const),
-      leftValue: assessable ? leftDimension.value : null,
-      rightValue: assessable ? rightDimension.value : null,
+      leftAssessmentStatus: leftAssessable
+        ? ("ASSESSED" as const)
+        : ("NOT_ASSESSABLE" as const),
+      rightAssessmentStatus: rightAssessable
+        ? ("ASSESSED" as const)
+        : ("NOT_ASSESSABLE" as const),
+      leftValue: leftAssessable ? leftDimension.value : null,
+      rightValue: rightAssessable ? rightDimension.value : null,
       difference: assessable
         ? leftDimension.value - rightDimension.value
         : null,
@@ -158,9 +191,29 @@ function comparePair(
       "MOCK-comparison-qwen-doubao-volcano-v1",
     ],
   ]);
+  const knownComparisonId = knownComparisonIds.get(
+    `${pair.leftRunId}|${pair.rightRunId}`,
+  );
+  const knownScorecardPair =
+    (pair.leftRunId === "MOCK-run-wps-volcano-v1"
+      ? "MOCK-scorecard-wps-volcano-v1"
+      : pair.leftRunId === "MOCK-run-qwen-volcano-v1"
+        ? "MOCK-scorecard-qwen-volcano-v1"
+        : null) === left.score.scorecard.scorecardId &&
+    (pair.rightRunId === "MOCK-run-qwen-volcano-v1"
+      ? "MOCK-scorecard-qwen-volcano-v1"
+      : pair.rightRunId === "MOCK-run-doubao-volcano-v1"
+        ? "MOCK-scorecard-doubao-volcano-v1"
+        : null) === right.score.scorecard.scorecardId;
   const comparisonId =
-    knownComparisonIds.get(`${pair.leftRunId}|${pair.rightRunId}`) ??
-    `comparison-${shortHash([pair.leftRunId, pair.rightRunId])}`;
+    knownComparisonId !== undefined && knownScorecardPair
+      ? knownComparisonId
+      : `comparison-${shortHash([
+          pair.leftRunId,
+          left.score.scorecard.scorecardId,
+          pair.rightRunId,
+          right.score.scorecard.scorecardId,
+        ])}`;
   return {
     recordType: "comparison",
     comparisonId,
@@ -181,16 +234,15 @@ function comparePair(
 function reportDraft(
   feishu: FeishuProjectionPort,
   job: RunRecord,
+  vendorRuns: readonly RunRecord[],
+  capturedArtifacts: readonly CapturedArtifactTableRecord[],
   comparisons: readonly DynamicComparisonView[],
   gapCards: readonly ProductGapCardRecord[],
   vendorSummaries: readonly VendorComparisonSummary[],
   scores: readonly ArtifactScoreTableRecord[],
 ): FeishuReportDraft {
   const reportKey = shortHash(
-    comparisons.map(({ leftRunId, rightRunId }) => [
-      leftRunId,
-      rightRunId,
-    ]),
+    comparisons.map(({ comparisonId }) => comparisonId),
   );
   const comparisonSections = comparisons
     .map(
@@ -208,10 +260,12 @@ ${comparison.dimensions
       rightEvidencePages,
     }) => {
       const leftScore = scores.find(
-        ({ runId }) => runId === comparison.leftRunId,
+        ({ scorecard }) =>
+          scorecard.scorecardId === comparison.leftScorecardId,
       );
       const rightScore = scores.find(
-        ({ runId }) => runId === comparison.rightRunId,
+        ({ scorecard }) =>
+          scorecard.scorecardId === comparison.rightScorecardId,
       );
       const evidence =
         leftScore === undefined || rightScore === undefined
@@ -233,6 +287,18 @@ ${comparison.dimensions
   .join("\n")}`,
     )
     .join("\n\n");
+  const deliveryRows = vendorRuns
+    .map((run) => {
+      const artifact = capturedArtifacts.find(
+        (record) => record.runId === run.recordId,
+      );
+      return `| ${run.product ?? "—"} | \`${run.recordId}\` | \`${
+        run.status
+      }\` | \`${
+        run.terminalReason ?? run.waitingReason ?? "—"
+      }\` | ${artifact?.artifactId ?? "无"} |`;
+    })
+    .join("\n");
   const gapCardSections =
     gapCards.length === 0
       ? "本次所选维度未形成可评估的分差卡片。"
@@ -273,31 +339,25 @@ ${comparison.dimensions
         ? "MOCK｜Case Sample 动态 A/B 精简报告"
         : "Case Sample｜动态 A/B 精简报告",
     jobId: job.jobId,
-    runIds: [
-      ...new Set(
-        comparisons.flatMap(({ leftRunId, rightRunId }) => [
-          leftRunId,
-          rightRunId,
-        ]),
-      ),
-    ],
-    artifactIds: [
-      ...new Set(
-        comparisons.flatMap(({ leftRunId, rightRunId }) =>
-          scores
-            .filter(
-              ({ runId }) => runId === leftRunId || runId === rightRunId,
-            )
-            .map(({ artifactId }) => artifactId),
-        ),
-      ),
-    ],
+    runIds:
+      job.selectedRunIds === null
+        ? vendorRuns.map(({ recordId }) => recordId)
+        : [...job.selectedRunIds],
+    artifactIds: capturedArtifacts.map(({ artifactId }) => artifactId),
     claimLevel: "case_sample",
     markdown: `# ${
       job.provenance === "MOCK" ? "MOCK｜" : ""
     }Case Sample 动态 A/B 精简报告
 
 > **单次 Case Sample：结论仅适用于当前已捕获的静态自读 PPT，不外推到其他场景。**
+
+## 全部所选产品交付结果
+
+- Bakeoff Job 状态：\`${job.status}\`
+
+| 产品 | Run | 状态 | 状态原因 | Artifact |
+|---|---|---|---|---|
+${deliveryRows}
 
 ${comparisonSections}
 
@@ -398,17 +458,6 @@ function findingMarkdown(findings: readonly VendorFinding[]): string {
         .join("；");
 }
 
-function scoreForRun(
-  scores: readonly ArtifactScoreTableRecord[],
-  runId: string,
-): ArtifactScoreTableRecord {
-  const score = scores.find((record) => record.runId === runId);
-  if (score === undefined) {
-    throw new Error(`Artifact Scorecard not found for Run: ${runId}`);
-  }
-  return score;
-}
-
 function evidenceForDimension(
   feishu: FeishuProjectionPort,
   scoredRun: ScoredRun,
@@ -470,11 +519,13 @@ function createGapCards(
         comparison.leftRunId,
         vendorRuns,
         scores,
+        comparison.leftScorecardId,
       );
       const right = scoredRunById(
         comparison.rightRunId,
         vendorRuns,
         scores,
+        comparison.rightScorecardId,
       );
       const leftEvidence = evidenceForDimension(
         feishu,
@@ -564,9 +615,19 @@ function createVendorSummaries(
   };
   const linksFor = (
     runId: string,
+    scorecardId: string,
     dimension: ScoreDimension,
   ): readonly PageEvidenceLink[] => {
-    const score = scoreForRun(scores, runId);
+    const score = scores.find(
+      (record) =>
+        record.runId === runId &&
+        record.scorecard.scorecardId === scorecardId,
+    );
+    if (score === undefined) {
+      throw new Error(
+        `Artifact Scorecard not found for selection: ${scorecardId}`,
+      );
+    }
     const assessment = score.scorecard.dimensions.find(
       (candidate) => candidate.dimension === dimension,
     );
@@ -599,6 +660,7 @@ function createVendorSummaries(
           difference: Math.abs(dimension.difference),
           evidenceLinks: linksFor(
             comparison.leftRunId,
+            comparison.leftScorecardId,
             dimension.dimension,
           ),
         },
@@ -613,6 +675,7 @@ function createVendorSummaries(
           difference: Math.abs(dimension.difference),
           evidenceLinks: linksFor(
             comparison.rightRunId,
+            comparison.rightScorecardId,
             dimension.dimension,
           ),
         },
@@ -628,7 +691,10 @@ function createVendorSummaries(
     ),
   ];
   return selectedRunIds.map((runId) => {
-    const run = scoredRunById(runId, vendorRuns, scores).run;
+    const run = vendorRuns.find(({ recordId }) => recordId === runId);
+    if (run === undefined || run.product === null) {
+      throw new Error(`Vendor Run not found for summary: ${runId}`);
+    }
     const summary = summaries.get(runId) ?? {
       product: run.product,
       strengths: [],
@@ -656,18 +722,18 @@ function defaultViewPairs(
   scores: readonly ArtifactScoreTableRecord[],
 ): readonly ComparisonPairSelection[] {
   const scoredRunIds = new Set(scores.map(({ runId }) => runId));
-  const runIdForPackage = (packageId: string): string | null =>
+  const runIdForVendor = (vendorId: string): string | null =>
     vendorRuns.find(
       (run) =>
-        run.productPackageId === packageId &&
+        run.productVendorId === vendorId &&
         scoredRunIds.has(run.recordId),
     )?.recordId ??
     null;
-  const wpsRunId = runIdForPackage("MOCK-wps-package-v1");
+  const wpsRunId = runIdForVendor("wps");
   if (wpsRunId === null) return [];
   return [
-    runIdForPackage("MOCK-qwen-package-v1"),
-    runIdForPackage("MOCK-doubao-package-v1"),
+    runIdForVendor("qwen"),
+    runIdForVendor("doubao"),
   ].flatMap((rightRunId) =>
     rightRunId === null ? [] : [{ leftRunId: wpsRunId, rightRunId }],
   );
@@ -715,13 +781,19 @@ export function createComparisonReportService({
         reportDraft(
           feishu,
           source.job,
+          source.vendorRuns,
+          source.capturedArtifacts,
           comparisons,
           gapCards,
           vendorSummaries,
           source.artifactScores,
         ),
       );
-      await feishu.linkReportToBakeoffJob(command.jobId, report.url);
+      await feishu.linkReportToBakeoffJob(
+        command.jobId,
+        report.url,
+        command.pairs === undefined ? "primary" : "auxiliary",
+      );
       return {
         comparisons,
         gapCards,

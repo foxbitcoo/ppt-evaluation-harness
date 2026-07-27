@@ -62,6 +62,7 @@ export type {
   BlockReason,
   ComparisonRecord,
   ComparisonDimensionResult,
+  ComparisonCompatibilityFingerprint,
   ComparisonPairSelection,
   ComparisonReportOutcome,
   CauseHypothesis,

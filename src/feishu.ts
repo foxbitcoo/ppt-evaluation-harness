@@ -20,7 +20,11 @@ export interface EvaluationCaseTablePort {
 
 export interface RunRecordTablePort {
   appendRunRecord(record: RunRecord): Promise<void>;
-  linkReportToBakeoffJob(jobId: string, reportUrl: string): Promise<void>;
+  linkReportToBakeoffJob(
+    jobId: string,
+    reportUrl: string,
+    role?: "primary" | "auxiliary",
+  ): Promise<void>;
 }
 
 export interface ArtifactScoreTablePort {
@@ -46,6 +50,7 @@ export interface ReportDocumentPort {
 export interface ComparisonReportSource {
   readonly job: RunRecord;
   readonly vendorRuns: readonly RunRecord[];
+  readonly capturedArtifacts: readonly CapturedArtifactTableRecord[];
   readonly artifactScores: readonly ArtifactScoreTableRecord[];
 }
 
@@ -120,6 +125,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async linkReportToBakeoffJob(
     jobId: string,
     reportUrl: string,
+    role: "primary" | "auxiliary" = "primary",
   ): Promise<void> {
     const parentIndex = this.#runRecordTable.findIndex(
       (record) => record.recordType === "bakeoff_job" && record.jobId === jobId,
@@ -130,7 +136,16 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     this.#runRecordTable[parentIndex] = {
       ...parentRecord,
-      reportUrl,
+      ...(role === "primary"
+        ? { reportUrl }
+        : {
+            auxiliaryReportUrls: [
+              ...new Set([
+                ...(parentRecord.auxiliaryReportUrls ?? []),
+                reportUrl,
+              ]),
+            ],
+          }),
     };
   }
 
@@ -255,6 +270,12 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
             record.recordType === "vendor_run" && record.jobId === jobId,
         )
         .map(cloneRun),
+      capturedArtifacts: this.#capturedArtifactTable
+        .filter((record) => record.jobId === jobId)
+        .map((record) => ({
+          ...structuredClone(record),
+          environmentOrigin: record.environmentOrigin,
+        })),
       artifactScores: this.#artifactScoreTable
         .filter((record) => record.jobId === jobId)
         .map((record) => ({

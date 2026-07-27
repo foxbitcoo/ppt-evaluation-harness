@@ -264,11 +264,25 @@ function readStoredZip(content: Uint8Array): ReadonlyMap<string, Uint8Array> {
   return entries;
 }
 
-function slidesFromArtifact(artifact: Artifact): readonly MockSlideFixture[] {
+function presentationFromArtifact(artifact: Artifact): {
+  readonly application: string;
+  readonly slides: readonly MockSlideFixture[];
+} {
   if (sha256(artifact.content) !== artifact.contentHash) {
     throw new Error("Artifact content hash mismatch");
   }
   const entries = readStoredZip(artifact.content);
+  const applicationXml = entries.get("docProps/app.xml");
+  const applicationMatch =
+    applicationXml === undefined
+      ? null
+      : /<Application>([\s\S]*?)<\/Application>/.exec(
+          textDecoder.decode(applicationXml),
+        );
+  const application = unescapeXml(applicationMatch?.[1] ?? "");
+  if (application.length === 0) {
+    throw new Error("Artifact has no verifiable product application label");
+  }
   const slideEntries = [...entries.entries()]
     .map(([name, content]) => {
       const match = /^ppt\/slides\/slide(\d+)\.xml$/.exec(name);
@@ -289,7 +303,7 @@ function slidesFromArtifact(artifact: Artifact): readonly MockSlideFixture[] {
       `Artifact page count mismatch: declared ${artifact.pageCount}, found ${slideEntries.length}`,
     );
   }
-  return slideEntries.map(({ pageNumber, content }, index) => {
+  const slides = slideEntries.map(({ pageNumber, content }, index) => {
     if (pageNumber !== index + 1) {
       throw new Error("Artifact slide sequence is not contiguous");
     }
@@ -304,22 +318,29 @@ function slidesFromArtifact(artifact: Artifact): readonly MockSlideFixture[] {
     }
     return { title, body };
   });
+  return { application, slides };
 }
 
 function renderSlide(
   slide: MockSlideFixture,
   pageNumber: number,
+  application: string,
 ): StaticSlideRender {
+  const vendorSlug = application.includes("Qwen")
+    ? "qwen"
+    : application.includes("Doubao")
+      ? "doubao"
+      : "wps";
   const content = `<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-label="MOCK page ${pageNumber}">
   <rect width="1600" height="900" fill="#211314"/>
   <rect x="0" y="0" width="30" height="900" fill="#ff6b35"/>
-  <text x="90" y="100" fill="#ffb199" font-family="sans-serif" font-size="28">MOCK WPS AI PPT · ${pageNumber}/16</text>
+  <text x="90" y="100" fill="#ffb199" font-family="sans-serif" font-size="28">${escapeXml(application)} · ${pageNumber}/16</text>
   <text x="90" y="320" fill="#ffffff" font-family="sans-serif" font-size="64">${escapeXml(slide.title)}</text>
   <text x="90" y="430" fill="#f4ded5" font-family="sans-serif" font-size="30">${escapeXml(slide.body)}</text>
 </svg>`;
   return {
     pageNumber,
-    filename: `MOCK-wps-volcano-page-${String(pageNumber).padStart(2, "0")}.svg`,
+    filename: `MOCK-${vendorSlug}-volcano-page-${String(pageNumber).padStart(2, "0")}.svg`,
     mimeType: "image/svg+xml",
     contentHash: sha256(content),
     content,
@@ -537,9 +558,9 @@ export function renderStaticArtifact(
   artifact: Artifact,
   renderManifestId: string = MOCK_SCENARIO.renderManifestId,
 ): RenderManifest {
-  const slideFixtures = slidesFromArtifact(artifact);
-  const slides = slideFixtures.map((slide, index) =>
-    renderSlide(slide, index + 1),
+  const presentation = presentationFromArtifact(artifact);
+  const slides = presentation.slides.map((slide, index) =>
+    renderSlide(slide, index + 1, presentation.application),
   );
   const manifestPayload = JSON.stringify({
     artifactHash: artifact.contentHash,
@@ -564,6 +585,7 @@ export function renderStaticArtifact(
 export class MockWpsProductAdapter implements ProductAdapterPort {
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
     packageId: "MOCK-wps-package-v1",
+    vendorId: "wps",
     displayName: "Mock WPS AI PPT",
     adapterVersion: "mock-wps@1",
     provenance: "MOCK",
@@ -587,6 +609,7 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
     packageId: "MOCK-qwen-package-v1",
+    vendorId: "qwen",
     displayName: "Mock Qwen PPT",
     adapterVersion: "mock-qwen@1",
     provenance: "MOCK",
@@ -620,6 +643,7 @@ export class MockDoubaoProductAdapter implements ProductAdapterPort {
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
     packageId: "MOCK-doubao-package-v1",
+    vendorId: "doubao",
     displayName: "Mock Doubao PPT",
     adapterVersion: "mock-doubao@1",
     provenance: "MOCK",
