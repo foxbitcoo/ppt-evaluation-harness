@@ -32,6 +32,7 @@ export type SubmissionEvidence = "not_submitted" | "submitted" | "unknown";
 
 export interface BakeoffProtocolSnapshot {
   readonly protocolId: string;
+  readonly referencePackMode: "automatic" | "force" | "off";
   readonly timeoutMs: number;
   readonly retryPolicy: "one_if_provably_not_submitted";
   readonly resultSelectionPolicy: "first_policy_compliant_artifact";

@@ -14,6 +14,7 @@ import {
   type ComparisonReportSource,
   type FeishuProjectionPort,
   type ProductAdapterPort,
+  type ReferencePackGeneratorPort,
 } from "../src/index.ts";
 
 function withComparisonSourceOverride(
@@ -764,6 +765,44 @@ test("an in-flight Bakeoff uses one frozen normalized command snapshot", async (
       null,
     );
   }
+});
+
+test("a settled Bakeoff rejects a mismatched Reference Pack mode", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const adapters: readonly ProductAdapterPort[] = [
+    new MockWpsProductAdapter(),
+    new MockQwenProductAdapter(),
+    new MockDoubaoProductAdapter(),
+  ];
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: adapters,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+    referencePackMode: "off",
+  });
+  let generatorCalls = 0;
+  const noPackGenerator: ReferencePackGeneratorPort = {
+    generate() {
+      generatorCalls += 1;
+      return null;
+    },
+  };
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: adapters,
+      referencePackGenerator: noPackGenerator,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+      referencePackMode: "force",
+    }),
+    /identity conflict|protocol.*mismatch/i,
+  );
+  assert.equal(generatorCalls, 0);
 });
 
 test("compatibility fingerprint equality is independent of object key insertion order", async () => {

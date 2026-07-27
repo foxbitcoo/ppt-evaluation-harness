@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import type {
   Artifact,
@@ -54,11 +55,26 @@ export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 const MOCK_BAKEOFF_PROTOCOL_SNAPSHOT: BakeoffProtocolSnapshot =
   Object.freeze({
     protocolId: "MOCK-query-default-cost-v1",
+    referencePackMode: "automatic",
     timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
     retryPolicy: "one_if_provably_not_submitted",
     resultSelectionPolicy: "first_policy_compliant_artifact",
     cancellationPolicy: "independent_vendor_runs_continue",
   });
+
+function bakeoffProtocolSnapshot(
+  referencePackMode: NonNullable<
+    StartBakeoffJobCommand["referencePackMode"]
+  >,
+): BakeoffProtocolSnapshot {
+  if (referencePackMode === "automatic") {
+    return MOCK_BAKEOFF_PROTOCOL_SNAPSHOT;
+  }
+  return Object.freeze({
+    ...MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+    referencePackMode,
+  });
+}
 
 export type AttemptDeadlineResult<T> =
   | {
@@ -192,7 +208,9 @@ function bakeoffJobIdentity(
     environment: command.environment,
     caseId: command.caseId,
     referencePackMode: command.referencePackMode ?? "automatic",
-    protocol: MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+    protocol: bakeoffProtocolSnapshot(
+      command.referencePackMode ?? "automatic",
+    ),
     selections: selections.map(({ adapter, productPackage, runId }) => ({
       runId,
       adapter: dependencyIdentity(adapter),
@@ -300,6 +318,16 @@ function replayedBakeoffOutcome(
   ) {
     throw new Error(
       `Bakeoff Job identity conflict: ${source.job.recordId}`,
+    );
+  }
+  const expectedProtocol = bakeoffProtocolSnapshot(
+    command.referencePackMode ?? "automatic",
+  );
+  if (
+    !isDeepStrictEqual(source.job.protocolSnapshot, expectedProtocol)
+  ) {
+    throw new Error(
+      `Bakeoff Job protocol mismatch: ${source.job.recordId}`,
     );
   }
   assertEnvironmentOriginAllowed(
@@ -477,6 +505,7 @@ function sha256Json(value: unknown): `sha256:${string}` {
 
 function comparisonCompatibilityFingerprint(
   scorecard: ArtifactScorecard,
+  protocolSnapshot: BakeoffProtocolSnapshot,
 ) {
   const judge = scorecard.judgeLineage;
   return Object.freeze({
@@ -485,7 +514,7 @@ function comparisonCompatibilityFingerprint(
       vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
     }),
     track: VOLCANO_EVALUATION_CASE.track,
-    protocolHash: sha256Json(MOCK_BAKEOFF_PROTOCOL_SNAPSHOT),
+    protocolHash: sha256Json(protocolSnapshot),
     rubricVersion: scorecard.rubricVersion,
     scenarioWeightProfile: null,
     judgeConfigurationHash:
@@ -919,6 +948,9 @@ export function createBakeoffHarness({
         );
       }
 
+      const protocolSnapshot = bakeoffProtocolSnapshot(
+        command.referencePackMode ?? "automatic",
+      );
       const existingSource = await feishu.findComparisonReportSource(
         MOCK_SCENARIO.jobId,
       );
@@ -1038,7 +1070,7 @@ export function createBakeoffHarness({
         blockReason: null,
         retryOfAttemptId: null,
         selectedRunIds: results.map(({ runId }) => runId),
-        protocolSnapshot: MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+        protocolSnapshot,
         deadlineAt: fixedTimestampAfter(VENDOR_GENERATION_TIMEOUT_MS),
         vendorGenerationMs: null,
         vendorReportedElapsedMs: null,
@@ -1128,7 +1160,10 @@ export function createBakeoffHarness({
             renderManifest: result.renderManifest,
             scorecard: result.scorecard,
             comparisonCompatibilityFingerprint:
-              comparisonCompatibilityFingerprint(result.scorecard),
+              comparisonCompatibilityFingerprint(
+                result.scorecard,
+                protocolSnapshot,
+              ),
           });
         }
       }

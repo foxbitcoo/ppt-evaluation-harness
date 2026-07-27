@@ -897,6 +897,7 @@ test("the Job freezes its selected Runs and protocol while Attempts retain obser
   ]);
   assert.deepEqual(job?.protocolSnapshot, {
     protocolId: "MOCK-query-default-cost-v1",
+    referencePackMode: "automatic",
     timeoutMs: 1_800_000,
     retryPolicy: "one_if_provably_not_submitted",
     resultSelectionPolicy: "first_policy_compliant_artifact",
