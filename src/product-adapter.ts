@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 
-import type { Artifact, EvaluationCaseRecord } from "./domain.ts";
+import type {
+  Artifact,
+  EvaluationCaseRecord,
+  ObservableAttemptEvent,
+  RenderFidelity,
+  RenderManifest,
+  RenderOutcome,
+} from "./domain.ts";
 import type {
   BlockReason,
   SubmissionEvidence,
@@ -14,10 +21,53 @@ export interface ProductPackageSnapshot {
   readonly vendorId: "wps" | "qwen" | "doubao" | (string & {});
   readonly displayName: string;
   readonly adapterVersion: string;
-  readonly provenance: "MOCK" | "PRODUCTION";
+  readonly provenance:
+    | "MOCK"
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly egressDestination: EgressDestinationMetadata;
+  readonly experienceConfiguration?: ProductExperienceConfiguration;
 }
+
+export interface ProductExperienceConfiguration {
+  readonly productUrl: string;
+  readonly accountScope: "current_authenticated_account";
+  readonly accountObservationPolicy:
+    "observe_category_or_record_ui_unavailable";
+  readonly commercialPlanObservationPolicy:
+    "observe_plan_name_or_record_ui_unavailable";
+  readonly packageSelection:
+    "best_available_zero_incremental_cost";
+  readonly incrementalCost: 0;
+  readonly mode: "professional";
+  readonly networking: "enabled";
+  readonly pageCount: 16;
+}
+
+export type AccountCategoryObservation =
+  | {
+      readonly status: "observed";
+      readonly category: "personal" | "enterprise" | "education";
+      readonly evidenceId: `ev_${string}`;
+    }
+  | {
+      readonly status: "ui_unavailable";
+      readonly reason: string;
+      readonly evidenceId: `ev_${string}`;
+    };
+
+export type CommercialPlanObservation =
+  | {
+      readonly status: "observed";
+      readonly planName: string;
+      readonly evidenceId: `ev_${string}`;
+    }
+  | {
+      readonly status: "ui_unavailable";
+      readonly reason: string;
+      readonly evidenceId: `ev_${string}`;
+    };
 
 export interface ProductRunCommand {
   readonly jobId: string;
@@ -32,6 +82,57 @@ export interface ProductRunCommand {
 export interface ArtifactCandidate {
   readonly artifact: Artifact;
   readonly policyCompliant: boolean;
+  readonly renderManifest?: RenderManifest;
+  readonly safeRasterCandidate?: SafeRasterCandidate;
+  readonly productionExecutionEvidence?:
+    ProductionDriverExecutionEvidence;
+}
+
+export interface ProductionDriverExecutionEvidence {
+  readonly executionMode:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
+  readonly captureSource:
+    | "LIVE_BROWSER_AUTOMATION"
+    | "REAL_PROVIDER_CAPTURE";
+  readonly driverSessionId: `session_${string}`;
+  readonly vendorTaskId: `task_${string}`;
+  readonly taskStateVersion: string;
+  readonly driverVersion: string;
+  readonly adapterVersion: string;
+  readonly outcome: "captured";
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly traceHash: `sha256:${string}`;
+  readonly liveBridgeTranscriptHash?: `sha256:${string}`;
+}
+
+export interface SafeRasterCandidate {
+  readonly renderer: string;
+  readonly fontPack: string;
+  readonly resolution: string;
+  readonly colorProfile: string;
+  readonly renderOutcome: RenderOutcome;
+  readonly fidelity: RenderFidelity;
+  readonly slides: readonly {
+    readonly pageNumber: number;
+    readonly filename: string;
+    readonly mimeType: "image/png";
+    readonly content: Uint8Array;
+    readonly extractedText: string;
+  }[];
+  readonly contactSheet: {
+    readonly filename: string;
+    readonly mimeType: "image/png";
+    readonly content: Uint8Array;
+  };
+}
+
+export interface SafeRasterRendererPort {
+  readonly rendererId: string;
+  render(input: {
+    readonly artifact: Artifact;
+    readonly authorizationDecisionId: string;
+  }): Promise<SafeRasterCandidate>;
 }
 
 export interface ProductAttemptResult {
@@ -40,6 +141,63 @@ export interface ProductAttemptResult {
   readonly submissionEvidence: SubmissionEvidence;
   readonly elapsedMs: number;
   readonly artifactCandidates: readonly ArtifactCandidate[];
+  readonly observableEvents?: readonly ObservableAttemptEvent[];
+  readonly manualActions?: readonly string[];
+}
+
+export interface AttemptCheckpointPort {
+  readonly checkpointStoreId: string;
+  readonly durability?: "ephemeral" | "durable";
+  readonly recoveryReferencePrefix?: string;
+  append(event: ObservableAttemptEvent): Promise<void>;
+  readAttempt?(
+    attemptId: string,
+  ): Promise<readonly ObservableAttemptEvent[]>;
+}
+
+export class InMemoryAttemptCheckpointStore
+  implements AttemptCheckpointPort
+{
+  readonly checkpointStoreId: string;
+  readonly durability = "ephemeral" as const;
+  readonly recoveryReferencePrefix = "unavailable";
+  readonly #events: ObservableAttemptEvent[] = [];
+
+  constructor(
+    checkpointStoreId = "in-memory-attempt-checkpoints",
+  ) {
+    this.checkpointStoreId = checkpointStoreId;
+  }
+
+  async append(event: ObservableAttemptEvent): Promise<void> {
+    const existing = this.#events.find(
+      ({ eventId }) => eventId === event.eventId,
+    );
+    if (
+      existing !== undefined &&
+      JSON.stringify(existing) !== JSON.stringify(event)
+    ) {
+      throw new Error(`Attempt checkpoint identity conflict: ${event.eventId}`);
+    }
+    if (existing !== undefined) return;
+    this.#events.push(Object.freeze(structuredClone(event)));
+  }
+
+  async readAttempt(
+    attemptId: string,
+  ): Promise<readonly ObservableAttemptEvent[]> {
+    return Object.freeze(
+      this.#events
+        .filter((event) => event.attemptId === attemptId)
+        .map((event) => Object.freeze(structuredClone(event))),
+    );
+  }
+
+  snapshot(): readonly ObservableAttemptEvent[] {
+    return Object.freeze(
+      this.#events.map((event) => Object.freeze(structuredClone(event))),
+    );
+  }
 }
 
 export interface ProductAdapterImplementationPackage {
