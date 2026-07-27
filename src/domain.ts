@@ -126,6 +126,7 @@ export interface RunRecord {
   readonly specificationReference?: RunSpecificationReference | null;
   readonly artifactPackageManifest?: ArtifactPackageManifest | null;
   readonly egressAuthorizations?: readonly ApprovedEgressAuthorization[] | null;
+  readonly securityContextHash?: `sha256:${string}` | null;
 }
 
 export interface Artifact {

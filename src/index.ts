@@ -30,10 +30,12 @@ export {
 export {
   requireEgressAuthorization,
   SYSTEM_CLOCK,
+  InMemoryEgressAuthorizationAudit,
   type ApprovedEgressAuthorization,
   type DeniedEgressAuthorization,
   type EgressAuthorizationDecision,
   type EgressAuthorizationPort,
+  type EgressAuthorizationAuditPort,
   type EgressAuthorizationRequest,
   type EgressAuthorizationRequestInput,
   type ClockPort,
@@ -75,6 +77,7 @@ export {
   type RetentionServiceDependencies,
   type RetentionTombstone,
   type PayloadInventoryPort,
+  type PayloadProjectionScrubberPort,
   type TombstoneLedgerPort,
 } from "./retention.ts";
 export {

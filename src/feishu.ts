@@ -145,6 +145,8 @@ export interface FeishuProjectionPort
     ComparisonReportSourcePort {
   readonly targetEnvironment: "test" | "production";
   readonly egressDestination: EgressDestinationMetadata;
+  scrubPayloadsForJob(jobId: string): Promise<void>;
+  hasPayloadsForJob(jobId: string): Promise<boolean>;
 }
 
 export interface FeishuProjectionSnapshot {
@@ -876,5 +878,25 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       productGapCardTable: structuredClone(this.#productGapCardTable),
       reports: structuredClone(this.#reports),
     };
+  }
+
+  async scrubPayloadsForJob(jobId: string): Promise<void> {
+    for (let index = this.#capturedArtifactTable.length - 1; index >= 0; index -= 1) {
+      if (this.#capturedArtifactTable[index]?.jobId === jobId) {
+        this.#capturedArtifactTable.splice(index, 1);
+      }
+    }
+    for (let index = this.#artifactScoreTable.length - 1; index >= 0; index -= 1) {
+      if (this.#artifactScoreTable[index]?.jobId === jobId) {
+        this.#artifactScoreTable.splice(index, 1);
+      }
+    }
+  }
+
+  async hasPayloadsForJob(jobId: string): Promise<boolean> {
+    return (
+      this.#capturedArtifactTable.some((record) => record.jobId === jobId) ||
+      this.#artifactScoreTable.some((record) => record.jobId === jobId)
+    );
   }
 }

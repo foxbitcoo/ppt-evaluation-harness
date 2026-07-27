@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
   BakeoffProtocolSnapshot,
   EvaluationCaseRecord,
 } from "./domain.ts";
-import type { EgressAuthorizationPort } from "./egress-authorization.ts";
+import type {
+  ApprovedEgressAuthorization,
+  EgressAuthorizationPort,
+} from "./egress-authorization.ts";
 import { requireEgressAuthorization } from "./egress-authorization.ts";
 import type {
   ImmutableBlobStorePort,
@@ -63,11 +67,13 @@ export interface RunSpecificationBundle {
   readonly runnerCodeEvidence: {
     readonly specCommitSha: string;
     readonly entrypoint: "src/bakeoff.ts";
+    readonly contentHash: `sha256:${string}`;
   };
   readonly runnerImageEvidence: {
     readonly runtimeFamily: "node";
     readonly runtimeVersion: string;
-    readonly imageReference: "local-test-runtime";
+    readonly imageReference: string;
+    readonly contentHash: `sha256:${string}`;
   };
   readonly environmentEvidence: {
     readonly environmentOriginId: string;
@@ -88,6 +94,7 @@ export interface RunSpecificationReference {
   readonly key: string;
   readonly specCommitSha: string;
   readonly versionReferences: RunSpecificationVersionReferences;
+  readonly egressAuthorization: ApprovedEgressAuthorization;
 }
 
 export interface CaptureRunSpecificationCommand {
@@ -158,6 +165,13 @@ function snapshotHash(value: unknown): `sha256:${string}` {
   return sha256Bytes(canonicalJsonBytes(value));
 }
 
+const RUNNER_CODE_CONTENT_HASH = sha256Bytes(
+  readFileSync(new URL("./bakeoff.ts", import.meta.url)),
+);
+const RUNNER_EXECUTABLE_CONTENT_HASH = sha256Bytes(
+  readFileSync(process.execPath),
+);
+
 function expectedVersionReferences(
   bundle: Omit<RunSpecificationBundle, "versionReferences">,
 ): RunSpecificationVersionReferences {
@@ -175,8 +189,8 @@ function expectedVersionReferences(
     schemaSnapshotHash: snapshotHash(bundle.schemaSnapshot),
     rubricSnapshotHash: snapshotHash(bundle.rubricSnapshot),
     estimatorSnapshotHash: snapshotHash(bundle.estimatorSnapshot),
-    runnerCodeDigest: snapshotHash(bundle.runnerCodeEvidence),
-    runnerImageDigest: snapshotHash(bundle.runnerImageEvidence),
+    runnerCodeDigest: bundle.runnerCodeEvidence.contentHash,
+    runnerImageDigest: bundle.runnerImageEvidence.contentHash,
     environmentEvidenceHash: snapshotHash(bundle.environmentEvidence),
   });
 }
@@ -243,11 +257,13 @@ export function createRunSpecificationVault({
         runnerCodeEvidence: Object.freeze({
           specCommitSha: command.specCommitSha,
           entrypoint: "src/bakeoff.ts" as const,
+          contentHash: RUNNER_CODE_CONTENT_HASH,
         }),
         runnerImageEvidence: Object.freeze({
           runtimeFamily: "node" as const,
           runtimeVersion: process.version,
-          imageReference: "local-test-runtime" as const,
+          imageReference: process.execPath,
+          contentHash: RUNNER_EXECUTABLE_CONTENT_HASH,
         }),
         environmentEvidence: Object.freeze({
           environmentOriginId:
@@ -269,7 +285,7 @@ export function createRunSpecificationVault({
       const content = canonicalJsonBytes(bundle);
       const contentHash = sha256Bytes(content);
       const key = `run-specifications/${contentHash.slice("sha256:".length)}`;
-      await requireEgressAuthorization(egressAuthorization, {
+      const authorization = await requireEgressAuthorization(egressAuthorization, {
         requestId: `run-specification-storage:${command.runId}:${contentHash}`,
         jobId: command.jobId,
         runId: command.runId,
@@ -311,6 +327,7 @@ export function createRunSpecificationVault({
         key,
         specCommitSha: command.specCommitSha,
         versionReferences,
+        egressAuthorization: authorization,
       });
     },
 
@@ -335,6 +352,20 @@ export function createRunSpecificationVault({
         !isDeepStrictEqual(
           bundle.versionReferences,
           reference.versionReferences,
+        ) ||
+        reference.egressAuthorization.request.payloadHash !==
+          reference.contentHash ||
+        reference.egressAuthorization.request.processingPurpose !==
+          "run_specification_storage" ||
+        reference.egressAuthorization.request.targetService !==
+          store.egressDestination.targetService ||
+        reference.egressAuthorization.request.targetAccount !==
+          store.egressDestination.targetAccount ||
+        reference.egressAuthorization.request.targetRegion !==
+          store.egressDestination.targetRegion ||
+        !isDeepStrictEqual(
+          reference.egressAuthorization.request.subprocessors,
+          store.egressDestination.subprocessors,
         ) ||
         !isDeepStrictEqual(
           bundle.versionReferences,

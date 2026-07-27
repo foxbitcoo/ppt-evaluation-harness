@@ -29,15 +29,18 @@ import {
 import {
   requireEgressAuthorization,
   SYSTEM_CLOCK,
+  InMemoryEgressAuthorizationAudit,
   type ApprovedEgressAuthorization,
   type ClockPort,
   type EgressDestinationMetadata,
   type EgressAuthorizationPort,
+  type EgressAuthorizationAuditPort,
 } from "./egress-authorization.ts";
 import type {
   ComparisonReportSource,
   FeishuProjectionPort,
 } from "./feishu.ts";
+import { InMemoryFeishuProjection } from "./feishu.ts";
 import {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
@@ -64,13 +67,17 @@ import {
   type ReferencePackStorePort,
 } from "./reference-pack.ts";
 import {
+  canonicalJsonBytes,
   createRunSpecificationVault,
+  sha256Bytes,
   type RunSpecificationReference,
   type RunSpecificationVault,
 } from "./run-specification.ts";
 import {
   InMemoryPayloadInventory,
+  InMemoryTombstoneLedger,
   type PayloadInventoryPort,
+  type TombstoneLedgerPort,
 } from "./retention.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -198,6 +205,8 @@ export interface BakeoffHarnessDependencies {
   readonly clock?: ClockPort;
   readonly rendererDestination?: EgressDestinationMetadata;
   readonly judgeDestination?: EgressDestinationMetadata;
+  readonly tombstones?: TombstoneLedgerPort;
+  readonly egressAudit?: EgressAuthorizationAuditPort;
   readonly specCommitSha?: string;
 }
 
@@ -228,6 +237,14 @@ const DEFAULT_PAYLOAD_INVENTORIES = new WeakMap<
   FeishuProjectionPort,
   PayloadInventoryPort
 >();
+const DEFAULT_TOMBSTONE_LEDGERS = new WeakMap<
+  FeishuProjectionPort,
+  TombstoneLedgerPort
+>();
+const DEFAULT_EGRESS_AUDITS = new WeakMap<
+  FeishuProjectionPort,
+  EgressAuthorizationAuditPort
+>();
 const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
 let nextDependencyIdentity = 1;
 
@@ -249,12 +266,15 @@ function defaultArtifactVault(
   const existing = DEFAULT_ARTIFACT_VAULTS.get(feishu);
   if (existing !== undefined) return existing;
   const identity = dependencyIdentity(feishu);
+  const tombstones = defaultTombstoneLedger(feishu);
   const created = createArtifactVault({
     primary: new InMemoryImmutableBlobStore(
       `mock-primary-artifact-store:${identity}`,
+      tombstones,
     ),
     secondary: new InMemoryImmutableBlobStore(
       `mock-secondary-artifact-store:${identity}`,
+      tombstones,
     ),
     egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
     payloadInventory: defaultPayloadInventory(feishu),
@@ -268,9 +288,11 @@ function defaultRunSpecificationVault(
 ): RunSpecificationVault {
   const existing = DEFAULT_RUN_SPECIFICATION_VAULTS.get(feishu);
   if (existing !== undefined) return existing;
+  const tombstones = defaultTombstoneLedger(feishu);
   const created = createRunSpecificationVault({
     store: new InMemoryImmutableBlobStore(
       `mock-recovery-store:${dependencyIdentity(feishu)}`,
+      tombstones,
     ),
     egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
     payloadInventory: defaultPayloadInventory(feishu),
@@ -284,12 +306,30 @@ function defaultPayloadInventory(
 ): PayloadInventoryPort {
   const existing = DEFAULT_PAYLOAD_INVENTORIES.get(feishu);
   if (existing !== undefined) return existing;
-  const created = new InMemoryPayloadInventory({
-    async findByJobId() {
-      return null;
-    },
-  });
+  const created = new InMemoryPayloadInventory(
+    defaultTombstoneLedger(feishu),
+  );
   DEFAULT_PAYLOAD_INVENTORIES.set(feishu, created);
+  return created;
+}
+
+function defaultTombstoneLedger(
+  feishu: FeishuProjectionPort,
+): TombstoneLedgerPort {
+  const existing = DEFAULT_TOMBSTONE_LEDGERS.get(feishu);
+  if (existing !== undefined) return existing;
+  const created = new InMemoryTombstoneLedger();
+  DEFAULT_TOMBSTONE_LEDGERS.set(feishu, created);
+  return created;
+}
+
+function defaultEgressAudit(
+  feishu: FeishuProjectionPort,
+): EgressAuthorizationAuditPort {
+  const existing = DEFAULT_EGRESS_AUDITS.get(feishu);
+  if (existing !== undefined) return existing;
+  const created = new InMemoryEgressAuthorizationAudit();
+  DEFAULT_EGRESS_AUDITS.set(feishu, created);
   return created;
 }
 
@@ -320,11 +360,17 @@ function bakeoffJobIdentity(
     readonly attemptDeadline: AttemptDeadlinePort;
     readonly referencePackStore: ReferencePackStorePort;
     readonly referencePackGenerator: ReferencePackGeneratorPort;
-      readonly judge: OpenAiJudgePort | undefined;
-      readonly egressAuthorization: EgressAuthorizationPort | undefined;
-      readonly artifactVault: ArtifactVault;
-      readonly runSpecificationVault: RunSpecificationVault;
-      readonly specCommitSha: string;
+    readonly judge: OpenAiJudgePort | undefined;
+    readonly egressAuthorization: EgressAuthorizationPort | undefined;
+    readonly artifactVault: ArtifactVault;
+    readonly runSpecificationVault: RunSpecificationVault;
+    readonly payloadInventory: PayloadInventoryPort;
+    readonly tombstones: TombstoneLedgerPort;
+    readonly clock: ClockPort;
+    readonly rendererDestination: EgressDestinationMetadata;
+    readonly judgeDestination: EgressDestinationMetadata;
+    readonly egressAudit: EgressAuthorizationAuditPort;
+    readonly specCommitSha: string;
   },
 ): string {
   return JSON.stringify({
@@ -362,6 +408,12 @@ function bakeoffJobIdentity(
       runSpecificationVault: dependencyIdentity(
         dependencies.runSpecificationVault,
       ),
+      payloadInventory: dependencyIdentity(dependencies.payloadInventory),
+      tombstones: dependencyIdentity(dependencies.tombstones),
+      clock: dependencyIdentity(dependencies.clock),
+      rendererDestination: dependencies.rendererDestination,
+      judgeDestination: dependencies.judgeDestination,
+      egressAudit: dependencyIdentity(dependencies.egressAudit),
       specCommitSha: dependencies.specCommitSha,
     },
   });
@@ -455,6 +507,9 @@ function replayedBakeoffOutcome(
   selections: readonly SelectedProductAdapter[],
   source: ComparisonReportSource,
   specCommitSha: string,
+  rendererDestination: EgressDestinationMetadata,
+  judgeDestination: EgressDestinationMetadata,
+  securityContextHash: `sha256:${string}`,
 ): BakeoffJobOutcome {
   const expectedRunIds = selections.map(({ runId }) => runId);
   const selectedRunIds = source.job.selectedRunIds;
@@ -473,6 +528,7 @@ function replayedBakeoffOutcome(
   );
   if (
     !isDeepStrictEqual(source.job.protocolSnapshot, expectedProtocol)
+    || source.job.securityContextHash !== securityContextHash
   ) {
     throw new Error(
       `Bakeoff Job protocol mismatch: ${source.job.recordId}`,
@@ -526,10 +582,53 @@ function replayedBakeoffOutcome(
       run.productVendorId !== selection.productPackage.vendorId ||
       run.productPackageId !== selection.productPackage.packageId ||
       run.adapterVersion !== selection.productPackage.adapterVersion ||
-      run.specificationReference?.specCommitSha !== specCommitSha
+      run.specificationReference?.specCommitSha !== specCommitSha ||
+      run.specificationReference.versionReferences
+        .productPackageContentHash !==
+        sha256Bytes(canonicalJsonBytes(selection.productPackage))
     ) {
       throw new Error(
         `Bakeoff Job identity conflict: ${source.job.recordId}`,
+      );
+    }
+    const authorizations = run.egressAuthorizations ?? [];
+    const destinationMatches = (
+      purpose: ApprovedEgressAuthorization["request"]["processingPurpose"],
+      destination: EgressDestinationMetadata,
+      required: boolean,
+    ) => {
+      const matching = authorizations.find(
+        ({ request }) => request.processingPurpose === purpose,
+      );
+      return (
+        (!required && matching === undefined) ||
+        (matching !== undefined &&
+          matching.request.targetService === destination.targetService &&
+          matching.request.targetAccount === destination.targetAccount &&
+          matching.request.targetRegion === destination.targetRegion &&
+          isDeepStrictEqual(
+            matching.request.subprocessors,
+            destination.subprocessors,
+          ))
+      );
+    };
+    if (
+      !destinationMatches(
+        "vendor_generation",
+        selection.productPackage.egressDestination,
+        true,
+      ) ||
+      (run.artifactId !== null &&
+        !destinationMatches(
+          "artifact_rendering",
+          rendererDestination,
+          true,
+        )) ||
+      (run.judgeEgressAttempt != null &&
+        !destinationMatches("judge_evaluation", judgeDestination, true))
+    ) {
+      throw new Error(
+        `Bakeoff Job security context mismatch: ${source.job.recordId}`,
       );
     }
     if (run.artifactId !== null) {
@@ -551,7 +650,6 @@ function replayedBakeoffOutcome(
       scorecards.push(score.scorecard);
     }
   }
-
   return {
     job: {
       jobId: source.job.jobId,
@@ -1181,6 +1279,8 @@ export function createBakeoffHarness({
   clock: configuredClock,
   rendererDestination: configuredRendererDestination,
   judgeDestination: configuredJudgeDestination,
+  tombstones: configuredTombstones,
+  egressAudit: configuredEgressAudit,
   specCommitSha = DEFAULT_SPEC_COMMIT_SHA,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
@@ -1191,13 +1291,29 @@ export function createBakeoffHarness({
     configuredReferencePackGenerator ?? DEFAULT_REFERENCE_PACK_GENERATOR;
   const egressAuthorization =
     configuredEgressAuthorization ?? DEFAULT_TEST_EGRESS_AUTHORIZATION;
+  const tombstones =
+    configuredTombstones ?? defaultTombstoneLedger(feishu);
+  const egressAudit =
+    configuredEgressAudit ?? defaultEgressAudit(feishu);
   const payloadInventory =
-    configuredPayloadInventory ?? defaultPayloadInventory(feishu);
+    configuredPayloadInventory ??
+    (configuredTombstones === undefined
+      ? defaultPayloadInventory(feishu)
+      : new InMemoryPayloadInventory(tombstones));
   const clock = configuredClock ?? SYSTEM_CLOCK;
   const rendererDestination =
     configuredRendererDestination ?? MOCK_RENDERER_DESTINATION;
   const judgeDestination =
     configuredJudgeDestination ?? MOCK_JUDGE_DESTINATION;
+  const securityContextHash = sha256Json({
+    clock: dependencyIdentity(clock),
+    payloadInventory: dependencyIdentity(payloadInventory),
+    tombstones: dependencyIdentity(tombstones),
+    rendererDestination,
+    judgeDestination,
+    projectionDestination: feishu.egressDestination,
+    egressAudit: dependencyIdentity(egressAudit),
+  });
   const artifactVault =
     configuredArtifactVault ??
     (configuredEgressAuthorization === undefined
@@ -1205,9 +1321,11 @@ export function createBakeoffHarness({
       : createArtifactVault({
           primary: new InMemoryImmutableBlobStore(
             `mock-primary-artifact-store:${dependencyIdentity(feishu)}`,
+            tombstones,
           ),
           secondary: new InMemoryImmutableBlobStore(
             `mock-secondary-artifact-store:${dependencyIdentity(feishu)}`,
+            tombstones,
           ),
           egressAuthorization,
           payloadInventory,
@@ -1219,6 +1337,7 @@ export function createBakeoffHarness({
       : createRunSpecificationVault({
           store: new InMemoryImmutableBlobStore(
             `mock-recovery-store:${dependencyIdentity(feishu)}`,
+            tombstones,
           ),
           egressAuthorization,
           payloadInventory,
@@ -1278,6 +1397,11 @@ export function createBakeoffHarness({
       const protocolSnapshot = bakeoffProtocolSnapshot(
         command.referencePackMode ?? "automatic",
       );
+      if ((await tombstones.findByJobId(MOCK_SCENARIO.jobId)) !== null) {
+        throw new Error(
+          `Bakeoff Job ${MOCK_SCENARIO.jobId} is tombstoned and cannot be replayed`,
+        );
+      }
       const existingSource = await feishu.findComparisonReportSource(
         MOCK_SCENARIO.jobId,
       );
@@ -1287,6 +1411,9 @@ export function createBakeoffHarness({
           selections,
           existingSource,
           specCommitSha,
+          rendererDestination,
+          judgeDestination,
+          securityContextHash,
         );
       }
 
@@ -1414,41 +1541,11 @@ export function createBakeoffHarness({
           : successful.length === 0
             ? "failed"
             : "partial";
-      const projectionAuthorization = await requireEgressAuthorization(
-        egressAuthorization,
-        {
-          requestId: `operational-ledger-projection:${MOCK_SCENARIO.jobId}`,
-          jobId: MOCK_SCENARIO.jobId,
-          runId: null,
-          attemptId: null,
-          dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
-          sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
-          processingPurpose: "operational_ledger_projection_storage",
-          targetKind: "storage",
-          targetService: feishu.egressDestination.targetService,
-          targetAccount: feishu.egressDestination.targetAccount,
-          targetRegion: feishu.egressDestination.targetRegion,
-          subprocessors: feishu.egressDestination.subprocessors,
-          contentFields: [
-            "case",
-            "run",
-            "attempt_events",
-            "artifact_manifest",
-            "scorecard",
-          ],
-          payloadHash: sha256Json({
-            evaluationCase: VOLCANO_EVALUATION_CASE,
-            protocolSnapshot,
-            results,
-            referencePackHash:
-              referencePackSelection.pack?.contentHash ?? null,
-          }),
-          requiredRedactions: [],
-        },
-        clock,
-      );
-      await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
-      await feishu.appendRunRecord({
+      const writeProjection = async (
+        projection: FeishuProjectionPort,
+      ) => {
+      await projection.upsertCase(VOLCANO_EVALUATION_CASE);
+      await projection.appendRunRecord({
         recordId: MOCK_SCENARIO.jobId,
         recordType: "bakeoff_job",
         parentRecordId: null,
@@ -1477,11 +1574,12 @@ export function createBakeoffHarness({
         artifactId: null,
         renderManifestId: null,
         scorecardId: null,
-        egressAuthorizations: [projectionAuthorization],
+        egressAuthorizations: [],
+        securityContextHash,
         ...sharedRunFields(command.caseId),
       });
       for (const result of results) {
-        await feishu.appendRunRecord({
+        await projection.appendRunRecord({
           recordId: result.runId,
           recordType: "vendor_run",
           parentRecordId: MOCK_SCENARIO.jobId,
@@ -1528,10 +1626,10 @@ export function createBakeoffHarness({
           ...sharedRunFields(command.caseId),
         });
         for (const attempt of result.attemptRecords) {
-          await feishu.appendRunRecord(attempt);
+          await projection.appendRunRecord(attempt);
         }
         if (result.artifact !== null && result.renderManifest !== null) {
-          await feishu.appendCapturedArtifact({
+          await projection.appendCapturedArtifact({
             recordId: `artifact-capture:${result.artifact.artifactId}`,
             caseId: command.caseId,
             jobId: MOCK_SCENARIO.jobId,
@@ -1548,7 +1646,7 @@ export function createBakeoffHarness({
           result.renderManifest !== null &&
           result.scorecard !== null
         ) {
-          await feishu.appendArtifactScore({
+          await projection.appendArtifactScore({
             recordId: result.scorecard.scorecardId,
             caseId: command.caseId,
             jobId: MOCK_SCENARIO.jobId,
@@ -1578,12 +1676,14 @@ export function createBakeoffHarness({
       let report;
       if (hasDefaultComparison) {
         report = (
-          await createComparisonReportService({ feishu }).createReport({
+          await createComparisonReportService({
+            feishu: projection,
+          }).createReport({
             jobId: MOCK_SCENARIO.jobId,
           })
         ).report;
       } else {
-        report = await feishu.createReport(
+        report = await projection.createReport(
           createMockReportDraft(
             MOCK_SCENARIO.jobId,
             jobStatus,
@@ -1598,9 +1698,66 @@ export function createBakeoffHarness({
             })),
           ),
         );
-        await feishu.linkReportToBakeoffJob(
+        await projection.linkReportToBakeoffJob(
           MOCK_SCENARIO.jobId,
           report.url,
+        );
+      }
+      return report;
+      };
+
+      const stagedProjection = new InMemoryFeishuProjection({
+        targetEnvironment: feishu.targetEnvironment,
+        egressDestination: feishu.egressDestination,
+      });
+      await writeProjection(stagedProjection);
+      const projectionBatch = stagedProjection.snapshot();
+      const projectionBatchHash = sha256Bytes(
+        canonicalJsonBytes(projectionBatch),
+      );
+      const projectionAuthorization = await requireEgressAuthorization(
+        egressAuthorization,
+        {
+          requestId: `operational-ledger-projection:${MOCK_SCENARIO.jobId}:${projectionBatchHash}`,
+          jobId: MOCK_SCENARIO.jobId,
+          runId: null,
+          attemptId: null,
+          dataClassification: VOLCANO_EVALUATION_CASE.dataClassification,
+          sourceOwner: VOLCANO_EVALUATION_CASE.sourceOwner,
+          processingPurpose: "operational_ledger_projection_storage",
+          targetKind: "storage",
+          targetService: feishu.egressDestination.targetService,
+          targetAccount: feishu.egressDestination.targetAccount,
+          targetRegion: feishu.egressDestination.targetRegion,
+          subprocessors: feishu.egressDestination.subprocessors,
+          contentFields: [
+            "case_table",
+            "run_record_table",
+            "captured_artifact_table",
+            "artifact_score_table",
+            "adjudication_event_table",
+            "review_event_table",
+            "gap_card_workflow_event_table",
+            "github_issue_delivery_reservation_table",
+            "github_issue_link_event_table",
+            "comparison_and_product_gap_card_table",
+            "reports",
+          ],
+          payloadHash: projectionBatchHash,
+          requiredRedactions: [],
+        },
+        clock,
+      );
+      await egressAudit.append(projectionAuthorization);
+      const report = await writeProjection(feishu);
+      if (
+        "snapshot" in feishu &&
+        typeof feishu.snapshot === "function" &&
+        sha256Bytes(canonicalJsonBytes(feishu.snapshot())) !==
+          projectionBatchHash
+      ) {
+        throw new Error(
+          "Operational ledger projection write batch mismatch",
         );
       }
 
@@ -1640,6 +1797,12 @@ export function createBakeoffHarness({
           egressAuthorization,
           artifactVault,
           runSpecificationVault,
+          payloadInventory,
+          tombstones,
+          clock,
+          rendererDestination,
+          judgeDestination,
+          egressAudit,
           specCommitSha,
         },
       );

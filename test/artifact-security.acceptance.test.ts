@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
   InMemoryImmutableBlobStore,
   InMemoryArtifactCaptureJournal,
+  InMemoryEgressAuthorizationAudit,
   InMemoryPayloadInventory,
   InMemoryFeishuProjection,
   MockWpsProductAdapter,
@@ -20,6 +22,7 @@ import {
   requireEgressAuthorization,
   sha256Bytes,
   type Artifact,
+  type ArtifactCaptureJournalPort,
   type ClockPort,
   type EgressAuthorizationPort,
   type ImmutableBlobStorePort,
@@ -337,6 +340,61 @@ test("ArtifactVault rejects a storage copy whose upload readback no longer match
   );
 });
 
+test("ArtifactVault cleans partial blobs even when the append-only capture journal fails after a write", async () => {
+  const tombstones = new InMemoryTombstoneLedger();
+  const primary = new InMemoryImmutableBlobStore("primary", tombstones);
+  const secondary = new InMemoryImmutableBlobStore("secondary", tombstones);
+  let journalUnavailable = true;
+  const observedAttemptIds: string[] = [];
+  const captureJournal: ArtifactCaptureJournalPort = {
+    async append(event) {
+      observedAttemptIds.push(event.captureAttemptId);
+      if (
+        journalUnavailable &&
+        (
+          event.eventType === "write_verified" ||
+          event.eventType === "failed"
+        )
+      ) {
+        throw new Error("capture journal unavailable");
+      }
+    },
+  };
+  const vault = createArtifactVault({
+    primary,
+    secondary,
+    egressAuthorization: APPROVED_EGRESS,
+    captureJournal,
+    payloadInventory: new InMemoryPayloadInventory(tombstones),
+  });
+
+  await assert.rejects(
+    vault.capture({
+      jobId: "job-journal-failure",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
+      artifact: fixtureArtifact(),
+      renderManifest: fixtureRenderManifest(),
+    }),
+    /capture journal unavailable/i,
+  );
+  assert.deepEqual(primary.listKeys(), []);
+  assert.deepEqual(secondary.listKeys(), []);
+  journalUnavailable = false;
+  const retried = await vault.capture({
+    jobId: "job-journal-failure",
+    dataClassification: "public_or_synthetic",
+    sourceOwner: "evaluation-owner",
+    artifact: fixtureArtifact(),
+    renderManifest: fixtureRenderManifest(),
+  });
+  assert.equal(retried.artifact.artifactId, "artifact-stable-001");
+  assert.deepEqual(
+    [...new Set(observedAttemptIds)].map((id) => id.split(":").at(-1)),
+    ["1", "2"],
+  );
+});
+
 test("Bakeoff fails closed before a vendor call when its call-boundary egress authorization is denied", async () => {
   let vendorCalls = 0;
   const adapter: ProductAdapterPort = {
@@ -409,15 +467,26 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     new InMemoryTombstoneLedger(),
   );
   const purposes: string[] = [];
+  const authorizationRequests: Parameters<
+    EgressAuthorizationPort["authorize"]
+  >[0][] = [];
   const authorization: EgressAuthorizationPort = {
     async authorize(request) {
       purposes.push(request.processingPurpose);
+      authorizationRequests.push(request);
       return APPROVED_EGRESS.authorize(request);
     },
   };
   const feishu = new InMemoryFeishuProjection();
+  const egressAudit = new InMemoryEgressAuthorizationAudit();
   const runSpecificationVault = createRunSpecificationVault({
     store: recovery,
+    egressAuthorization: authorization,
+    payloadInventory,
+  });
+  const artifactVault = createArtifactVault({
+    primary,
+    secondary,
     egressAuthorization: authorization,
     payloadInventory,
   });
@@ -426,13 +495,10 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     feishu,
     productAdapters: [new MockWpsProductAdapter()],
     egressAuthorization: authorization,
-    artifactVault: createArtifactVault({
-      primary,
-      secondary,
-      egressAuthorization: authorization,
-      payloadInventory,
-    }),
+    egressAudit,
+    artifactVault,
     runSpecificationVault,
+    payloadInventory,
     specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
@@ -456,18 +522,7 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         JSON.stringify(secondary.listKeys()),
     },
     {
-      specification: {
-        schemaVersion: "run-specification-reference-v1",
-        jobId: "MOCK-job-volcano-v1",
-        runId: "MOCK-run-wps-volcano-v1",
-        contentHash:
-          vendorRun.specificationReference?.contentHash,
-        storeId: "recovery",
-        key: vendorRun.specificationReference?.key,
-        specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
-        versionReferences:
-          vendorRun.specificationReference?.versionReferences,
-      },
+      specification: vendorRun.specificationReference,
       artifact: {
         artifactId: "MOCK-artifact-wps-volcano-v1",
         runId: "MOCK-run-wps-volcano-v1",
@@ -502,6 +557,64 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     `run-specifications/${vendorRun.specificationReference?.contentHash.slice(
       "sha256:".length,
     )}`,
+  );
+  assert.equal(
+    vendorRun.specificationReference?.egressAuthorization.request.payloadHash,
+    vendorRun.specificationReference?.contentHash,
+  );
+  const projectionRequest = authorizationRequests.find(
+    ({ processingPurpose }) =>
+      processingPurpose === "operational_ledger_projection_storage",
+  );
+  assert.ok(projectionRequest);
+  assert.equal(
+    projectionRequest.payloadHash,
+    sha256Bytes(canonicalJsonBytes(feishu.snapshot())),
+  );
+  assert.deepEqual(projectionRequest.contentFields, [
+    "case_table",
+    "run_record_table",
+    "captured_artifact_table",
+    "artifact_score_table",
+    "adjudication_event_table",
+    "review_event_table",
+    "gap_card_workflow_event_table",
+    "github_issue_delivery_reservation_table",
+    "github_issue_link_event_table",
+    "comparison_and_product_gap_card_table",
+    "reports",
+  ]);
+  assert.equal(
+    egressAudit
+      .list()
+      .find(
+        ({ request }) =>
+          request.processingPurpose ===
+          "operational_ledger_projection_storage",
+      )?.request.payloadHash,
+    projectionRequest.payloadHash,
+  );
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [new MockWpsProductAdapter()],
+      egressAuthorization: authorization,
+      egressAudit,
+      artifactVault,
+      runSpecificationVault,
+      payloadInventory,
+      rendererDestination: {
+        targetService: "different-renderer",
+        targetAccount: "different-account",
+        targetRegion: "test",
+        subprocessors: [],
+      },
+      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /protocol mismatch|security context mismatch/i,
   );
   const specification = await runSpecificationVault.read(
     vendorRun.specificationReference,
@@ -543,11 +656,9 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         canonicalJsonBytes(specification.estimatorSnapshot),
       ),
       runnerCode: sha256Bytes(
-        canonicalJsonBytes(specification.runnerCodeEvidence),
+        readFileSync(new URL("../src/bakeoff.ts", import.meta.url)),
       ),
-      runnerImage: sha256Bytes(
-        canonicalJsonBytes(specification.runnerImageEvidence),
-      ),
+      runnerImage: sha256Bytes(readFileSync(process.execPath)),
       environment: sha256Bytes(
         canonicalJsonBytes(specification.environmentEvidence),
       ),
@@ -579,6 +690,8 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     egressAuthorization: APPROVED_EGRESS,
     artifactVault,
     runSpecificationVault,
+    payloadInventory,
+    tombstones,
     specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
@@ -629,6 +742,26 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     }),
     /dangling.*adjudication.*history/i,
   );
+  await assert.rejects(
+    recoveryService.exportLedger({
+      exportId: "ledger-export-wrong-history-owner",
+      jobId: "MOCK-job-volcano-v1",
+      checkpoint: "run-record-seq:3",
+      snapshot: {
+        ...snapshot,
+        adjudicationEventTable: [
+          {
+            ...adjudication,
+            runId: "run-with-wrong-owner",
+          },
+        ],
+      },
+      createdAt: "2026-01-01T00:14:30.000Z",
+      encryption: "test-managed-key-v1",
+      retentionExpiresAt: "2026-02-01T00:00:00.000Z",
+    }),
+    /adjudication history ownership.*mismatch/i,
+  );
   const exported = await recoveryService.exportLedger({
     exportId: "ledger-export-001",
     jobId: "MOCK-job-volcano-v1",
@@ -638,6 +771,25 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     encryption: "test-managed-key-v1",
     retentionExpiresAt: "2026-02-01T00:00:00.000Z",
   });
+  assert.equal(
+    exported.egressAuthorization.request.payloadHash,
+    exported.contentHash,
+  );
+  assert.deepEqual(exported.egressAuthorization.request.contentFields, [
+    "cases",
+    "run_records",
+    "attempt_events",
+    "artifact_manifests",
+    "scorecards",
+    "adjudication_history",
+    "review_history",
+    "gap_card_workflow_history",
+    "github_issue_delivery_reservations",
+    "github_issue_link_history",
+    "comparisons",
+    "product_gap_cards",
+    "reports",
+  ]);
 
   const mismatchedSpecificationVault: RunSpecificationVault = {
     ...runSpecificationVault,
@@ -709,6 +861,13 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       ],
     },
   );
+  await assert.rejects(
+    recoveryService.rehearse({
+      exportReference: exported,
+      rehearsedAt: exported.retentionExpiresAt,
+    }),
+    /recovery blocked.*expired/i,
+  );
 });
 
 test("retention expiry tombstones and deletes every controlled payload class while recovery refuses resurrection", async () => {
@@ -739,6 +898,8 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     egressAuthorization: APPROVED_EGRESS,
     artifactVault,
     runSpecificationVault,
+    payloadInventory: inventory,
+    tombstones,
     specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
@@ -790,6 +951,7 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     stores: [primary, secondary, recovery, quarantine],
     tombstones,
     payloadInventory: inventory,
+    projectionScrubber: feishu,
   }).expire({
     tombstoneId: "tombstone-MOCK-job-volcano-v1",
     jobId: "MOCK-job-volcano-v1",
@@ -825,6 +987,24 @@ test("retention expiry tombstones and deletes every controlled payload class whi
       retainedTombstones: 1,
       deletionEvidence: 75,
     },
+  );
+  assert.equal(feishu.snapshot().capturedArtifactTable.length, 0);
+  assert.equal(feishu.snapshot().artifactScoreTable.length, 0);
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [new MockWpsProductAdapter()],
+      egressAuthorization: APPROVED_EGRESS,
+      artifactVault,
+      runSpecificationVault,
+      payloadInventory: inventory,
+      tombstones,
+      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /tombstoned.*cannot be replayed/i,
   );
 
   const originalLocation =

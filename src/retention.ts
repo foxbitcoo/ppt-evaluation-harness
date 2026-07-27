@@ -177,16 +177,23 @@ export interface RetentionService {
   expire(command: ExpireRetentionCommand): Promise<RetentionExpiryResult>;
 }
 
+export interface PayloadProjectionScrubberPort {
+  scrubPayloadsForJob(jobId: string): Promise<void>;
+  hasPayloadsForJob(jobId: string): Promise<boolean>;
+}
+
 export interface RetentionServiceDependencies {
   readonly stores: readonly ImmutableBlobStorePort[];
   readonly tombstones: TombstoneLedgerPort;
   readonly payloadInventory: PayloadInventoryPort;
+  readonly projectionScrubber: PayloadProjectionScrubberPort;
 }
 
 export function createRetentionService({
   stores,
   tombstones,
   payloadInventory,
+  projectionScrubber,
 }: RetentionServiceDependencies): RetentionService {
   const storesById = new Map(stores.map((store) => [store.storeId, store]));
   if (storesById.size !== stores.length) {
@@ -226,6 +233,12 @@ export function createRetentionService({
         })),
       };
       await tombstones.append(tombstone);
+      await projectionScrubber.scrubPayloadsForJob(command.jobId);
+      if (await projectionScrubber.hasPayloadsForJob(command.jobId)) {
+        throw new Error(
+          `Retention projection payload scrub is incomplete: ${command.jobId}`,
+        );
+      }
 
       const failures: string[] = [];
       for (const [index, location] of payloadLocations.entries()) {

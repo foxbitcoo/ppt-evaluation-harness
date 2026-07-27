@@ -83,6 +83,35 @@ export interface EgressAuthorizationPort {
   ): Promise<EgressAuthorizationDecision>;
 }
 
+export interface EgressAuthorizationAuditPort {
+  append(decision: ApprovedEgressAuthorization): Promise<void>;
+}
+
+export class InMemoryEgressAuthorizationAudit
+  implements EgressAuthorizationAuditPort
+{
+  readonly #decisions: ApprovedEgressAuthorization[] = [];
+
+  async append(decision: ApprovedEgressAuthorization): Promise<void> {
+    const existing = this.#decisions.find(
+      ({ decisionId }) => decisionId === decision.decisionId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, decision)) {
+        throw new Error(
+          `Egress authorization audit conflict: ${decision.decisionId}`,
+        );
+      }
+      return;
+    }
+    this.#decisions.push(structuredClone(decision));
+  }
+
+  list(): readonly ApprovedEgressAuthorization[] {
+    return structuredClone(this.#decisions);
+  }
+}
+
 function nonEmpty(value: string, label: string): void {
   if (value.trim().length === 0) {
     throw new Error(`Egress authorization is missing ${label}`);

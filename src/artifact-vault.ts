@@ -37,6 +37,7 @@ export interface ImmutableBlobStorePort {
 
 export interface ArtifactCaptureJournalEvent {
   readonly eventId: string;
+  readonly captureAttemptId: string;
   readonly jobId: string;
   readonly artifactId: string;
   readonly eventType:
@@ -343,6 +344,7 @@ export function createArtifactVault({
   if (primary.storeId === secondary.storeId) {
     throw new Error("ArtifactVault requires two distinct controlled stores");
   }
+  const attemptCounts = new Map<string, number>();
   return {
     async capture(command) {
       const { artifact, renderManifest } = command;
@@ -529,8 +531,14 @@ export function createArtifactVault({
           copyRole: planned.copyRole,
         });
       }
+      const attemptIdentity = `${command.jobId}\u0000${artifact.artifactId}`;
+      const attemptNumber = (attemptCounts.get(attemptIdentity) ?? 0) + 1;
+      attemptCounts.set(attemptIdentity, attemptNumber);
+      const captureAttemptId =
+        `artifact-capture-attempt:${command.jobId}:${artifact.artifactId}:${attemptNumber}`;
       await captureJournal.append({
-        eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:started`,
+        eventId: `${captureAttemptId}:started`,
+        captureAttemptId,
         jobId: command.jobId,
         artifactId: artifact.artifactId,
         eventType: "started",
@@ -568,7 +576,8 @@ export function createArtifactVault({
           }
           verifiedWrites += 1;
           await captureJournal.append({
-            eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:write:${verifiedWrites}`,
+            eventId: `${captureAttemptId}:write:${verifiedWrites}`,
+            captureAttemptId,
             jobId: command.jobId,
             artifactId: artifact.artifactId,
             eventType: "write_verified",
@@ -578,7 +587,8 @@ export function createArtifactVault({
           });
         }
         await captureJournal.append({
-          eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:completed`,
+          eventId: `${captureAttemptId}:completed`,
+          captureAttemptId,
           jobId: command.jobId,
           artifactId: artifact.artifactId,
           eventType: "completed",
@@ -587,15 +597,6 @@ export function createArtifactVault({
           detail: `verified:${verifiedWrites}`,
         });
       } catch (error) {
-        await captureJournal.append({
-          eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:failed`,
-          jobId: command.jobId,
-          artifactId: artifact.artifactId,
-          eventType: "failed",
-          storeId: null,
-          key: null,
-          detail: error instanceof Error ? error.message : String(error),
-        });
         const cleanupFailures: string[] = [];
         for (const planned of writePlan) {
           const locationIdentity =
@@ -612,14 +613,35 @@ export function createArtifactVault({
             cleanupFailures.push(`${planned.store.storeId}/${planned.key}`);
           }
         }
+        const appendRecoveryJournal = async (
+          event: ArtifactCaptureJournalEvent,
+        ): Promise<void> => {
+          try {
+            await captureJournal.append(event);
+          } catch {
+            // Cleanup is the security boundary; journal outages are reported
+            // by the original failure and cannot prevent rollback.
+          }
+        };
+        await appendRecoveryJournal({
+          eventId: `${captureAttemptId}:failed`,
+          captureAttemptId,
+          jobId: command.jobId,
+          artifactId: artifact.artifactId,
+          eventType: "failed",
+          storeId: null,
+          key: null,
+          detail: error instanceof Error ? error.message : String(error),
+        });
         if (cleanupFailures.length > 0) {
           throw new Error(
             `Artifact capture failed and cleanup was incomplete: ${cleanupFailures.join(", ")}`,
             { cause: error },
           );
         }
-        await captureJournal.append({
-          eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:cleanup`,
+        await appendRecoveryJournal({
+          eventId: `${captureAttemptId}:cleanup`,
+          captureAttemptId,
           jobId: command.jobId,
           artifactId: artifact.artifactId,
           eventType: "cleanup_verified",

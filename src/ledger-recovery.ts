@@ -25,6 +25,7 @@ import type {
 } from "./artifact-vault.ts";
 import type { FeishuProjectionSnapshot } from "./feishu.ts";
 import type { EgressAuthorizationPort } from "./egress-authorization.ts";
+import type { ApprovedEgressAuthorization } from "./egress-authorization.ts";
 import { requireEgressAuthorization } from "./egress-authorization.ts";
 import type {
   RunSpecificationBundle,
@@ -102,6 +103,7 @@ export interface OperationalLedgerExportReference {
   readonly createdAt: string;
   readonly encryption: string;
   readonly retentionExpiresAt: string;
+  readonly egressAuthorization: ApprovedEgressAuthorization;
 }
 
 export interface ExportOperationalLedgerCommand {
@@ -173,6 +175,158 @@ export interface OperationalLedgerRecoveryServiceDependencies {
 function uniqueStableIds(ids: readonly string[], label: string): void {
   if (new Set(ids).size !== ids.length) {
     throw new Error(`Recovery export contains duplicate ${label} IDs`);
+  }
+}
+
+function assertSingleCausalChain<T>(input: {
+  readonly events: readonly T[];
+  readonly id: (event: T) => string;
+  readonly priorId: (event: T) => string | null;
+  readonly occurredAt: (event: T) => string;
+  readonly label: string;
+}): void {
+  if (input.events.length === 0) return;
+  const byId = new Map(input.events.map((event) => [input.id(event), event]));
+  if (byId.size !== input.events.length) {
+    throw new Error(`${input.label} history contains duplicate IDs`);
+  }
+  const childrenByParent = new Map<string, number>();
+  const roots: T[] = [];
+  for (const event of input.events) {
+    const eventTime = Date.parse(input.occurredAt(event));
+    if (!Number.isFinite(eventTime)) {
+      throw new Error(`${input.label} history time is invalid`);
+    }
+    const priorId = input.priorId(event);
+    if (priorId === null) {
+      roots.push(event);
+      continue;
+    }
+    const prior = byId.get(priorId);
+    if (prior === undefined) {
+      throw new Error(`${input.label} history has a missing prior event`);
+    }
+    childrenByParent.set(
+      priorId,
+      (childrenByParent.get(priorId) ?? 0) + 1,
+    );
+    if ((childrenByParent.get(priorId) ?? 0) > 1) {
+      throw new Error(`${input.label} history contains a causal fork`);
+    }
+    if (
+      eventTime < Date.parse(input.occurredAt(prior))
+    ) {
+      throw new Error(`${input.label} history time order is invalid`);
+    }
+  }
+  if (roots.length !== 1) {
+    throw new Error(`${input.label} history must have one causal root`);
+  }
+  const visited = new Set<string>();
+  let current: T | undefined = input.events.find(
+    (event) => !childrenByParent.has(input.id(event)),
+  );
+  while (current !== undefined) {
+    const currentId = input.id(current);
+    if (visited.has(currentId)) {
+      throw new Error(`${input.label} history contains a cycle`);
+    }
+    visited.add(currentId);
+    const priorId = input.priorId(current);
+    current = priorId === null ? undefined : byId.get(priorId);
+  }
+  if (visited.size !== input.events.length) {
+    throw new Error(`${input.label} history is disconnected`);
+  }
+}
+
+function validateHumanHistory(input: {
+  readonly jobId: string;
+  readonly scorecards: readonly RecoveryScorecardRecord[];
+  readonly adjudications: readonly AdjudicationEventRecord[];
+  readonly reviews: readonly ReviewEventRecord[];
+}): void {
+  const scoresById = new Map(
+    input.scorecards.map((record) => [record.scorecard.scorecardId, record]),
+  );
+  for (const event of input.adjudications) {
+    const score = scoresById.get(event.scorecardId);
+    const modelDimension = score?.scorecard.dimensions.find(
+      ({ dimension }) => dimension === event.dimension,
+    );
+    if (
+      score === undefined ||
+      modelDimension === undefined ||
+      event.jobId !== input.jobId ||
+      event.runId !== score.runId ||
+      event.artifactId !== score.artifactId ||
+      event.modelOriginalAssessmentStatus !==
+        modelDimension.assessmentStatus ||
+      event.modelOriginalScore !== modelDimension.value ||
+      event.provenance !== score.scorecard.provenance ||
+      !isDeepStrictEqual(
+        event.environmentOrigin,
+        score.scorecard.environmentOrigin,
+      )
+    ) {
+      throw new Error(
+        `Adjudication history ownership or model lineage mismatch: ${event.adjudicationEventId}`,
+      );
+    }
+  }
+  for (const event of input.reviews) {
+    const score = scoresById.get(event.scorecardId);
+    const dimensions = new Set(
+      score?.scorecard.dimensions.map(({ dimension }) => dimension) ?? [],
+    );
+    if (
+      score === undefined ||
+      event.jobId !== input.jobId ||
+      event.runId !== score.runId ||
+      event.artifactId !== score.artifactId ||
+      event.reviewedDimensions.length === 0 ||
+      event.reviewedDimensions.some((dimension) => !dimensions.has(dimension)) ||
+      event.provenance !== score.scorecard.provenance ||
+      !isDeepStrictEqual(
+        event.environmentOrigin,
+        score.scorecard.environmentOrigin,
+      )
+    ) {
+      throw new Error(
+        `Review history ownership or model lineage mismatch: ${event.reviewEventId}`,
+      );
+    }
+  }
+  const adjudicationGroups = new Map<string, AdjudicationEventRecord[]>();
+  for (const event of input.adjudications) {
+    const key = `${event.scorecardId}\u0000${event.dimension}`;
+    const group = adjudicationGroups.get(key) ?? [];
+    group.push(event);
+    adjudicationGroups.set(key, group);
+  }
+  for (const events of adjudicationGroups.values()) {
+    assertSingleCausalChain({
+      events,
+      id: (event) => event.adjudicationEventId,
+      priorId: (event) => event.priorAdjudicationEventId,
+      occurredAt: (event) => event.occurredAt,
+      label: "Adjudication",
+    });
+  }
+  const reviewGroups = new Map<string, ReviewEventRecord[]>();
+  for (const event of input.reviews) {
+    const group = reviewGroups.get(event.scorecardId) ?? [];
+    group.push(event);
+    reviewGroups.set(event.scorecardId, group);
+  }
+  for (const events of reviewGroups.values()) {
+    assertSingleCausalChain({
+      events,
+      id: (event) => event.reviewEventId,
+      priorId: (event) => event.priorReviewEventId,
+      occurredAt: (event) => event.occurredAt,
+      label: "Review",
+    });
   }
 }
 
@@ -283,6 +437,12 @@ function createExport(
       `Operational ledger contains dangling review history for Job: ${command.jobId}`,
     );
   }
+  validateHumanHistory({
+    jobId: command.jobId,
+    scorecards,
+    adjudications: adjudicationEvents,
+    reviews: reviewEvents,
+  });
   const gapCardWorkflowEvents =
     command.snapshot.gapCardWorkflowEventTable.filter((event) =>
       command.snapshot.productGapCardTable.some(
@@ -464,7 +624,7 @@ export function createOperationalLedgerRecoveryService({
           `Operational ledger export is missing Job Case: ${job.caseId}`,
         );
       }
-      await requireEgressAuthorization(egressAuthorization, {
+      const authorization = await requireEgressAuthorization(egressAuthorization, {
         requestId: `operational-ledger-export:${command.exportId}:${contentHash}`,
         jobId: command.jobId,
         runId: null,
@@ -478,11 +638,19 @@ export function createOperationalLedgerRecoveryService({
         targetRegion: recoveryStore.egressDestination.targetRegion,
         subprocessors: recoveryStore.egressDestination.subprocessors,
         contentFields: [
-          "stable_ids",
-          "events",
-          "manifests",
+          "cases",
+          "run_records",
+          "attempt_events",
+          "artifact_manifests",
           "scorecards",
           "adjudication_history",
+          "review_history",
+          "gap_card_workflow_history",
+          "github_issue_delivery_reservations",
+          "github_issue_link_history",
+          "comparisons",
+          "product_gap_cards",
+          "reports",
         ],
         payloadHash: contentHash,
         requiredRedactions: [],
@@ -518,6 +686,7 @@ export function createOperationalLedgerRecoveryService({
         createdAt: command.createdAt,
         encryption: command.encryption,
         retentionExpiresAt: command.retentionExpiresAt,
+        egressAuthorization: authorization,
       };
     },
 
@@ -530,8 +699,41 @@ export function createOperationalLedgerRecoveryService({
           `Recovery blocked: Job ${exportReference.jobId} is tombstoned and cannot be resurrected`,
         );
       }
+      const rehearsalTime = Date.parse(rehearsedAt);
+      const retentionExpiry = Date.parse(
+        exportReference.retentionExpiresAt,
+      );
+      if (
+        !Number.isFinite(rehearsalTime) ||
+        !Number.isFinite(retentionExpiry) ||
+        rehearsalTime >= retentionExpiry
+      ) {
+        throw new Error(
+          `Recovery blocked: export ${exportReference.exportId} is expired`,
+        );
+      }
       if (exportReference.storeId !== recoveryStore.storeId) {
         throw new Error("Operational ledger recovery store mismatch");
+      }
+      if (
+        exportReference.egressAuthorization.request.payloadHash !==
+          exportReference.contentHash ||
+        exportReference.egressAuthorization.request.processingPurpose !==
+          "operational_ledger_recovery_export" ||
+        exportReference.egressAuthorization.request.targetService !==
+          recoveryStore.egressDestination.targetService ||
+        exportReference.egressAuthorization.request.targetAccount !==
+          recoveryStore.egressDestination.targetAccount ||
+        exportReference.egressAuthorization.request.targetRegion !==
+          recoveryStore.egressDestination.targetRegion ||
+        !isDeepStrictEqual(
+          exportReference.egressAuthorization.request.subprocessors,
+          recoveryStore.egressDestination.subprocessors,
+        )
+      ) {
+        throw new Error(
+          "Operational ledger recovery export authorization mismatch",
+        );
       }
       const content = await recoveryStore.read(exportReference.key);
       if (
@@ -656,6 +858,12 @@ export function createOperationalLedgerRecoveryService({
           "Recovered Artifact, Scorecard, or adjudication lineage is inconsistent",
         );
       }
+      validateHumanHistory({
+        jobId: ledger.jobId,
+        scorecards: ledger.scorecards,
+        adjudications: ledger.adjudicationEvents,
+        reviews: ledger.reviewEvents,
+      });
 
       const runSpecifications: RunSpecificationBundle[] = [];
       const artifacts: RecoveredArtifactPackage[] = [];
