@@ -35,6 +35,11 @@ import type {
 import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
 import {
+  QWEN_PRODUCTION_ADAPTER_KIND,
+  resolveQwenProductionAdapterExecutor,
+  type QwenBrowserDriverPort,
+} from "./qwen-production-adapter.ts";
+import {
   resolveWpsAiPptProductAdapterExecutor,
 } from "./wps-aippt.ts";
 import type { WpsAiPptBrowserDriverPort } from "./wps-aippt-driver.ts";
@@ -844,6 +849,9 @@ export function resolveHarnessProductAdapterExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   dependencies: {
+    readonly qwenBrowserDriver?:
+      | QwenBrowserDriverPort
+      | undefined;
     readonly wpsAiPptBrowserDriver?:
       | WpsAiPptBrowserDriverPort
       | undefined;
@@ -854,6 +862,14 @@ export function resolveHarnessProductAdapterExecutor(
   } = {},
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
+  if (adapterKind === QWEN_PRODUCTION_ADAPTER_KIND) {
+    return resolveQwenProductionAdapterExecutor(
+      implementationPackage,
+      executionConfiguration,
+      dependencies.qwenBrowserDriver,
+      dependencies.attemptCheckpointStore,
+    );
+  }
   if (adapterKind === DOUBAO_PRODUCTION_ADAPTER_KIND) {
     if (
       executionConfiguration.scenario !== DOUBAO_PRODUCTION_SCENARIO &&

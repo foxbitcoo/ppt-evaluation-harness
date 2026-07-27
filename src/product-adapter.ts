@@ -117,6 +117,22 @@ export interface ProductionDriverExecutionEvidence {
   readonly liveBridgeTranscriptHash?: `sha256:${string}`;
 }
 
+export interface TrustedBrowserDriverEvidence {
+  readonly driverId: string;
+  readonly provenance:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY"
+    | "TEST_FAKE";
+  readonly captureSource:
+    | "LIVE_BROWSER_AUTOMATION"
+    | "REAL_PROVIDER_CAPTURE"
+    | "TEST_FIXTURE";
+  readonly driverVersion: string;
+  readonly browserProfileDigest: `sha256:${string}`;
+  readonly implementationDigest: `sha256:${string}`;
+  readonly configurationDigest: `sha256:${string}`;
+}
+
 export interface SafeRasterCandidate {
   readonly renderer: string;
   readonly fontPack: string;
@@ -164,7 +180,7 @@ export interface ProductAdapterObservableEvent {
   readonly evidenceRef: string;
 }
 
-export interface ObservedProductConfiguration {
+export interface DoubaoObservedProductConfiguration {
   readonly sourceUrl: string;
   readonly accountEvidence: "current_account_signed_in";
   readonly planName: string;
@@ -175,6 +191,26 @@ export interface ObservedProductConfiguration {
   readonly bestAvailableForCurrentAccount: true;
   readonly incrementalChargeRequired: false;
 }
+
+export interface QwenObservedProductConfiguration {
+  readonly actualUrl: string;
+  readonly accountReference: "current_signed_in_account";
+  readonly packageLabel: string;
+  readonly addedCost: "zero";
+  readonly modelLabel: string;
+  readonly expertMode: "enabled" | "disabled" | "unavailable";
+  readonly networking: "enabled";
+  readonly pageCount: 16;
+  readonly evidenceBindings?: Readonly<{
+    readonly package: `ev_${string}`;
+    readonly model: `ev_${string}`;
+    readonly configuration: `ev_${string}`;
+  }>;
+}
+
+export type ObservedProductConfiguration =
+  | DoubaoObservedProductConfiguration
+  | QwenObservedProductConfiguration;
 
 export interface StaticRenderEvidence {
   readonly pageNumber: number;
@@ -199,7 +235,7 @@ export interface ProductAttemptResult {
   readonly artifactCandidates: readonly ArtifactCandidate[];
   readonly observableEvents?: readonly ObservableAttemptEvent[];
   readonly manualActions?: readonly string[];
-  readonly observedConfiguration?: ObservedProductConfiguration;
+  readonly observedConfiguration?: ObservedProductConfiguration | null;
   readonly captureEvidence?: ProductArtifactCaptureEvidence;
 }
 

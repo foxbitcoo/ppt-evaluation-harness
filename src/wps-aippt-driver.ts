@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import type { ProductAdapterImplementationPackage } from "./product-adapter.ts";
+import type {
+  ProductAdapterImplementationPackage,
+  TrustedBrowserDriverEvidence,
+} from "./product-adapter.ts";
 import type { ObservableAttemptEvent } from "./domain.ts";
 import type {
   WpsAiPptBrowserCommand,
@@ -196,8 +199,11 @@ function assertPackage(
   }
 }
 
-export interface WpsAiPptBrowserDriverEvidence {
-  readonly driverId: string;
+export interface WpsAiPptBrowserDriverEvidence
+  extends TrustedBrowserDriverEvidence {
+  readonly driverId:
+    | WpsAiPptBrowserDriverPort["driverId"]
+    | "wps-aippt-harness-browser-bridge";
   readonly provenance:
     | "LIVE_PRODUCTION"
     | "PRODUCTION_REPLAY"

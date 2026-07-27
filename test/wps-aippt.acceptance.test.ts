@@ -756,8 +756,8 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:12f1d6103b02f20a873922de6a7e77fab87dcebb6087195505b93ce54ea96632",
-      sourceArchiveEntryCount: 37,
+        "sha256:f159be3361c970c9850a021905cc851136f3680a8b087c0eb524d3202c2687c2",
+      sourceArchiveEntryCount: 38,
     },
   );
 });
@@ -1648,13 +1648,13 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
     fixture.buildIdentity.source,
     "EMBEDDED_VERIFIED_BUILD_MANIFEST",
   );
-  assert.match(
+  assert.equal(
     fixture.buildIdentity.sourceArchiveDigest,
-    /^sha256:[a-f0-9]{64}$/,
+    "sha256:c0eca2073f04a6235b3dcf0dc09d3c2375e936e50607b229a365c8140387dbbb",
   );
-  assert.ok(
+  assert.equal(
     fixture.buildIdentity.sourceArchiveEntryCount,
-    "historical smoke records its own verified source archive",
+    36,
   );
   assert.equal(
     fixture.durableRecoveryRehearsal.executionEvidencePresent,

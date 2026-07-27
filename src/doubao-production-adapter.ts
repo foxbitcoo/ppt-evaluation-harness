@@ -17,8 +17,8 @@ import type {
   ProductAttemptResult,
   ProductRunCommand,
   ProductPackageSnapshot,
+  TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
-import type { WpsAiPptBrowserDriverEvidence } from "./wps-aippt-driver.ts";
 import { canonicalJsonBytes } from "./run-specification.ts";
 import {
   validatedOpenXmlPresentationSlideNames,
@@ -399,6 +399,11 @@ export interface DoubaoRealProviderCaptureReceipt {
   readonly renderDigest: `sha256:${string}`;
 }
 
+export interface DoubaoBrowserDriverEvidence
+  extends TrustedBrowserDriverEvidence {
+  readonly captureReceipt?: DoubaoRealProviderCaptureReceipt;
+}
+
 const HARNESS_OWNED_DOUBAO_CAPTURE_RECEIPTS =
   new Map<string, DoubaoRealProviderCaptureReceipt>([
     [
@@ -585,7 +590,7 @@ function assertDriverPackage(
 
 export function registeredDoubaoBrowserDriverEvidence(
   driver: DoubaoBrowserDriverPort | undefined,
-): WpsAiPptBrowserDriverEvidence {
+): DoubaoBrowserDriverEvidence {
   if (driver === undefined) {
     return Object.freeze({
       driverId: "doubao-harness-browser-bridge",
