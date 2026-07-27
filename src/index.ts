@@ -142,6 +142,7 @@ export {
   type MockAdapterOptions,
   type MockAdapterScenario,
 } from "./mock-wps.ts";
+export type { HarnessProductAdapterRuntime } from "./mock-wps.ts";
 export {
   parseAdapterExecutionConfiguration,
   type ArtifactCandidate,
@@ -152,6 +153,25 @@ export {
   type ProductPackageSnapshot,
   type ProductRunCommand,
 } from "./product-adapter.ts";
+export {
+  QWEN_ENTRY_URL,
+  QWEN_MAX_ATTEMPT_TIMEOUT_MS,
+  QWEN_PRODUCTION_ADAPTER_KIND,
+  QWEN_VOLCANO_SCENARIO,
+  QwenProductionProductAdapter,
+  createQwenProductAdapterExecutorForTest,
+  resolveQwenProductionAdapterExecutor,
+  type QwenBrowserDriverPort,
+  type QwenBrowserExecution,
+  type QwenBrowserExecutionCommand,
+  type QwenBrowserMilestone,
+  type QwenManualAction,
+  type QwenObservedConfiguration,
+  type QwenProductAdapterExecutor,
+  type QwenProductAttemptResult,
+  type QwenStaticRender,
+  type QwenTraceEvent,
+} from "./qwen-production-adapter.ts";
 export type {
   Artifact,
   AdjudicationEventRecord,

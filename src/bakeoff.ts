@@ -49,6 +49,7 @@ import {
 import {
   renderStaticArtifact,
   resolveHarnessProductAdapterExecutor,
+  type HarnessProductAdapterRuntime,
 } from "./mock-wps.ts";
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
@@ -202,6 +203,7 @@ export interface BakeoffHarnessDependencies {
   readonly feishu: FeishuProjectionPort;
   readonly productAdapter?: ProductAdapterPort;
   readonly productAdapters?: readonly ProductAdapterPort[];
+  readonly productAdapterRuntime?: HarnessProductAdapterRuntime;
   readonly attemptDeadline?: AttemptDeadlinePort;
   readonly referencePackStore?: ReferencePackStorePort;
   readonly referencePackGenerator?: ReferencePackGeneratorPort;
@@ -525,6 +527,7 @@ class ArtifactPackageIdentityConflictError extends Error {
 
 function snapshotProductSelections(
   adapters: readonly ProductAdapterPort[],
+  runtime: HarnessProductAdapterRuntime = {},
 ): readonly SelectedProductAdapter[] {
   return Object.freeze(
     adapters.map((adapter) => {
@@ -533,6 +536,15 @@ function snapshotProductSelections(
         egressDestination: Object.freeze(
           structuredClone(adapter.productPackage.egressDestination),
         ),
+        ...(adapter.productPackage.declaredConfiguration === undefined
+          ? {}
+          : {
+              declaredConfiguration: Object.freeze(
+                structuredClone(
+                  adapter.productPackage.declaredConfiguration,
+                ),
+              ),
+            }),
       });
       const implementationPackage =
         Object.freeze<ProductAdapterImplementationPackage>({
@@ -560,6 +572,7 @@ function snapshotProductSelections(
         resolveHarnessProductAdapterExecutor(
           implementationPackage,
           executionConfiguration,
+          runtime,
         );
       const executionEntrypointDigest = sha256Bytes(
         new TextEncoder().encode(selectedExecute.toString()),
@@ -954,6 +967,7 @@ function attemptRecord(input: {
   readonly retryOfAttemptId: string | null;
   readonly caseId: string;
 }): RunRecord {
+  const adapterTrace = input.result.trace;
   return {
     recordId: input.attemptId,
     recordType: "evaluation_attempt",
@@ -984,27 +998,45 @@ function attemptRecord(input: {
       input.terminalReason === "human_wait"
         ? fixedTimestampAfter(input.measuredElapsedMs)
         : null,
-    observableEvents: [
-      {
-        eventId: `${input.attemptId}-event-1`,
-        jobId: MOCK_SCENARIO.jobId,
-        caseId: input.caseId,
-        runId: input.runId,
-        attemptId: input.attemptId,
-        attemptSeq: input.attemptSeq,
-        eventType:
-          input.terminalReason === "human_wait"
-            ? "waiting_for_human"
-            : `terminal:${input.terminalReason}`,
-        sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
-        observedAt: fixedTimestampAfter(input.measuredElapsedMs),
-        writerId: "mock-runner@1",
-        evidenceRef: `mock://${vendorSlug(
-          input.productPackage.packageId,
-        )}/attempt-${input.attemptSeq}`,
-      },
-    ],
-    manualActions: [],
+    observableEvents:
+      adapterTrace === undefined
+        ? [
+            {
+              eventId: `${input.attemptId}-event-1`,
+              jobId: MOCK_SCENARIO.jobId,
+              caseId: input.caseId,
+              runId: input.runId,
+              attemptId: input.attemptId,
+              attemptSeq: input.attemptSeq,
+              eventType:
+                input.terminalReason === "human_wait"
+                  ? "waiting_for_human"
+                  : `terminal:${input.terminalReason}`,
+              sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
+              observedAt: fixedTimestampAfter(input.measuredElapsedMs),
+              writerId: "mock-runner@1",
+              evidenceRef: `mock://${vendorSlug(
+                input.productPackage.packageId,
+              )}/attempt-${input.attemptSeq}`,
+            },
+          ]
+        : adapterTrace.map((event, index) => ({
+            eventId: `${input.attemptId}-event-${index + 1}`,
+            jobId: MOCK_SCENARIO.jobId,
+            caseId: input.caseId,
+            runId: input.runId,
+            attemptId: input.attemptId,
+            attemptSeq: input.attemptSeq,
+            eventType: event.eventType,
+            sourceAt: event.observedAt,
+            observedAt: event.observedAt,
+            writerId: input.productPackage.adapterVersion,
+            evidenceRef: event.evidenceRef,
+          })),
+    manualActions:
+      input.result.manualActions?.map(
+        ({ action, observedAt }) => `${observedAt} ${action}`,
+      ) ?? [],
     costEvidence: {
       classification: "unknown",
       amount: null,
@@ -1019,6 +1051,12 @@ function attemptRecord(input: {
     artifactId: null,
     renderManifestId: null,
     scorecardId: null,
+    ...(input.result.observedConfiguration === undefined
+      ? {}
+      : {
+          observedProductConfiguration:
+            input.result.observedConfiguration,
+        }),
   };
 }
 
@@ -1423,6 +1461,7 @@ export function createBakeoffHarness({
   feishu,
   productAdapter,
   productAdapters,
+  productAdapterRuntime,
   attemptDeadline: configuredAttemptDeadline,
   referencePackStore: configuredReferencePackStore,
   referencePackGenerator: configuredReferencePackGenerator,
@@ -1961,6 +2000,7 @@ export function createBakeoffHarness({
       const commandSnapshot = snapshotBakeoffCommand(command);
       const selections = snapshotProductSelections(
         selectedProductAdapters,
+        productAdapterRuntime,
       );
       const jobIdentity = bakeoffJobIdentity(
         commandSnapshot,

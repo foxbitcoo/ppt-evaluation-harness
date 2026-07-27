@@ -17,6 +17,9 @@ export interface ProductPackageSnapshot {
   readonly provenance: "MOCK" | "PRODUCTION";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly egressDestination: EgressDestinationMetadata;
+  readonly declaredConfiguration?: Readonly<
+    Record<string, string | number | boolean | null>
+  >;
 }
 
 export interface ProductRunCommand {
@@ -40,6 +43,16 @@ export interface ProductAttemptResult {
   readonly submissionEvidence: SubmissionEvidence;
   readonly elapsedMs: number;
   readonly artifactCandidates: readonly ArtifactCandidate[];
+  readonly trace?: readonly {
+    readonly eventType: string;
+    readonly observedAt: string;
+    readonly evidenceRef: string;
+  }[];
+  readonly manualActions?: readonly {
+    readonly action: string;
+    readonly observedAt: string;
+  }[];
+  readonly observedConfiguration?: Readonly<object> | null;
 }
 
 export interface ProductAdapterImplementationPackage {

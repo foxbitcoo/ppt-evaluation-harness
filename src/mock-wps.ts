@@ -26,6 +26,11 @@ import type {
 } from "./product-adapter.ts";
 import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
+import {
+  QWEN_PRODUCTION_ADAPTER_KIND,
+  resolveQwenProductionAdapterExecutor,
+  type QwenBrowserDriverPort,
+} from "./qwen-production-adapter.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -824,8 +829,16 @@ function applyRegisteredArtifactScenario(
 export function resolveHarnessProductAdapterExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
+  runtime: HarnessProductAdapterRuntime = {},
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
+  if (adapterKind === QWEN_PRODUCTION_ADAPTER_KIND) {
+    return resolveQwenProductionAdapterExecutor(
+      implementationPackage,
+      executionConfiguration,
+      runtime.qwenBrowserDriver,
+    );
+  }
   if (
     adapterKind !== "mock-wps" &&
     adapterKind !== "mock-qwen" &&
@@ -876,6 +889,10 @@ export function resolveHarnessProductAdapterExecutor(
     );
   };
   return Object.freeze(executor);
+}
+
+export interface HarnessProductAdapterRuntime {
+  readonly qwenBrowserDriver?: QwenBrowserDriverPort;
 }
 
 export class MockWpsProductAdapter implements ProductAdapterPort {
