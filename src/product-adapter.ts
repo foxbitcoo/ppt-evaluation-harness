@@ -17,6 +17,17 @@ export interface ProductPackageSnapshot {
   readonly provenance: "MOCK" | "PRODUCTION";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly egressDestination: EgressDestinationMetadata;
+  readonly evaluationConfiguration?: ProductEvaluationConfigurationSnapshot;
+}
+
+export interface ProductEvaluationConfigurationSnapshot {
+  readonly accountContext: "current_authenticated_account";
+  readonly benchmarkProtocol: "best_available_zero_incremental_cost";
+  readonly entryUrl: string;
+  readonly modelSelection: "best_available_for_current_account";
+  readonly networking: "enabled";
+  readonly purchasePolicy: "no_incremental_charge";
+  readonly requestedPageCount: 16;
 }
 
 export interface ProductRunCommand {
@@ -34,12 +45,61 @@ export interface ArtifactCandidate {
   readonly policyCompliant: boolean;
 }
 
+export interface ProductAdapterObservableEvent {
+  readonly eventType:
+    | "preflight_observed"
+    | "query_not_submitted"
+    | "query_submission_unknown"
+    | "query_submitted"
+    | "generation_ready"
+    | "generation_failed"
+    | "generation_timed_out"
+    | "waiting_for_human"
+    | "artifact_exported"
+    | "export_failed"
+    | "render_failed"
+    | "static_render_completed";
+  readonly observedAt: string;
+  readonly evidenceRef: string;
+}
+
+export interface ObservedProductConfiguration {
+  readonly sourceUrl: string;
+  readonly accountEvidence: "current_account_signed_in";
+  readonly planName: string;
+  readonly modelName: string;
+  readonly modeName: string;
+  readonly networking: "enabled";
+  readonly requestedPageCount: 16;
+  readonly bestAvailableForCurrentAccount: true;
+  readonly incrementalChargeRequired: false;
+}
+
+export interface StaticRenderEvidence {
+  readonly pageNumber: number;
+  readonly filename: string;
+  readonly mimeType: "image/png";
+  readonly byteSize: number;
+  readonly contentHash: `sha256:${string}`;
+}
+
+export interface ProductArtifactCaptureEvidence {
+  readonly renderer: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly artifactPageCount: 16;
+  readonly staticRenders: readonly StaticRenderEvidence[];
+}
+
 export interface ProductAttemptResult {
   readonly terminalReason: TerminalReason;
   readonly blockReason: BlockReason | null;
   readonly submissionEvidence: SubmissionEvidence;
   readonly elapsedMs: number;
   readonly artifactCandidates: readonly ArtifactCandidate[];
+  readonly observableEvents?: readonly ProductAdapterObservableEvent[];
+  readonly manualActions?: readonly string[];
+  readonly observedConfiguration?: ObservedProductConfiguration;
+  readonly captureEvidence?: ProductArtifactCaptureEvidence;
 }
 
 export interface ProductAdapterImplementationPackage {

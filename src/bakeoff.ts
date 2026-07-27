@@ -50,6 +50,9 @@ import {
   renderStaticArtifact,
   resolveHarnessProductAdapterExecutor,
 } from "./mock-wps.ts";
+import type {
+  DoubaoBrowserDriverPort,
+} from "./doubao-production-adapter.ts";
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import { scoreRenderedArtifact } from "./mock-score.ts";
@@ -216,6 +219,7 @@ export interface BakeoffHarnessDependencies {
   readonly tombstones?: TombstoneLedgerPort;
   readonly egressAudit?: EgressAuthorizationAuditPort;
   readonly specCommitSha?: string;
+  readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort;
 }
 
 interface InFlightBakeoffJob {
@@ -393,6 +397,7 @@ function bakeoffJobIdentity(
     readonly judgeDestination: EgressDestinationMetadata;
     readonly egressAudit: EgressAuthorizationAuditPort;
     readonly specCommitSha: string;
+    readonly doubaoBrowserDriver: DoubaoBrowserDriverPort | undefined;
   },
 ): string {
   return JSON.stringify({
@@ -452,6 +457,9 @@ function bakeoffJobIdentity(
       judgeDestination: dependencies.judgeDestination,
       egressAudit: dependencyIdentity(dependencies.egressAudit),
       specCommitSha: dependencies.specCommitSha,
+      doubaoBrowserDriver: dependencyIdentity(
+        dependencies.doubaoBrowserDriver,
+      ),
     },
   });
 }
@@ -525,6 +533,9 @@ class ArtifactPackageIdentityConflictError extends Error {
 
 function snapshotProductSelections(
   adapters: readonly ProductAdapterPort[],
+  runtime: {
+    readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort;
+  },
 ): readonly SelectedProductAdapter[] {
   return Object.freeze(
     adapters.map((adapter) => {
@@ -533,6 +544,15 @@ function snapshotProductSelections(
         egressDestination: Object.freeze(
           structuredClone(adapter.productPackage.egressDestination),
         ),
+        ...(adapter.productPackage.evaluationConfiguration === undefined
+          ? {}
+          : {
+              evaluationConfiguration: Object.freeze(
+                structuredClone(
+                  adapter.productPackage.evaluationConfiguration,
+                ),
+              ),
+            }),
       });
       const implementationPackage =
         Object.freeze<ProductAdapterImplementationPackage>({
@@ -560,6 +580,7 @@ function snapshotProductSelections(
         resolveHarnessProductAdapterExecutor(
           implementationPackage,
           executionConfiguration,
+          runtime,
         );
       const executionEntrypointDigest = sha256Bytes(
         new TextEncoder().encode(selectedExecute.toString()),
@@ -984,27 +1005,46 @@ function attemptRecord(input: {
       input.terminalReason === "human_wait"
         ? fixedTimestampAfter(input.measuredElapsedMs)
         : null,
-    observableEvents: [
-      {
-        eventId: `${input.attemptId}-event-1`,
+    observableEvents:
+      input.result.observableEvents?.map((event, index) => ({
+        eventId: `${input.attemptId}-event-${index + 1}`,
         jobId: MOCK_SCENARIO.jobId,
         caseId: input.caseId,
         runId: input.runId,
         attemptId: input.attemptId,
         attemptSeq: input.attemptSeq,
-        eventType:
-          input.terminalReason === "human_wait"
-            ? "waiting_for_human"
-            : `terminal:${input.terminalReason}`,
-        sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
-        observedAt: fixedTimestampAfter(input.measuredElapsedMs),
-        writerId: "mock-runner@1",
-        evidenceRef: `mock://${vendorSlug(
-          input.productPackage.packageId,
-        )}/attempt-${input.attemptSeq}`,
-      },
-    ],
-    manualActions: [],
+        eventType: event.eventType,
+        sourceAt: event.observedAt,
+        observedAt: event.observedAt,
+        writerId: input.productPackage.adapterVersion,
+        evidenceRef: event.evidenceRef,
+      })) ?? [
+        {
+          eventId: `${input.attemptId}-event-1`,
+          jobId: MOCK_SCENARIO.jobId,
+          caseId: input.caseId,
+          runId: input.runId,
+          attemptId: input.attemptId,
+          attemptSeq: input.attemptSeq,
+          eventType:
+            input.terminalReason === "human_wait"
+              ? "waiting_for_human"
+              : `terminal:${input.terminalReason}`,
+          sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
+          observedAt: fixedTimestampAfter(input.measuredElapsedMs),
+          writerId: "mock-runner@1",
+          evidenceRef: `mock://${vendorSlug(
+            input.productPackage.packageId,
+          )}/attempt-${input.attemptSeq}`,
+        },
+      ],
+    manualActions: input.result.manualActions ?? [],
+    ...(input.result.observedConfiguration === undefined
+      ? {}
+      : {
+          productConfigurationEvidence:
+            input.result.observedConfiguration,
+        }),
     costEvidence: {
       classification: "unknown",
       amount: null,
@@ -1437,6 +1477,7 @@ export function createBakeoffHarness({
   tombstones: configuredTombstones,
   egressAudit: configuredEgressAudit,
   specCommitSha = DEFAULT_SPEC_COMMIT_SHA,
+  doubaoBrowserDriver,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
     configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
@@ -1961,6 +2002,9 @@ export function createBakeoffHarness({
       const commandSnapshot = snapshotBakeoffCommand(command);
       const selections = snapshotProductSelections(
         selectedProductAdapters,
+        doubaoBrowserDriver === undefined
+          ? {}
+          : { doubaoBrowserDriver },
       );
       const jobIdentity = bakeoffJobIdentity(
         commandSnapshot,
@@ -1980,6 +2024,7 @@ export function createBakeoffHarness({
           judgeDestination,
           egressAudit,
           specCommitSha,
+          doubaoBrowserDriver,
         },
       );
       return coalesceBakeoffJob(

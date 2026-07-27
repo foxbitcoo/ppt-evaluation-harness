@@ -11,6 +11,12 @@ import {
   PRODUCTION_ENVIRONMENT_ORIGIN,
 } from "./environment-origin.ts";
 import {
+  DOUBAO_PRODUCTION_ADAPTER_KIND,
+  DOUBAO_PRODUCTION_SCENARIO,
+  resolveDoubaoProductionExecutor,
+  type DoubaoBrowserDriverPort,
+} from "./doubao-production-adapter.ts";
+import {
   MOCK_WPS_VOLCANO_SLIDES,
   type MockSlideFixture,
 } from "./fixtures/mock-wps-deck.ts";
@@ -824,8 +830,22 @@ function applyRegisteredArtifactScenario(
 export function resolveHarnessProductAdapterExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
+  runtime: {
+    readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort;
+  } = {},
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
+  if (adapterKind === DOUBAO_PRODUCTION_ADAPTER_KIND) {
+    if (executionConfiguration.scenario !== DOUBAO_PRODUCTION_SCENARIO) {
+      throw new Error(
+        `Product Adapter scenario is not registered: ${adapterKind}:${executionConfiguration.scenario}`,
+      );
+    }
+    return resolveDoubaoProductionExecutor(
+      implementationPackage,
+      runtime.doubaoBrowserDriver,
+    );
+  }
   if (
     adapterKind !== "mock-wps" &&
     adapterKind !== "mock-qwen" &&
