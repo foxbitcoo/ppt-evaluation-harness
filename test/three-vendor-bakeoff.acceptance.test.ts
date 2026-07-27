@@ -8,6 +8,7 @@ import {
   MockDoubaoProductAdapter,
   MockQwenProductAdapter,
   MockWpsProductAdapter,
+  VENDOR_GENERATION_TIMEOUT_MS,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   type ArtifactScoreTableRecord,
@@ -19,6 +20,31 @@ import {
   type ProductGapCardRecord,
   type RunRecord,
 } from "../src/index.ts";
+
+function deterministicDeadline(options: {
+  readonly timeoutCalls?: readonly number[];
+  readonly successElapsedMs?: number;
+} = {}): AttemptDeadlinePort {
+  let call = 0;
+  const timeoutCalls = new Set(options.timeoutCalls ?? []);
+  return {
+    async run(operation, timeoutMs) {
+      call += 1;
+      if (timeoutCalls.has(call)) {
+        return {
+          timedOut: true,
+          elapsedMs: VENDOR_GENERATION_TIMEOUT_MS,
+        };
+      }
+      const controller = new AbortController();
+      return {
+        timedOut: false,
+        value: await operation(controller.signal),
+        elapsedMs: options.successElapsedMs ?? 0,
+      };
+    },
+  };
+}
 
 test("one test Bakeoff Job creates stable WPS, Qwen, and Doubao child Runs", async () => {
   const feishu = new InMemoryFeishuProjection();
@@ -222,9 +248,10 @@ test("timeout and quota-blocked vendors end deterministically without blocking a
     feishu,
     productAdapters: [
       new MockWpsProductAdapter(),
-      new MockQwenProductAdapter({ scenario: "timeout" }),
+      new MockQwenProductAdapter(),
       new MockDoubaoProductAdapter({ scenario: "quota_blocked" }),
     ],
+    attemptDeadline: deterministicDeadline({ timeoutCalls: [2] }),
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -292,7 +319,7 @@ test("timeout and quota-blocked vendors end deterministically without blocking a
       {
         parentRecordId: "MOCK-run-wps-volcano-v1",
         attemptSeq: 1,
-        elapsedMs: 1,
+        elapsedMs: 0,
         submissionEvidence: "submitted",
         terminalReason: "success",
       },
@@ -300,13 +327,13 @@ test("timeout and quota-blocked vendors end deterministically without blocking a
         parentRecordId: "MOCK-run-qwen-volcano-v1",
         attemptSeq: 1,
         elapsedMs: 1_800_000,
-        submissionEvidence: "submitted",
+        submissionEvidence: "unknown",
         terminalReason: "vendor_timeout",
       },
       {
         parentRecordId: "MOCK-run-doubao-volcano-v1",
         attemptSeq: 1,
-        elapsedMs: 1,
+        elapsedMs: 0,
         submissionEvidence: "not_submitted",
         terminalReason: "quota",
       },
@@ -694,27 +721,15 @@ test("the command environment must match the projection environment before any a
 });
 
 test("an all-failed Bakeoff persists every failure and returns a MOCK failure report without captured output", async () => {
-  const wps = new MockWpsProductAdapter();
-  const timedOutWps: ProductAdapterPort = {
-    productPackage: wps.productPackage,
-    async execute() {
-      return {
-        terminalReason: "vendor_timeout",
-        blockReason: null,
-        submissionEvidence: "submitted",
-        elapsedMs: 1_800_000,
-        artifactCandidates: [],
-      };
-    },
-  };
   const feishu = new InMemoryFeishuProjection();
   const outcome = await createBakeoffHarness({
     feishu,
     productAdapters: [
-      timedOutWps,
+      new MockWpsProductAdapter(),
       new MockQwenProductAdapter({ scenario: "quota_blocked" }),
       new MockDoubaoProductAdapter({ scenario: "payment_blocked" }),
     ],
+    attemptDeadline: deterministicDeadline({ timeoutCalls: [1] }),
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -858,6 +873,7 @@ test("the Job freezes its selected Runs and protocol while Attempts retain obser
       new MockQwenProductAdapter({ scenario: "human_wait" }),
       new MockDoubaoProductAdapter(),
     ],
+    attemptDeadline: deterministicDeadline({ successElapsedMs: 7 }),
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -885,9 +901,10 @@ test("the Job freezes its selected Runs and protocol while Attempts retain obser
     cancellationPolicy: "independent_vendor_runs_continue",
   });
   assert.equal(job?.deadlineAt, "2026-01-01T00:30:00.000Z");
-  assert.equal(qwenAttempt?.vendorGenerationMs, 1);
+  assert.equal(qwenAttempt?.vendorGenerationMs, 7);
+  assert.equal(qwenAttempt?.vendorReportedElapsedMs, 1);
   assert.equal(qwenAttempt?.humanWaitMs, null);
-  assert.equal(qwenAttempt?.timingPausedAt, "2026-01-01T00:00:00.001Z");
+  assert.equal(qwenAttempt?.timingPausedAt, "2026-01-01T00:00:00.007Z");
   assert.deepEqual(qwenAttempt?.manualActions, []);
   assert.deepEqual(qwenAttempt?.costEvidence, {
     classification: "unknown",
@@ -903,8 +920,8 @@ test("the Job freezes its selected Runs and protocol while Attempts retain obser
       attemptId: "MOCK-run-qwen-volcano-v1-attempt-1",
       attemptSeq: 1,
       eventType: "waiting_for_human",
-      sourceAt: "2026-01-01T00:00:00.001Z",
-      observedAt: "2026-01-01T00:00:00.001Z",
+      sourceAt: "2026-01-01T00:00:00.007Z",
+      observedAt: "2026-01-01T00:00:00.007Z",
       writerId: "mock-runner@1",
       evidenceRef: "mock://qwen/attempt-1",
     },
@@ -1140,4 +1157,126 @@ test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", asyn
     /^MOCK-run-proto-[a-f0-9]{32}-volcano-v1$/,
   );
   assert.doesNotMatch(firstRunId ?? "", /\[object Object\]/);
+});
+
+test("measured deadline time overrides a successful adapter's self-reported elapsed time", async () => {
+  const wps = new MockWpsProductAdapter();
+  const inflatedElapsedAdapter: ProductAdapterPort = {
+    productPackage: wps.productPackage,
+    async execute(command) {
+      const artifact = await wps.execute(command);
+      assert.ok("content" in artifact);
+      return {
+        terminalReason: "success",
+        blockReason: null,
+        submissionEvidence: "submitted",
+        elapsedMs: 1_800_000,
+        artifactCandidates: [
+          { artifact, policyCompliant: true },
+        ],
+      };
+    },
+  };
+  const measuredDeadline: AttemptDeadlinePort = {
+    async run(operation) {
+      const controller = new AbortController();
+      return {
+        timedOut: false,
+        value: await operation(controller.signal),
+        elapsedMs: 5,
+      };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [inflatedElapsedAdapter],
+    attemptDeadline: measuredDeadline,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const attempt = feishu
+    .snapshot()
+    .runRecordTable.find(
+      ({ recordType }) => recordType === "evaluation_attempt",
+    );
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(attempt?.terminalReason, "success");
+  assert.equal(attempt?.elapsedMs, 5);
+  assert.equal(attempt?.vendorGenerationMs, 5);
+  assert.equal(attempt?.vendorReportedElapsedMs, 1_800_000);
+});
+
+test("package metadata and derived Run IDs are snapshotted before any adapter executes", async () => {
+  const wps = new MockWpsProductAdapter();
+  const qwen = new MockQwenProductAdapter();
+  const mutableQwenPackage = { ...qwen.productPackage };
+  const mutableQwen: ProductAdapterPort = {
+    productPackage: mutableQwenPackage,
+    execute: (command) => qwen.execute(command),
+  };
+  const mutatingWps: ProductAdapterPort = {
+    productPackage: wps.productPackage,
+    async execute(command) {
+      mutableQwenPackage.packageId = "MUTATED-package-id";
+      mutableQwenPackage.displayName = "Mutated after selection";
+      return wps.execute(command);
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [mutatingWps, mutableQwen],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const qwenRun = feishu
+    .snapshot()
+    .runRecordTable.find(
+      ({ recordId }) => recordId === "MOCK-run-qwen-volcano-v1",
+    );
+
+  assert.equal(mutableQwenPackage.packageId, "MUTATED-package-id");
+  assert.equal(qwenRun?.productPackageId, "MOCK-qwen-package-v1");
+  assert.equal(qwenRun?.product, "Mock Qwen PPT");
+});
+
+test("distinct package Runs cannot persist the same Artifact ID", async () => {
+  const wps = new MockWpsProductAdapter();
+  const duplicateArtifactAdapters: ProductAdapterPort[] = [
+    {
+      productPackage: {
+        ...wps.productPackage,
+        packageId: "custom-package-a",
+        displayName: "Custom A",
+      },
+      execute: (command) => wps.execute(command),
+    },
+    {
+      productPackage: {
+        ...wps.productPackage,
+        packageId: "custom-package-b",
+        displayName: "Custom B",
+      },
+      execute: (command) => wps.execute(command),
+    },
+  ];
+  const feishu = new InMemoryFeishuProjection();
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: duplicateArtifactAdapters,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /duplicate Artifact IDs/i,
+  );
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
 });

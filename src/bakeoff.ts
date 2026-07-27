@@ -28,6 +28,7 @@ import { scoreRenderedArtifact } from "./mock-score.ts";
 import type {
   ProductAdapterPort,
   ProductAttemptResult,
+  ProductPackageSnapshot,
 } from "./product-adapter.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
@@ -98,7 +99,7 @@ export interface BakeoffHarnessDependencies {
 }
 
 interface CapturedVendorResult {
-  readonly adapter: ProductAdapterPort;
+  readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
   readonly status: RunStatus;
   readonly terminalReason: TerminalReason;
@@ -107,6 +108,12 @@ interface CapturedVendorResult {
   readonly renderManifest: RenderManifest | null;
   readonly scorecard: ArtifactScorecard | null;
   readonly attemptRecords: readonly RunRecord[];
+}
+
+interface SelectedProductAdapter {
+  readonly adapter: ProductAdapterPort;
+  readonly productPackage: ProductPackageSnapshot;
+  readonly runId: string;
 }
 
 const KNOWN_VENDOR_SLUGS = new Map<string, string>([
@@ -187,11 +194,13 @@ function fixedTimestampAfter(elapsedMs: number): string {
 }
 
 function attemptRecord(input: {
-  readonly adapter: ProductAdapterPort;
+  readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
   readonly attemptId: string;
   readonly attemptSeq: number;
   readonly result: ProductAttemptResult;
+  readonly measuredElapsedMs: number;
+  readonly vendorReportedElapsedMs: number | null;
   readonly terminalReason: TerminalReason;
   readonly status: RunStatus;
   readonly retryOfAttemptId: string | null;
@@ -203,12 +212,12 @@ function attemptRecord(input: {
     jobId: MOCK_SCENARIO.jobId,
     parentRecordId: input.runId,
     caseId: input.caseId,
-    product: input.adapter.productPackage.displayName,
-    productPackageId: input.adapter.productPackage.packageId,
-    adapterVersion: input.adapter.productPackage.adapterVersion,
+    product: input.productPackage.displayName,
+    productPackageId: input.productPackage.packageId,
+    adapterVersion: input.productPackage.adapterVersion,
     status: input.status,
     attemptSeq: input.attemptSeq,
-    elapsedMs: input.result.elapsedMs,
+    elapsedMs: input.measuredElapsedMs,
     submissionEvidence: input.result.submissionEvidence,
     terminalReason:
       input.terminalReason === "human_wait" ? null : input.terminalReason,
@@ -219,11 +228,12 @@ function attemptRecord(input: {
     selectedRunIds: null,
     protocolSnapshot: null,
     deadlineAt: null,
-    vendorGenerationMs: input.result.elapsedMs,
+    vendorGenerationMs: input.measuredElapsedMs,
+    vendorReportedElapsedMs: input.vendorReportedElapsedMs,
     humanWaitMs: null,
     timingPausedAt:
       input.terminalReason === "human_wait"
-        ? fixedTimestampAfter(input.result.elapsedMs)
+        ? fixedTimestampAfter(input.measuredElapsedMs)
         : null,
     observableEvents: [
       {
@@ -237,11 +247,11 @@ function attemptRecord(input: {
           input.terminalReason === "human_wait"
             ? "waiting_for_human"
             : `terminal:${input.terminalReason}`,
-        sourceAt: fixedTimestampAfter(input.result.elapsedMs),
-        observedAt: fixedTimestampAfter(input.result.elapsedMs),
+        sourceAt: fixedTimestampAfter(input.measuredElapsedMs),
+        observedAt: fixedTimestampAfter(input.measuredElapsedMs),
         writerId: "mock-runner@1",
         evidenceRef: `mock://${vendorSlug(
-          input.adapter.productPackage.packageId,
+          input.productPackage.packageId,
         )}/attempt-${input.attemptSeq}`,
       },
     ],
@@ -263,15 +273,15 @@ function attemptRecord(input: {
 }
 
 async function executeVendor(
-  adapter: ProductAdapterPort,
+  selection: SelectedProductAdapter,
   caseId: string,
   attemptDeadline: AttemptDeadlinePort,
   jobDeadlineAtEpochMs: number,
 ): Promise<CapturedVendorResult> {
+  const { adapter, productPackage, runId } = selection;
   const scenario = KNOWN_VENDOR_SCENARIOS.get(
-    adapter.productPackage.packageId,
+    productPackage.packageId,
   );
-  const runId = runIdForPackage(adapter.productPackage.packageId);
   const attempts: RunRecord[] = [];
   let retryOfAttemptId: string | null = null;
   let attemptSeq = 1;
@@ -282,6 +292,8 @@ async function executeVendor(
 
   while (true) {
     const attemptId = `${runId}-attempt-${attemptSeq}`;
+    let measuredElapsedMs = 0;
+    let vendorReportedElapsedMs: number | null = null;
     const attemptTimeoutMs = Math.max(
       0,
       Math.min(
@@ -317,6 +329,7 @@ async function executeVendor(
           0,
           observedBudgetRemainingMs - deadlineResult.elapsedMs,
         );
+        measuredElapsedMs = deadlineResult.elapsedMs;
         result = deadlineResult.timedOut
           ? {
               terminalReason: "vendor_timeout",
@@ -326,32 +339,39 @@ async function executeVendor(
               artifactCandidates: [],
             }
           : normalizeExecution(deadlineResult.value);
+        if (!deadlineResult.timedOut) {
+          vendorReportedElapsedMs = result.elapsedMs;
+        }
       } catch {
+        measuredElapsedMs = Math.max(0, Date.now() - startedAt);
         observedBudgetRemainingMs = Math.max(
           0,
-          observedBudgetRemainingMs - Math.max(0, Date.now() - startedAt),
+          observedBudgetRemainingMs - measuredElapsedMs,
         );
         result = {
           terminalReason: "technical_failure",
           blockReason: null,
           submissionEvidence: "unknown",
-          elapsedMs: Math.max(0, Date.now() - startedAt),
+          elapsedMs: measuredElapsedMs,
           artifactCandidates: [],
         };
       }
     }
     terminalReason =
-      result.elapsedMs >= VENDOR_GENERATION_TIMEOUT_MS
-        ? "vendor_timeout"
+      result.terminalReason === "vendor_timeout" &&
+      vendorReportedElapsedMs !== null
+        ? "technical_failure"
         : result.terminalReason;
     status = statusFromTerminalReason(terminalReason);
     attempts.push(
       attemptRecord({
-        adapter,
+        productPackage,
         runId,
         attemptId,
         attemptSeq,
         result,
+        measuredElapsedMs,
+        vendorReportedElapsedMs,
         terminalReason,
         status,
         retryOfAttemptId,
@@ -371,7 +391,7 @@ async function executeVendor(
 
   if (status !== "completed") {
     return {
-      adapter,
+      productPackage,
       runId,
       status,
       terminalReason,
@@ -388,7 +408,7 @@ async function executeVendor(
   )?.artifact;
   if (artifact === undefined) {
     return {
-      adapter,
+      productPackage,
       runId,
       status: "failed",
       terminalReason: "technical_failure",
@@ -423,7 +443,7 @@ async function executeVendor(
       runId.replace(/^MOCK-run-/, "MOCK-scorecard-"),
   });
   return {
-    adapter,
+    productPackage,
     runId,
     status,
     terminalReason,
@@ -475,36 +495,54 @@ export function createBakeoffHarness({
           `${command.environment} command cannot use ${feishu.targetEnvironment} projection environment`,
         );
       }
-      const packageIds = selectedProductAdapters.map(
+      const selections = Object.freeze(
+        selectedProductAdapters.map((adapter) => {
+          const productPackage = Object.freeze({
+            ...adapter.productPackage,
+          });
+          return Object.freeze({
+            adapter,
+            productPackage,
+            runId: runIdForPackage(productPackage.packageId),
+          });
+        }),
+      );
+      const packageIds = selections.map(
         ({ productPackage }) => productPackage.packageId,
       );
       if (new Set(packageIds).size !== packageIds.length) {
         throw new Error("Bakeoff Job contains duplicate Product Package IDs");
       }
-      const selectedRunIds = packageIds.map(runIdForPackage);
+      const selectedRunIds = selections.map(({ runId }) => runId);
       if (new Set(selectedRunIds).size !== selectedRunIds.length) {
         throw new Error("Bakeoff Job contains duplicate derived Run IDs");
       }
-      for (const adapter of selectedProductAdapters) {
+      for (const { productPackage } of selections) {
         assertEnvironmentOriginAllowed(
-          adapter.productPackage.environmentOrigin,
+          productPackage.environmentOrigin,
           command.environment,
-          `Product Package ${adapter.productPackage.packageId}`,
+          `Product Package ${productPackage.packageId}`,
         );
       }
 
       const jobDeadlineAtEpochMs =
         Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
       const results = await Promise.all(
-        selectedProductAdapters.map((adapter) =>
+        selections.map((selection) =>
           executeVendor(
-            adapter,
+            selection,
             command.caseId,
             attemptDeadline,
             jobDeadlineAtEpochMs,
           ),
         ),
       );
+      const artifactIds = results.flatMap(({ artifact }) =>
+        artifact === null ? [] : [artifact.artifactId],
+      );
+      if (new Set(artifactIds).size !== artifactIds.length) {
+        throw new Error("Bakeoff Job contains duplicate Artifact IDs");
+      }
       const successful = results.filter(
         (
           result,
@@ -554,6 +592,7 @@ export function createBakeoffHarness({
         },
         deadlineAt: fixedTimestampAfter(VENDOR_GENERATION_TIMEOUT_MS),
         vendorGenerationMs: null,
+        vendorReportedElapsedMs: null,
         humanWaitMs: null,
         timingPausedAt: null,
         observableEvents: null,
@@ -569,9 +608,9 @@ export function createBakeoffHarness({
           recordId: result.runId,
           recordType: "vendor_run",
           parentRecordId: MOCK_SCENARIO.jobId,
-          product: result.adapter.productPackage.displayName,
-          productPackageId: result.adapter.productPackage.packageId,
-          adapterVersion: result.adapter.productPackage.adapterVersion,
+          product: result.productPackage.displayName,
+          productPackageId: result.productPackage.packageId,
+          adapterVersion: result.productPackage.adapterVersion,
           status: result.status,
           attemptSeq: null,
           elapsedMs: null,
@@ -590,6 +629,7 @@ export function createBakeoffHarness({
           protocolSnapshot: null,
           deadlineAt: null,
           vendorGenerationMs: null,
+          vendorReportedElapsedMs: null,
           humanWaitMs: null,
           timingPausedAt: null,
           observableEvents: null,
@@ -627,10 +667,10 @@ export function createBakeoffHarness({
       for (const rightResult of successful.slice(1)) {
         if (leftResult === undefined) break;
         const leftSlug = vendorSlug(
-          leftResult.adapter.productPackage.packageId,
+          leftResult.productPackage.packageId,
         );
         const rightSlug = vendorSlug(
-          rightResult.adapter.productPackage.packageId,
+          rightResult.productPackage.packageId,
         );
         const comparisonId = `MOCK-comparison-${leftSlug}-${rightSlug}-volcano-v1`;
         await feishu.appendComparison({
@@ -662,7 +702,7 @@ export function createBakeoffHarness({
           MOCK_SCENARIO.jobId,
           jobStatus,
           results.map((result) => ({
-            product: result.adapter.productPackage.displayName,
+            product: result.productPackage.displayName,
             runId: result.runId,
             status: result.status,
             stateReason: result.terminalReason,

@@ -96,6 +96,7 @@ export interface RunRecord {
   readonly protocolSnapshot: BakeoffProtocolSnapshot | null;
   readonly deadlineAt: string | null;
   readonly vendorGenerationMs: number | null;
+  readonly vendorReportedElapsedMs: number | null;
   readonly humanWaitMs: number | null;
   readonly timingPausedAt: string | null;
   readonly observableEvents: readonly ObservableAttemptEvent[] | null;
