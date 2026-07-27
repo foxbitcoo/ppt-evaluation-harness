@@ -742,7 +742,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:7700a29d871b78aa8d5ae4040721af46ca31ab4de49557e1ed5142222bf3374b",
+        "sha256:c0eca2073f04a6235b3dcf0dc09d3c2375e936e50607b229a365c8140387dbbb",
       sourceArchiveEntryCount: 36,
     },
   );
@@ -1562,7 +1562,7 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
   );
   assert.match(
     fixture.durableRecoveryRehearsal.recoveryCommand,
-    /^node --import tsx scripts\/recover-wps-production-run\.ts wps-real-provider-20260727-round5-deadline-freeze root:wps-replay-artifact-recovery /,
+    /^node --import tsx scripts\/recover-wps-production-run\.ts wps-real-provider-20260728-round5-resolution-final root:wps-replay-artifact-recovery /,
   );
   assert.doesNotMatch(
     fixture.durableRecoveryRehearsal.recoveryCommand,

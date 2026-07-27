@@ -8,6 +8,7 @@ import type {
   BakeoffJobOutcome,
   BlockReason,
   JudgeFailureLineage,
+  ObservableAttemptEvent,
   RenderManifest,
   RunRecord,
   RunStatus,
@@ -662,9 +663,15 @@ class ArtifactPackageIdentityConflictError extends Error {
 }
 
 class UnresolvedAttemptShutdownError extends Error {
-  constructor(attemptId: string) {
+  constructor(
+    attemptId: string,
+    reason =
+      "submitted checkpoint durable reconciliation is incomplete",
+    cause?: unknown,
+  ) {
     super(
-      `Submitted Attempt ${attemptId} shutdown is unresolved: durable reconciliation is incomplete`,
+      `Attempt ${attemptId} shutdown is unresolved: ${reason}`,
+      cause === undefined ? undefined : { cause },
     );
     this.name = "UnresolvedAttemptShutdownError";
   }
@@ -1354,25 +1361,45 @@ async function executeVendor(
           );
         }
         if (deadlineResult.timedOut) {
-          const durableCheckpoints =
-            (await attemptCheckpointStore.readAttempt?.(attemptId)) ??
-            [];
+          let durableCheckpoints: readonly ObservableAttemptEvent[];
+          try {
+            if (attemptCheckpointStore.readAttempt === undefined) {
+              throw new Error(
+                "durable checkpoint read is unavailable",
+              );
+            }
+            durableCheckpoints =
+              await attemptCheckpointStore.readAttempt(attemptId);
+          } catch (error) {
+            throw new UnresolvedAttemptShutdownError(
+              attemptId,
+              "durable checkpoint read is unavailable; reconciliation status is unknown",
+              error,
+            );
+          }
           const submittedCheckpoint = durableCheckpoints.some(
             ({ submissionEvidenceAtCheckpoint }) =>
               submissionEvidenceAtCheckpoint === "submitted",
           );
-          const durableReconciliationTerminal =
+          const durableResolvedReconciliation =
             durableCheckpoints.some(
               ({
                 eventType,
+                reconciliationObservedState,
                 reconciliationTerminalReason,
               }) =>
                 eventType === "task_reconciliation_result" &&
-                reconciliationTerminalReason !== undefined,
+                ((reconciliationObservedState ===
+                  "artifact_ready" &&
+                  reconciliationTerminalReason ===
+                    "download_failure") ||
+                  (reconciliationObservedState === "failed" &&
+                    reconciliationTerminalReason ===
+                      "technical_failure")),
             );
           if (
             submittedCheckpoint &&
-            !durableReconciliationTerminal
+            !durableResolvedReconciliation
           ) {
             throw new UnresolvedAttemptShutdownError(attemptId);
           }
