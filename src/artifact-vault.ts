@@ -7,10 +7,14 @@ import {
   renderManifestBytes,
 } from "./render-manifest.ts";
 import {
+  approvedEgressAuthorizationHash,
+  assertApprovedEgressAuthorizationCurrent,
+  assertPersistedApprovedEgressAuthorization,
   requireEgressAuthorization,
   SYSTEM_CLOCK,
   type ApprovedEgressAuthorization,
   type ClockPort,
+  type EgressAuthorizationAuditPort,
   type EgressDestinationMetadata,
   type EgressAuthorizationPort,
 } from "./egress-authorization.ts";
@@ -20,6 +24,7 @@ export interface ImmutableBlobWriteContext {
   readonly jobId: string;
   readonly contentHash: `sha256:${string}`;
   readonly writeAttemptId: string;
+  readonly assertWriteAuthorized: () => void;
 }
 
 export interface JobTombstoneLookupPort {
@@ -64,6 +69,11 @@ export interface ArtifactCaptureJournalPort {
     readonly detail: string;
   }): Promise<string>;
   append(event: ArtifactCaptureJournalEvent): Promise<void>;
+  verifyCompletedAttempt(input: {
+    readonly captureAttemptId: string;
+    readonly jobId: string;
+    readonly artifactId: string;
+  }): Promise<void>;
 }
 
 export class InMemoryArtifactCaptureJournal
@@ -113,6 +123,28 @@ export class InMemoryArtifactCaptureJournal
       return;
     }
     this.#events.push(structuredClone(event));
+  }
+
+  async verifyCompletedAttempt(input: {
+    readonly captureAttemptId: string;
+    readonly jobId: string;
+    readonly artifactId: string;
+  }): Promise<void> {
+    const events = this.#events.filter(
+      (event) =>
+        event.captureAttemptId === input.captureAttemptId &&
+        event.jobId === input.jobId &&
+        event.artifactId === input.artifactId,
+    );
+    if (
+      !events.some(({ eventType }) => eventType === "started") ||
+      !events.some(({ eventType }) => eventType === "completed") ||
+      events.some(({ eventType }) => eventType === "failed")
+    ) {
+      throw new Error(
+        `Artifact capture journal trace is incomplete: ${input.captureAttemptId}`,
+      );
+    }
   }
 
   list(
@@ -167,6 +199,7 @@ export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
       );
     }
     const write = async () => {
+      context.assertWriteAuthorized();
       const existing = this.#blobs.get(key);
       if (existing !== undefined) {
         if (!isDeepStrictEqual(existing, content)) {
@@ -269,9 +302,12 @@ export interface RetentionPayloadLocation {
 export interface ArtifactPackageManifest {
   readonly schemaVersion: "artifact-package-manifest-v1";
   readonly manifestHash: `sha256:${string}`;
+  readonly artifactIdentityHash: `sha256:${string}`;
   readonly captureJournalId: string;
   readonly captureAttemptId: string;
   readonly jobId: string;
+  readonly dataClassification: "public_or_synthetic" | "restricted";
+  readonly sourceOwner: string;
   readonly artifact: ArtifactMetadata;
   readonly renderManifestId: string;
   readonly renderManifestHash: `sha256:${string}`;
@@ -309,6 +345,7 @@ export interface ArtifactVaultDependencies {
   readonly primary: ImmutableBlobStorePort;
   readonly secondary: ImmutableBlobStorePort;
   readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly egressAudit: EgressAuthorizationAuditPort;
   readonly captureJournal: ArtifactCaptureJournalPort;
   readonly payloadInventory: PayloadInventoryPort;
   readonly clock?: ClockPort;
@@ -351,6 +388,23 @@ function manifestIdentity(input: {
   };
 }
 
+function captureEnvelopeIdentity(input: {
+  readonly artifactIdentityHash: `sha256:${string}`;
+  readonly captureJournalId: string;
+  readonly captureAttemptId: string;
+  readonly jobId: string;
+  readonly artifactId: string;
+  readonly dataClassification: "public_or_synthetic" | "restricted";
+  readonly sourceOwner: string;
+  readonly primaryStoreId: string;
+  readonly secondaryStoreId: string;
+}) {
+  return {
+    schemaVersion: "artifact-package-capture-envelope-v1" as const,
+    ...input,
+  };
+}
+
 function identityBytes(identity: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(canonicalValue(identity)));
 }
@@ -383,6 +437,7 @@ function storageRequest(input: {
   readonly jobId: string;
   readonly runId: string;
   readonly artifactId: string;
+  readonly captureAttemptId: string;
   readonly dataClassification: "public_or_synthetic" | "restricted";
   readonly sourceOwner: string;
   readonly storeId: string;
@@ -392,10 +447,10 @@ function storageRequest(input: {
   readonly destination: EgressDestinationMetadata;
 }) {
   return Object.freeze({
-    requestId: `artifact-storage:${input.artifactId}:${input.storeId}:${input.key}`,
+    requestId: `artifact-storage:${input.captureAttemptId}:${input.storeId}:${input.key}`,
     jobId: input.jobId,
     runId: input.runId,
-    attemptId: null,
+    attemptId: input.captureAttemptId,
     dataClassification: input.dataClassification,
     sourceOwner: input.sourceOwner,
     processingPurpose: "artifact_storage" as const,
@@ -414,6 +469,7 @@ export function createArtifactVault({
   primary,
   secondary,
   egressAuthorization,
+  egressAudit,
   captureJournal,
   payloadInventory,
   clock = SYSTEM_CLOCK,
@@ -530,13 +586,13 @@ export function createArtifactVault({
         derivatives,
       });
       const frozenIdentity = identityBytes(identity);
-      const manifestHash = sha256(frozenIdentity);
+      const artifactIdentityHash = sha256(frozenIdentity);
 
       const payloads = [
         {
           key: `artifacts/${artifact.artifactId}/manifest`,
           content: frozenIdentity,
-          contentHash: manifestHash,
+          contentHash: artifactIdentityHash,
           contentField: "artifact_package_identity_manifest",
         },
         {
@@ -600,13 +656,14 @@ export function createArtifactVault({
       const createdLocations = new Set<string>();
       try {
         for (const planned of writePlan) {
-          authorizations.push(
+          const authorization =
             await requireEgressAuthorization(
               egressAuthorization,
               storageRequest({
                 jobId: command.jobId,
                 runId: artifact.runId,
                 artifactId: artifact.artifactId,
+                captureAttemptId,
                 dataClassification: command.dataClassification,
                 sourceOwner: command.sourceOwner,
                 storeId: planned.store.storeId,
@@ -616,23 +673,22 @@ export function createArtifactVault({
                 destination: planned.store.egressDestination,
               }),
               clock,
-            ),
-          );
+            );
+          await egressAudit.append(authorization);
+          authorizations.push(authorization);
           const locationIdentity =
             `${planned.store.storeId}\u0000${planned.key}`;
-          const before = await planned.store.read(planned.key);
-          if (before === null) {
-            createdLocations.add(locationIdentity);
-            await planned.store.putImmutable(planned.key, planned.content, {
-              jobId: command.jobId,
-              contentHash: planned.contentHash,
-              writeAttemptId: captureAttemptId,
-            });
-          } else if (sha256(before) !== planned.contentHash) {
-            throw new Error(
-              `Immutable blob conflict: ${planned.store.storeId}/${planned.key}`,
-            );
-          }
+          createdLocations.add(locationIdentity);
+          await planned.store.putImmutable(planned.key, planned.content, {
+            jobId: command.jobId,
+            contentHash: planned.contentHash,
+            writeAttemptId: captureAttemptId,
+            assertWriteAuthorized: () =>
+              assertApprovedEgressAuthorizationCurrent(
+                authorization,
+                clock,
+              ),
+          });
           const readback = await planned.store.read(planned.key);
           if (
             readback === null ||
@@ -727,12 +783,30 @@ export function createArtifactVault({
         throw error;
       }
 
+      const manifestHash = sha256(
+        identityBytes(
+          captureEnvelopeIdentity({
+            artifactIdentityHash,
+            captureJournalId: captureJournal.journalId,
+            captureAttemptId,
+            jobId: command.jobId,
+            artifactId: artifact.artifactId,
+            dataClassification: command.dataClassification,
+            sourceOwner: command.sourceOwner,
+            primaryStoreId: primary.storeId,
+            secondaryStoreId: secondary.storeId,
+          }),
+        ),
+      );
       return Object.freeze({
         schemaVersion: "artifact-package-manifest-v1",
         manifestHash,
+        artifactIdentityHash,
         captureJournalId: captureJournal.journalId,
         captureAttemptId,
         jobId: command.jobId,
+        dataClassification: command.dataClassification,
+        sourceOwner: command.sourceOwner,
         artifact: artifactMetadata,
         renderManifestId: renderManifest.renderManifestId,
         renderManifestHash: renderManifest.contentHash,
@@ -743,6 +817,109 @@ export function createArtifactVault({
     },
 
     async readFromSecondary(manifest) {
+      if (
+        manifest.schemaVersion !== "artifact-package-manifest-v1" ||
+        manifest.captureJournalId !== captureJournal.journalId ||
+        manifest.captureAttemptId.trim().length === 0 ||
+        manifest.dataClassification === undefined ||
+        manifest.sourceOwner?.trim().length === 0
+      ) {
+        throw new Error("Artifact package manifest envelope is invalid");
+      }
+      await captureJournal.verifyCompletedAttempt({
+        captureAttemptId: manifest.captureAttemptId,
+        jobId: manifest.jobId,
+        artifactId: manifest.artifact.artifactId,
+      });
+      const expectedManifestHash = sha256(
+        identityBytes(
+          captureEnvelopeIdentity({
+            artifactIdentityHash: manifest.artifactIdentityHash,
+            captureJournalId: manifest.captureJournalId,
+            captureAttemptId: manifest.captureAttemptId,
+            jobId: manifest.jobId,
+            artifactId: manifest.artifact.artifactId,
+            dataClassification: manifest.dataClassification,
+            sourceOwner: manifest.sourceOwner,
+            primaryStoreId: primary.storeId,
+            secondaryStoreId: secondary.storeId,
+          }),
+        ),
+      );
+      if (expectedManifestHash !== manifest.manifestHash) {
+        throw new Error("Artifact package manifest envelope hash mismatch");
+      }
+      const payloadDescriptors = [
+        {
+          key: `artifacts/${manifest.artifact.artifactId}/manifest`,
+          contentHash: manifest.artifactIdentityHash,
+          contentField: "artifact_package_identity_manifest",
+        },
+        {
+          key: `artifacts/${manifest.artifact.artifactId}/original`,
+          contentHash: manifest.artifact.contentHash,
+          contentField: "original_artifact_binary",
+        },
+        {
+          key: `artifacts/${manifest.artifact.artifactId}/render-manifest`,
+          contentHash: manifest.renderManifestHash,
+          contentField: "full_render_manifest",
+        },
+        ...manifest.derivatives.map((lineage) => ({
+          key: derivativeKey(manifest.artifact.artifactId, lineage),
+          contentHash: lineage.contentHash,
+          contentField: lineage.derivativeType,
+        })),
+      ];
+      const expectedWritePlan = payloadDescriptors.flatMap((payload) =>
+        ([
+          [primary, "primary"],
+          [secondary, "secondary"],
+        ] as const).map(([store, copyRole]) => ({
+          ...payload,
+          store,
+          copyRole,
+        })),
+      );
+      const expectedLocations = expectedWritePlan.map((planned) => ({
+        storeId: planned.store.storeId,
+        key: planned.key,
+        contentHash: planned.contentHash,
+        copyRole: planned.copyRole,
+      }));
+      if (
+        !isDeepStrictEqual(manifest.payloadLocations, expectedLocations) ||
+        manifest.egressAuthorizations.length !== expectedWritePlan.length
+      ) {
+        throw new Error("Artifact package storage envelope is invalid");
+      }
+      for (const [index, planned] of expectedWritePlan.entries()) {
+        const authorization = manifest.egressAuthorizations[index];
+        if (authorization === undefined) {
+          throw new Error("Artifact package authorization is missing");
+        }
+        await egressAudit.assertRecorded(authorization);
+        assertPersistedApprovedEgressAuthorization(
+          authorization,
+          {
+            ...storageRequest({
+              jobId: manifest.jobId,
+              runId: manifest.artifact.runId,
+              artifactId: manifest.artifact.artifactId,
+              captureAttemptId: manifest.captureAttemptId,
+              dataClassification: manifest.dataClassification,
+              sourceOwner: manifest.sourceOwner,
+              storeId: planned.store.storeId,
+              key: planned.key,
+              contentHash: planned.contentHash,
+              contentField: planned.contentField,
+              destination: planned.store.egressDestination,
+            }),
+            requestedAt: authorization.request.requestedAt,
+          },
+          approvedEgressAuthorizationHash(authorization),
+        );
+      }
       const identityLocation = manifest.payloadLocations.find(
         ({ copyRole, key }) =>
           copyRole === "secondary" && key.endsWith("/manifest"),
@@ -756,15 +933,19 @@ export function createArtifactVault({
           derivatives: manifest.derivatives,
         }),
       );
+      if (sha256(expectedIdentity) !== manifest.artifactIdentityHash) {
+        throw new Error("Artifact package identity hash mismatch");
+      }
       const storedIdentity =
         identityLocation === undefined
           ? null
           : await secondary.read(identityLocation.key);
       if (
         identityLocation === undefined ||
-        identityLocation.contentHash !== manifest.manifestHash ||
+        identityLocation.storeId !== secondary.storeId ||
+        identityLocation.contentHash !== manifest.artifactIdentityHash ||
         storedIdentity === null ||
-        sha256(storedIdentity) !== manifest.manifestHash ||
+        sha256(storedIdentity) !== manifest.artifactIdentityHash ||
         !isDeepStrictEqual(storedIdentity, expectedIdentity)
       ) {
         throw new Error("Artifact secondary immutable manifest mismatch");

@@ -10,12 +10,16 @@ import type {
 } from "./domain.ts";
 import type {
   ApprovedEgressAuthorization,
+  ClockPort,
+  EgressAuthorizationAuditPort,
   EgressAuthorizationPort,
 } from "./egress-authorization.ts";
 import {
   approvedEgressAuthorizationHash,
+  assertApprovedEgressAuthorizationCurrent,
   assertPersistedApprovedEgressAuthorization,
   requireEgressAuthorization,
+  SYSTEM_CLOCK,
 } from "./egress-authorization.ts";
 import type {
   ImmutableBlobStorePort,
@@ -144,7 +148,9 @@ export interface RunSpecificationVault {
 export interface RunSpecificationVaultDependencies {
   readonly store: ImmutableBlobStorePort;
   readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly egressAudit: EgressAuthorizationAuditPort;
   readonly payloadInventory: PayloadInventoryPort;
+  readonly clock?: ClockPort;
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -262,7 +268,9 @@ function expectedVersionReferences(
 export function createRunSpecificationVault({
   store,
   egressAuthorization,
+  egressAudit,
   payloadInventory,
+  clock = SYSTEM_CLOCK,
 }: RunSpecificationVaultDependencies): RunSpecificationVault {
   return {
     async capture(command) {
@@ -368,23 +376,28 @@ export function createRunSpecificationVault({
       const content = canonicalJsonBytes(bundle);
       const contentHash = sha256Bytes(content);
       const key = `run-specifications/${contentHash.slice("sha256:".length)}`;
-      const authorization = await requireEgressAuthorization(egressAuthorization, {
-        requestId: `run-specification-storage:${command.runId}:${contentHash}`,
-        jobId: command.jobId,
-        runId: command.runId,
-        attemptId: null,
-        dataClassification: command.evaluationCase.dataClassification,
-        sourceOwner: command.evaluationCase.sourceOwner,
-        processingPurpose: "run_specification_storage",
-        targetKind: "storage",
-        targetService: store.egressDestination.targetService,
-        targetAccount: store.egressDestination.targetAccount,
-        targetRegion: store.egressDestination.targetRegion,
-        subprocessors: store.egressDestination.subprocessors,
-        contentFields: ["run_specification_bundle"],
-        payloadHash: contentHash,
-        requiredRedactions: [],
-      });
+      const authorization = await requireEgressAuthorization(
+        egressAuthorization,
+        {
+          requestId: `run-specification-storage:${command.runId}:${contentHash}`,
+          jobId: command.jobId,
+          runId: command.runId,
+          attemptId: null,
+          dataClassification: command.evaluationCase.dataClassification,
+          sourceOwner: command.evaluationCase.sourceOwner,
+          processingPurpose: "run_specification_storage",
+          targetKind: "storage",
+          targetService: store.egressDestination.targetService,
+          targetAccount: store.egressDestination.targetAccount,
+          targetRegion: store.egressDestination.targetRegion,
+          subprocessors: store.egressDestination.subprocessors,
+          contentFields: ["run_specification_bundle"],
+          payloadHash: contentHash,
+          requiredRedactions: [],
+        },
+        clock,
+      );
+      await egressAudit.append(authorization);
       await payloadInventory.register(command.jobId, [
         {
           storeId: store.storeId,
@@ -398,6 +411,11 @@ export function createRunSpecificationVault({
         contentHash,
         writeAttemptId:
           `run-specification:${command.jobId}:${command.runId}:${contentHash}`,
+        assertWriteAuthorized: () =>
+          assertApprovedEgressAuthorizationCurrent(
+            authorization,
+            clock,
+          ),
       });
       const readback = await store.read(key);
       if (readback === null || sha256Bytes(readback) !== contentHash) {
@@ -440,6 +458,7 @@ export function createRunSpecificationVault({
         );
       }
       const bundle = parseBundle(content);
+      await egressAudit.assertRecorded(reference.egressAuthorization);
       assertPersistedApprovedEgressAuthorization(
         reference.egressAuthorization,
         {

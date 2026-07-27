@@ -21,9 +21,12 @@ import {
   assertEnvironmentOriginAllowed,
   type EnvironmentOrigin,
 } from "./environment-origin.ts";
-import type {
-  ApprovedEgressAuthorization,
-  EgressDestinationMetadata,
+import {
+  assertApprovedEgressAuthorizationCurrent,
+  SYSTEM_CLOCK,
+  type ApprovedEgressAuthorization,
+  type ClockPort,
+  type EgressDestinationMetadata,
 } from "./egress-authorization.ts";
 
 function canonicalValue(value: unknown): unknown {
@@ -216,6 +219,7 @@ export interface FeishuProjectionSnapshot {
 export interface InMemoryFeishuProjectionOptions {
   readonly targetEnvironment?: "test" | "production";
   readonly egressDestination?: EgressDestinationMetadata;
+  readonly clock?: ClockPort;
 }
 
 export class InMemoryFeishuProjection implements FeishuProjectionPort {
@@ -237,11 +241,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #expiredCaseIds = new Set<string>();
   readonly #expiredJobCaseIds = new Map<string, Set<string>>();
   readonly #jobLocks = new Map<string, Promise<void>>();
+  readonly #clock: ClockPort;
   readonly targetEnvironment: "test" | "production";
   readonly egressDestination: EgressDestinationMetadata;
 
   constructor(options: InMemoryFeishuProjectionOptions = {}) {
     this.targetEnvironment = options.targetEnvironment ?? "test";
+    this.#clock = options.clock ?? SYSTEM_CLOCK;
     this.egressDestination = Object.freeze(
       structuredClone(
         options.egressDestination ?? {
@@ -289,7 +295,12 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   async upsertCase(record: EvaluationCaseRecord): Promise<void> {
-    if (this.#expiredCaseIds.has(record.caseId)) {
+    if (
+      this.#expiredCaseIds.has(record.caseId) &&
+      !this.#runRecordTable.some(
+        ({ caseId }) => caseId === record.caseId,
+      )
+    ) {
       throw new Error(
         `Tombstoned Case ${record.caseId} blocked Feishu projection write`,
       );
@@ -1001,25 +1012,58 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     return this.#runJobExclusive(jobId, async () => {
       this.#assertJobActive(jobId);
+      const job = snapshot.runRecordTable.find(
+        (record) =>
+          record.recordType === "bakeoff_job" &&
+          record.jobId === jobId,
+      );
+      const evaluationCase = snapshot.caseTable.find(
+        ({ caseId }) => caseId === job?.caseId,
+      );
+      const payloadHash = snapshotHash(snapshot);
+      const expectedContentFields = [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ];
       if (
-        authorization.request.processingPurpose !==
-          "operational_ledger_projection_storage" ||
-        authorization.request.payloadHash !== snapshotHash(snapshot) ||
-        authorization.request.targetService !==
-          this.egressDestination.targetService ||
-        authorization.request.targetAccount !==
-          this.egressDestination.targetAccount ||
-        authorization.request.targetRegion !==
-          this.egressDestination.targetRegion ||
-        !isDeepStrictEqual(
-          authorization.request.subprocessors,
-          this.egressDestination.subprocessors,
-        )
+        job === undefined ||
+        evaluationCase === undefined ||
+        !isDeepStrictEqual(authorization.request, {
+          requestId: `operational-ledger-projection:${jobId}:${payloadHash}`,
+          jobId,
+          runId: null,
+          attemptId: null,
+          dataClassification: evaluationCase.dataClassification,
+          sourceOwner: evaluationCase.sourceOwner,
+          processingPurpose: "operational_ledger_projection_storage",
+          targetKind: "storage",
+          targetService: this.egressDestination.targetService,
+          targetAccount: this.egressDestination.targetAccount,
+          targetRegion: this.egressDestination.targetRegion,
+          subprocessors: this.egressDestination.subprocessors,
+          contentFields: expectedContentFields,
+          payloadHash,
+          requiredRedactions: [],
+          requestedAt: authorization.request.requestedAt,
+        })
       ) {
         throw new Error(
           "Operational ledger projection authorization mismatch",
         );
       }
+      assertApprovedEgressAuthorizationCurrent(
+        authorization,
+        this.#clock,
+      );
       const working = new InMemoryFeishuProjection({
         targetEnvironment: this.targetEnvironment,
         egressDestination: this.egressDestination,
@@ -1167,7 +1211,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       this.#reviewEventTable.some((record) => record.jobId === jobId) ||
       this.#productGapCardTable.some((record) => record.jobId === jobId) ||
       this.#reports.some((record) => record.jobId === jobId) ||
-      this.#caseTable.some((record) => caseIds.has(record.caseId)) ||
+      this.#caseTable.some(
+        (record) =>
+          caseIds.has(record.caseId) &&
+          !this.#runRecordTable.some(
+            ({ caseId }) => caseId === record.caseId,
+          ),
+      ) ||
       this.#gapCardWorkflowEventTable.some((record) =>
         gapCardIds.has(record.gapCardId),
       ) ||

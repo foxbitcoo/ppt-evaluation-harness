@@ -16,6 +16,9 @@ import {
   createRunSpecificationVault,
   createScoreAdjudicationService,
   InMemoryTombstoneLedger,
+  approvedEgressAuthorizationHash,
+  assertApprovedEgressAuthorizationCurrent,
+  assertPersistedApprovedEgressAuthorization,
   calculateRenderManifestHash,
   canonicalJsonBytes,
   requireEgressAuthorization,
@@ -51,11 +54,11 @@ const APPROVED_EGRESS: EgressAuthorizationPort = {
   async authorize(request) {
     return {
       status: "approved",
-      decisionId: `decision:${request.requestId}`,
+      decisionId: `decision:${request.requestId}:${request.requestedAt}`,
       policyVersion: "test-egress-policy-v1",
       request,
       legalSecurityBasis: "synthetic test fixture",
-      approvedAt: "2025-01-01T00:00:00.000Z",
+      approvedAt: request.requestedAt,
       expiresAt: "2027-01-01T00:00:00.000Z",
     };
   },
@@ -133,6 +136,57 @@ test("egress authorization evaluates expiry against an injected call-boundary cl
   ]);
 });
 
+test("persisted approval evidence accepts an approval issued after its request and before expiry", async () => {
+  const request = {
+    requestId: "persisted-approval-ordering",
+    jobId: "job-stable-001",
+    runId: "run-stable-001",
+    attemptId: null,
+    dataClassification: "public_or_synthetic" as const,
+    sourceOwner: "evaluation-owner",
+    processingPurpose: "run_specification_storage" as const,
+    targetKind: "storage" as const,
+    targetService: "recovery-store",
+    targetAccount: "recovery-account",
+    targetRegion: "cn",
+    subprocessors: [],
+    contentFields: ["run_specification_bundle"],
+    payloadHash: ARTIFACT_HASH,
+    requiredRedactions: [],
+    requestedAt: "2026-07-27T00:00:00.000Z",
+  };
+  const decision = {
+    status: "approved" as const,
+    decisionId: "decision:persisted-approval-ordering",
+    policyVersion: "test-egress-policy-v1",
+    request,
+    legalSecurityBasis: "synthetic test fixture",
+    approvedAt: "2026-07-27T00:00:00.010Z",
+    expiresAt: "2026-07-27T00:00:01.000Z",
+  };
+
+  assert.doesNotThrow(() =>
+    assertPersistedApprovedEgressAuthorization(
+      decision,
+      request,
+      approvedEgressAuthorizationHash(decision),
+    ),
+  );
+  assert.throws(
+    () =>
+      assertApprovedEgressAuthorizationCurrent(
+        {
+          ...decision,
+          policyVersion: "",
+        },
+        {
+          now: () => "2026-07-27T00:00:00.020Z",
+        },
+      ),
+    /denied or incompatible/i,
+  );
+});
+
 test("ArtifactVault obtains a fresh short-lived authorization immediately before every immutable write", async () => {
   const events: string[] = [];
   let clockTick = 0;
@@ -149,9 +203,8 @@ test("ArtifactVault obtains a fresh short-lived authorization immediately before
     async authorize(request) {
       events.push(
         `authorize:${request.targetService}:${request.requestId
-          .split(":")
-          .slice(2)
-          .join(":")}`,
+          .split(`:${request.targetService}:`)
+          .at(-1)}`,
       );
       return {
         status: "approved",
@@ -161,7 +214,7 @@ test("ArtifactVault obtains a fresh short-lived authorization immediately before
         legalSecurityBasis: "synthetic test fixture",
         approvedAt: request.requestedAt,
         expiresAt: new Date(
-          Date.parse(request.requestedAt) + 750,
+          Date.parse(request.requestedAt) + 1_250,
         ).toISOString(),
       };
     },
@@ -173,7 +226,7 @@ test("ArtifactVault obtains a fresh short-lived authorization immediately before
     egressDestination: delegate.egressDestination,
     async putImmutable(key, content, context) {
       events.push(
-        `put:${delegate.egressDestination.targetService}:${delegate.storeId}:${key}`,
+        `put:${delegate.egressDestination.targetService}:${key}`,
       );
       await delegate.putImmutable(key, content, context);
     },
@@ -192,6 +245,7 @@ test("ArtifactVault obtains a fresh short-lived authorization immediately before
     primary: wrapStore(primary),
     secondary: wrapStore(secondary),
     egressAuthorization: authorization,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
     captureJournal: new InMemoryArtifactCaptureJournal(),
     payloadInventory: new InMemoryPayloadInventory(tombstones),
     clock,
@@ -227,6 +281,70 @@ test("ArtifactVault obtains a fresh short-lived authorization immediately before
         ),
     ),
   );
+});
+
+test("ArtifactVault refuses a write when authorization expires during an awaited store preflight", async () => {
+  let currentTime = Date.parse("2026-07-27T00:00:00.000Z");
+  const clock: ClockPort = {
+    clockId: "slow-store-authorization-clock",
+    now: () => new Date(currentTime).toISOString(),
+  };
+  const authorization: EgressAuthorizationPort = {
+    async authorize(request) {
+      return {
+        status: "approved",
+        decisionId: `decision:${request.requestId}`,
+        policyVersion: "slow-store-policy-v1",
+        request,
+        legalSecurityBasis: "synthetic test fixture",
+        approvedAt: request.requestedAt,
+        expiresAt: new Date(
+          Date.parse(request.requestedAt) + 1_000,
+        ).toISOString(),
+      };
+    },
+  };
+  const slowStore = (
+    delegate: InMemoryImmutableBlobStore,
+  ): ImmutableBlobStorePort => ({
+    storeId: delegate.storeId,
+    egressDestination: delegate.egressDestination,
+    putImmutable: async (key, content, context) => {
+      currentTime += 2_000;
+      await delegate.putImmutable(key, content, context);
+    },
+    read: (key) => delegate.read(key),
+    releaseWriteClaim: (key, writeAttemptId) =>
+      delegate.releaseWriteClaim(key, writeAttemptId),
+    delete: (key) => delegate.delete(key),
+  });
+  const tombstones = new InMemoryTombstoneLedger();
+  const primary = new InMemoryImmutableBlobStore("primary", tombstones);
+  const secondary = new InMemoryImmutableBlobStore(
+    "secondary",
+    tombstones,
+  );
+
+  await assert.rejects(
+    createArtifactVault({
+      primary: slowStore(primary),
+      secondary: slowStore(secondary),
+      egressAuthorization: authorization,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      captureJournal: new InMemoryArtifactCaptureJournal(),
+      payloadInventory: new InMemoryPayloadInventory(tombstones),
+      clock,
+    }).capture({
+      jobId: "job-slow-store-authorization",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
+      artifact: fixtureArtifact(),
+      renderManifest: fixtureRenderManifest(),
+    }),
+    /expired.*artifact_storage|artifact_storage.*expired/i,
+  );
+  assert.deepEqual(primary.listKeys(), []);
+  assert.deepEqual(secondary.listKeys(), []);
 });
 
 function fixtureArtifact(): Artifact {
@@ -306,6 +424,7 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
     captureJournal: new InMemoryArtifactCaptureJournal(),
     payloadInventory,
   });
@@ -396,6 +515,32 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
     }),
     /immutable blob conflict|content hash mismatch/i,
   );
+  const forgedManifest = {
+    ...manifest,
+    schemaVersion: "artifact-package-manifest-v999",
+    captureJournalId: "",
+    captureAttemptId: "forged-attempt",
+    payloadLocations: manifest.payloadLocations.map((location) =>
+      location.copyRole === "secondary"
+        ? {
+            ...location,
+            storeId: "forged-secondary-store",
+          }
+        : location,
+    ),
+    egressAuthorizations: manifest.egressAuthorizations.map(
+      (authorization) => ({
+        ...authorization,
+        status: "denied",
+        reason: "forged denial",
+        decidedAt: authorization.request.requestedAt,
+      }),
+    ),
+  };
+  await assert.rejects(
+    vault.readFromSecondary(forgedManifest as never),
+    /artifact.*manifest|capture journal|authorization|store/i,
+  );
 });
 
 test("ArtifactVault rejects a storage copy whose upload readback no longer matches the captured hash", async () => {
@@ -426,6 +571,7 @@ test("ArtifactVault rejects a storage copy whose upload readback no longer match
       primary,
       secondary: corruptSecondary,
       egressAuthorization: APPROVED_EGRESS,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
       captureJournal,
       payloadInventory,
     }).capture({
@@ -457,6 +603,8 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
   const captureJournal: ArtifactCaptureJournalPort = {
     journalId: durableJournal.journalId,
     beginAttempt: (input) => durableJournal.beginAttempt(input),
+    verifyCompletedAttempt: (input) =>
+      durableJournal.verifyCompletedAttempt(input),
     async append(event) {
       observedAttemptIds.push(event.captureAttemptId);
       await durableJournal.append(event);
@@ -475,6 +623,7 @@ test("ArtifactVault cleans partial blobs even when the append-only capture journ
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
     captureJournal,
     payloadInventory: new InMemoryPayloadInventory(tombstones),
   });
@@ -535,6 +684,7 @@ test("ArtifactVault deletes a blob committed before a lost upload acknowledgemen
       primary,
       secondary,
       egressAuthorization: APPROVED_EGRESS,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
       captureJournal: new InMemoryArtifactCaptureJournal(),
       payloadInventory: new InMemoryPayloadInventory(tombstones),
     }).capture({
@@ -593,6 +743,8 @@ test("a failed concurrent Artifact capture releases only its own shared-blob wri
   const failingJournal: ArtifactCaptureJournalPort = {
     journalId: failingDelegate.journalId,
     beginAttempt: (input) => failingDelegate.beginAttempt(input),
+    verifyCompletedAttempt: (input) =>
+      failingDelegate.verifyCompletedAttempt(input),
     async append(event) {
       await failingDelegate.append(event);
       if (
@@ -609,6 +761,7 @@ test("a failed concurrent Artifact capture releases only its own shared-blob wri
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
     captureJournal: new InMemoryArtifactCaptureJournal(),
     payloadInventory,
   });
@@ -616,6 +769,7 @@ test("a failed concurrent Artifact capture releases only its own shared-blob wri
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
     captureJournal: failingJournal,
     payloadInventory,
   });
@@ -646,6 +800,80 @@ test("a failed concurrent Artifact capture releases only its own shared-blob wri
   assert.equal(secondary.listKeys().length, 8);
   const recovered = await successfulVault.readFromSecondary(
     successful.value,
+  );
+  assert.equal(
+    recovered.manifest.artifact.contentHash,
+    fixtureArtifact().contentHash,
+  );
+});
+
+test("a successful late-joining Artifact capture retains its shared blob when the original claimant later fails", async () => {
+  const tombstones = new InMemoryTombstoneLedger();
+  const primary = new InMemoryImmutableBlobStore("primary", tombstones);
+  const secondary = new InMemoryImmutableBlobStore(
+    "secondary",
+    tombstones,
+  );
+  let signalFirstWrite = () => {};
+  let releaseFirstWrite = () => {};
+  const firstWrite = new Promise<void>((resolve) => {
+    signalFirstWrite = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseFirstWrite = resolve;
+  });
+  const failingDelegate = new InMemoryArtifactCaptureJournal();
+  let pauseAndFail = true;
+  const failingJournal: ArtifactCaptureJournalPort = {
+    journalId: failingDelegate.journalId,
+    beginAttempt: (input) => failingDelegate.beginAttempt(input),
+    verifyCompletedAttempt: (input) =>
+      failingDelegate.verifyCompletedAttempt(input),
+    async append(event) {
+      await failingDelegate.append(event);
+      if (pauseAndFail && event.eventType === "write_verified") {
+        pauseAndFail = false;
+        signalFirstWrite();
+        await release;
+        throw new Error("late original claimant failure");
+      }
+    },
+  };
+  const payloadInventory = new InMemoryPayloadInventory(tombstones);
+  const failingVault = createArtifactVault({
+    primary,
+    secondary,
+    egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+    captureJournal: failingJournal,
+    payloadInventory,
+  });
+  const successfulVault = createArtifactVault({
+    primary,
+    secondary,
+    egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+    captureJournal: new InMemoryArtifactCaptureJournal(),
+    payloadInventory,
+  });
+  const command = {
+    jobId: "job-late-joining-capture",
+    dataClassification: "public_or_synthetic" as const,
+    sourceOwner: "evaluation-owner",
+    artifact: fixtureArtifact(),
+    renderManifest: fixtureRenderManifest(),
+  };
+
+  const failingCapture = failingVault.capture(command);
+  await firstWrite;
+  const successfulManifest = await successfulVault.capture(command);
+  releaseFirstWrite();
+  await assert.rejects(failingCapture, /late original claimant failure/i);
+
+  assert.equal(primary.listKeys().length, 8);
+  assert.equal(secondary.listKeys().length, 8);
+  const recovered = await successfulVault.readFromSecondary(
+    successfulManifest,
   );
   assert.equal(
     recovered.manifest.artifact.contentHash,
@@ -743,12 +971,14 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
   const runSpecificationVault = createRunSpecificationVault({
     store: recovery,
     egressAuthorization: authorization,
+    egressAudit,
     payloadInventory,
   });
   const artifactVault = createArtifactVault({
     primary,
     secondary,
     egressAuthorization: authorization,
+    egressAudit,
     captureJournal: new InMemoryArtifactCaptureJournal(),
     payloadInventory,
   });
@@ -1067,7 +1297,7 @@ test("a concurrent Feishu scrub cannot be overwritten by the final replace of an
   const authorization = await requireEgressAuthorization(
     APPROVED_EGRESS,
     {
-      requestId: `projection-concurrency:${payloadHash}`,
+      requestId: `operational-ledger-projection:MOCK-job-volcano-v1:${payloadHash}`,
       jobId: "MOCK-job-volcano-v1",
       runId: null,
       attemptId: null,
@@ -1111,6 +1341,95 @@ test("a concurrent Feishu scrub cannot be overwritten by the final replace of an
     productGapCardTable: [],
     reports: [],
   });
+});
+
+test("Feishu projection rejects a runtime-denied authorization even when destination and payload hash match", async () => {
+  const source = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = source.snapshot();
+  const target = new InMemoryFeishuProjection();
+  const payloadHash = sha256Bytes(canonicalJsonBytes(snapshot));
+  const forgedAuthorization = {
+    status: "denied",
+    decisionId: "forged-projection-denial",
+    policyVersion: "forged-policy",
+    reason: "required redaction was not performed",
+    decidedAt: "2026-07-27T00:00:00.000Z",
+    request: {
+      requestId: `operational-ledger-projection:wrong-job:${payloadHash}`,
+      jobId: "wrong-job",
+      runId: "wrong-run",
+      attemptId: "wrong-attempt",
+      dataClassification: "restricted",
+      sourceOwner: "attacker-owner",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: target.egressDestination.targetService,
+      targetAccount: target.egressDestination.targetAccount,
+      targetRegion: target.egressDestination.targetRegion,
+      subprocessors: target.egressDestination.subprocessors,
+      contentFields: ["wrong_field"],
+      payloadHash,
+      requiredRedactions: ["secret"],
+      requestedAt: "2026-07-27T00:00:00.000Z",
+    },
+  };
+
+  await assert.rejects(
+    target.commitAuthorizedSnapshot(
+      snapshot,
+      forgedAuthorization as never,
+    ),
+    /authorization.*invalid|authorization mismatch|denied|incompatible/i,
+  );
+  assert.deepEqual(target.snapshot().runRecordTable, []);
+});
+
+test("scrubbing one Job preserves a shared Case for an active Job without reporting it as expired-Job payload", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = feishu.snapshot();
+  const sharedCase = snapshot.caseTable[0];
+  const originalJob = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  assert.ok(sharedCase);
+  assert.ok(originalJob);
+  await feishu.appendRunRecord({
+    ...originalJob,
+    recordId: "shared-case-job-b",
+    jobId: "shared-case-job-b",
+    selectedRunIds: [],
+  });
+
+  await feishu.scrubPayloadsForJob("MOCK-job-volcano-v1");
+
+  assert.equal(
+    await feishu.hasPayloadsForJob("MOCK-job-volcano-v1"),
+    false,
+  );
+  assert.deepEqual(
+    feishu.snapshot().caseTable.map(({ caseId }) => caseId),
+    [sharedCase.caseId],
+  );
+  await assert.doesNotReject(feishu.upsertCase(sharedCase));
+  assert.ok(
+    feishu
+      .snapshot()
+      .runRecordTable.some(({ jobId }) => jobId === "shared-case-job-b"),
+  );
 });
 
 test("a tombstone racing a long vendor run prevents the final Feishu projection from resurrecting payloads", async () => {
@@ -1179,16 +1498,19 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
   const recovery = new InMemoryImmutableBlobStore("recovery");
   const tombstones = new InMemoryTombstoneLedger();
   const payloadInventory = new InMemoryPayloadInventory(tombstones);
+  const egressAudit = new InMemoryEgressAuthorizationAudit();
   const artifactVault = createArtifactVault({
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     captureJournal: new InMemoryArtifactCaptureJournal(),
     payloadInventory,
   });
   const runSpecificationVault = createRunSpecificationVault({
     store: recovery,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     payloadInventory,
   });
   const feishu = new InMemoryFeishuProjection();
@@ -1227,6 +1549,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     runSpecificationVault,
     tombstones,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     payloadInventory,
     clock: recoveryClock,
   });
@@ -1353,6 +1676,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       runSpecificationVault: mismatchedSpecificationVault,
       tombstones,
       egressAuthorization: APPROVED_EGRESS,
+      egressAudit,
       payloadInventory,
       clock: recoveryClock,
     }).rehearse({
@@ -1412,6 +1736,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     runSpecificationVault,
     tombstones,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     payloadInventory,
     clock: {
       clockId: "crossing-expiry-recovery-clock",
@@ -1435,6 +1760,20 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     }),
     /persisted egress authorization|store mismatch|hash mismatch|run specification/i,
   );
+  const tamperedSpecificationAuthorization = {
+    ...recoveryVendorRun.specificationReference.egressAuthorization,
+    policyVersion: "attacker-recomputed-policy",
+  };
+  await assert.rejects(
+    runSpecificationVault.read({
+      ...recoveryVendorRun.specificationReference,
+      egressAuthorization: tamperedSpecificationAuthorization,
+      egressAuthorizationHash: approvedEgressAuthorizationHash(
+        tamperedSpecificationAuthorization,
+      ),
+    }),
+    /authorization.*audit|persisted egress authorization.*invalid/i,
+  );
   await assert.rejects(
     recoveryService.rehearse({
       exportReference: {
@@ -1448,7 +1787,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       },
       rehearsedAt: recoveryNow,
     }),
-    /persisted egress authorization decision is invalid/i,
+    /authorization audit evidence is invalid|persisted egress authorization decision is invalid/i,
   );
   await assert.rejects(
     recoveryService.rehearse({
@@ -1461,7 +1800,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       },
       rehearsedAt: recoveryNow,
     }),
-    /persisted egress authorization decision is invalid/i,
+    /authorization audit evidence is invalid|persisted egress authorization decision is invalid/i,
   );
   await assert.rejects(
     recoveryService.rehearse({
@@ -1493,16 +1832,19 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     "quarantine",
     tombstones,
   );
+  const egressAudit = new InMemoryEgressAuthorizationAudit();
   const artifactVault = createArtifactVault({
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     captureJournal: new InMemoryArtifactCaptureJournal(),
     payloadInventory: inventory,
   });
   const runSpecificationVault = createRunSpecificationVault({
     store: recovery,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     payloadInventory: inventory,
   });
   const feishu = new InMemoryFeishuProjection();
@@ -1525,6 +1867,7 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     runSpecificationVault,
     tombstones,
     egressAuthorization: APPROVED_EGRESS,
+    egressAudit,
     payloadInventory: inventory,
   });
   const exported = await recoveryService.exportLedger({
@@ -1555,6 +1898,7 @@ test("retention expiry tombstones and deletes every controlled payload class whi
       jobId: "MOCK-job-volcano-v1",
       contentHash: quarantineHash,
       writeAttemptId: "quarantine-redaction-failure-001",
+      assertWriteAuthorized: () => {},
     },
   );
   await inventory.register("MOCK-job-volcano-v1", [
@@ -1660,6 +2004,7 @@ test("retention expiry tombstones and deletes every controlled payload class whi
         jobId: "MOCK-job-volcano-v1",
         contentHash: originalLocation.contentHash,
         writeAttemptId: "post-retention-resurrection-attempt",
+        assertWriteAuthorized: () => {},
       },
     ),
     /tombstoned.*write/i,

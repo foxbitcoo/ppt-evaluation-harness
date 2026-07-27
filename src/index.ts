@@ -28,6 +28,9 @@ export {
   type RenderManifestHashInput,
 } from "./render-manifest.ts";
 export {
+  approvedEgressAuthorizationHash,
+  assertApprovedEgressAuthorizationCurrent,
+  assertPersistedApprovedEgressAuthorization,
   requireEgressAuthorization,
   SYSTEM_CLOCK,
   InMemoryEgressAuthorizationAudit,

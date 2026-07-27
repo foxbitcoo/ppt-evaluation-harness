@@ -100,11 +100,11 @@ const DEFAULT_TEST_EGRESS_AUTHORIZATION: EgressAuthorizationPort = {
   async authorize(request) {
     return {
       status: "approved",
-      decisionId: `mock-approved:${request.requestId}`,
+      decisionId: `mock-approved:${request.requestId}:${request.requestedAt}`,
       policyVersion: "mock-public-synthetic-egress-policy-v1",
       request,
       legalSecurityBasis: "synthetic test fixture",
-      approvedAt: MOCK_SCENARIO.fixedTime,
+      approvedAt: request.requestedAt,
       expiresAt: "2099-01-01T00:00:00.000Z",
     };
   },
@@ -290,6 +290,7 @@ function defaultArtifactVault(
       tombstones,
     ),
     egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
+    egressAudit: defaultEgressAudit(feishu),
     captureJournal,
     payloadInventory: defaultPayloadInventory(feishu),
   });
@@ -309,6 +310,7 @@ function defaultRunSpecificationVault(
       tombstones,
     ),
     egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
+    egressAudit: defaultEgressAudit(feishu),
     payloadInventory: defaultPayloadInventory(feishu),
   });
   DEFAULT_RUN_SPECIFICATION_VAULTS.set(feishu, created);
@@ -1397,6 +1399,7 @@ export function createBakeoffHarness({
             tombstones,
           ),
           egressAuthorization,
+          egressAudit,
           captureJournal:
             DEFAULT_ARTIFACT_CAPTURE_JOURNALS.get(feishu) ??
             (() => {
@@ -1419,7 +1422,9 @@ export function createBakeoffHarness({
             tombstones,
           ),
           egressAuthorization,
+          egressAudit,
           payloadInventory,
+          clock,
         }));
   const selectedProductAdapters = Object.freeze([
     ...(productAdapters ??

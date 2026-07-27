@@ -27,10 +27,12 @@ import type { FeishuProjectionSnapshot } from "./feishu.ts";
 import type {
   ApprovedEgressAuthorization,
   ClockPort,
+  EgressAuthorizationAuditPort,
   EgressAuthorizationPort,
 } from "./egress-authorization.ts";
 import {
   approvedEgressAuthorizationHash,
+  assertApprovedEgressAuthorizationCurrent,
   assertPersistedApprovedEgressAuthorization,
   requireEgressAuthorization,
   SYSTEM_CLOCK,
@@ -178,6 +180,7 @@ export interface OperationalLedgerRecoveryServiceDependencies {
   readonly runSpecificationVault: RunSpecificationVault;
   readonly tombstones: TombstoneLedgerPort;
   readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly egressAudit: EgressAuthorizationAuditPort;
   readonly payloadInventory: PayloadInventoryPort;
   readonly clock?: ClockPort;
 }
@@ -567,6 +570,7 @@ export function createOperationalLedgerRecoveryService({
   runSpecificationVault,
   tombstones,
   egressAuthorization,
+  egressAudit,
   payloadInventory,
   clock = SYSTEM_CLOCK,
 }: OperationalLedgerRecoveryServiceDependencies): OperationalLedgerRecoveryService {
@@ -648,37 +652,42 @@ export function createOperationalLedgerRecoveryService({
           `Operational ledger export is missing Job Case: ${job.caseId}`,
         );
       }
-      const authorization = await requireEgressAuthorization(egressAuthorization, {
-        requestId: `operational-ledger-export:${command.exportId}:${contentHash}`,
-        jobId: command.jobId,
-        runId: null,
-        attemptId: null,
-        dataClassification: evaluationCase.dataClassification,
-        sourceOwner: evaluationCase.sourceOwner,
-        processingPurpose: "operational_ledger_recovery_export",
-        targetKind: "storage",
-        targetService: recoveryStore.egressDestination.targetService,
-        targetAccount: recoveryStore.egressDestination.targetAccount,
-        targetRegion: recoveryStore.egressDestination.targetRegion,
-        subprocessors: recoveryStore.egressDestination.subprocessors,
-        contentFields: [
-          "cases",
-          "run_records",
-          "attempt_events",
-          "artifact_manifests",
-          "scorecards",
-          "adjudication_history",
-          "review_history",
-          "gap_card_workflow_history",
-          "github_issue_delivery_reservations",
-          "github_issue_link_history",
-          "comparisons",
-          "product_gap_cards",
-          "reports",
-        ],
-        payloadHash: contentHash,
-        requiredRedactions: [],
-      });
+      const authorization = await requireEgressAuthorization(
+        egressAuthorization,
+        {
+          requestId: `operational-ledger-export:${command.exportId}:${contentHash}`,
+          jobId: command.jobId,
+          runId: null,
+          attemptId: null,
+          dataClassification: evaluationCase.dataClassification,
+          sourceOwner: evaluationCase.sourceOwner,
+          processingPurpose: "operational_ledger_recovery_export",
+          targetKind: "storage",
+          targetService: recoveryStore.egressDestination.targetService,
+          targetAccount: recoveryStore.egressDestination.targetAccount,
+          targetRegion: recoveryStore.egressDestination.targetRegion,
+          subprocessors: recoveryStore.egressDestination.subprocessors,
+          contentFields: [
+            "cases",
+            "run_records",
+            "attempt_events",
+            "artifact_manifests",
+            "scorecards",
+            "adjudication_history",
+            "review_history",
+            "gap_card_workflow_history",
+            "github_issue_delivery_reservations",
+            "github_issue_link_history",
+            "comparisons",
+            "product_gap_cards",
+            "reports",
+          ],
+          payloadHash: contentHash,
+          requiredRedactions: [],
+        },
+        clock,
+      );
+      await egressAudit.append(authorization);
       await payloadInventory.register(command.jobId, [
         {
           storeId: recoveryStore.storeId,
@@ -692,6 +701,11 @@ export function createOperationalLedgerRecoveryService({
         contentHash,
         writeAttemptId:
           `operational-ledger-export:${command.jobId}:${command.exportId}:${contentHash}`,
+        assertWriteAuthorized: () =>
+          assertApprovedEgressAuthorizationCurrent(
+            authorization,
+            clock,
+          ),
       });
       const readback = await recoveryStore.read(key);
       if (readback === null || sha256Bytes(readback) !== contentHash) {
@@ -778,6 +792,7 @@ export function createOperationalLedgerRecoveryService({
         );
       }
       const ledger = parseExport(content);
+      await egressAudit.assertRecorded(exportReference.egressAuthorization);
       assertPersistedApprovedEgressAuthorization(
         exportReference.egressAuthorization,
         {

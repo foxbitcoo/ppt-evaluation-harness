@@ -1244,6 +1244,30 @@ test("an explicit vendor timeout remains timed out without trusting its self-rep
   assert.equal(attempt?.vendorReportedElapsedMs, 1_800_000);
 });
 
+test("a settled Bakeoff rejects a Mock adapter whose runtime scenario differs from the frozen implementation evidence", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockQwenProductAdapter({ scenario: "success" })],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [
+        new MockQwenProductAdapter({ scenario: "timeout" }),
+      ],
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /identity conflict|protocol mismatch/i,
+  );
+});
+
 test("package metadata and derived Run IDs are snapshotted before any adapter executes", async () => {
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();

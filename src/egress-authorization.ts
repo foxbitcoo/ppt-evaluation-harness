@@ -89,6 +89,7 @@ export interface EgressAuthorizationPort {
 export interface EgressAuthorizationAuditPort {
   readonly auditId: string;
   append(decision: ApprovedEgressAuthorization): Promise<void>;
+  assertRecorded(decision: ApprovedEgressAuthorization): Promise<void>;
 }
 
 export class InMemoryEgressAuthorizationAudit
@@ -116,6 +117,22 @@ export class InMemoryEgressAuthorizationAudit
       return;
     }
     this.#decisions.push(structuredClone(decision));
+  }
+
+  async assertRecorded(
+    decision: ApprovedEgressAuthorization,
+  ): Promise<void> {
+    const recorded = this.#decisions.find(
+      ({ decisionId }) => decisionId === decision.decisionId,
+    );
+    if (
+      recorded === undefined ||
+      !isDeepStrictEqual(recorded, decision)
+    ) {
+      throw new Error(
+        `Egress authorization audit evidence is invalid: ${decision.decisionId}`,
+      );
+    }
   }
 
   list(): readonly ApprovedEgressAuthorization[] {
@@ -166,11 +183,48 @@ export function assertPersistedApprovedEgressAuthorization(
     !Number.isFinite(requestedAt) ||
     !Number.isFinite(approvedAt) ||
     !Number.isFinite(expiresAt) ||
-    approvedAt > requestedAt ||
+    approvedAt < requestedAt ||
+    approvedAt >= expiresAt ||
     requestedAt >= expiresAt ||
     decision.request.requiredRedactions.length > 0
   ) {
     throw new Error("Persisted egress authorization decision is invalid");
+  }
+}
+
+export function assertApprovedEgressAuthorizationCurrent(
+  decision: ApprovedEgressAuthorization,
+  clock: ClockPort = SYSTEM_CLOCK,
+): void {
+  const runtimeDecision = decision as EgressAuthorizationDecision;
+  if (
+    runtimeDecision.status !== "approved" ||
+    decision.decisionId.trim().length === 0 ||
+    decision.policyVersion.trim().length === 0 ||
+    decision.legalSecurityBasis.trim().length === 0
+  ) {
+    throw new Error(
+      `${decision.request.processingPurpose} egress authorization denied or incompatible; call blocked`,
+    );
+  }
+  const requestedAt = Date.parse(decision.request.requestedAt);
+  const evaluatedAt = Date.parse(clock.now());
+  const approvedAt = Date.parse(decision.approvedAt);
+  const expiresAt = Date.parse(decision.expiresAt);
+  if (
+    !Number.isFinite(requestedAt) ||
+    !Number.isFinite(evaluatedAt) ||
+    !Number.isFinite(approvedAt) ||
+    !Number.isFinite(expiresAt) ||
+    approvedAt < requestedAt ||
+    approvedAt > evaluatedAt ||
+    approvedAt >= expiresAt ||
+    expiresAt <= evaluatedAt ||
+    decision.request.requiredRedactions.length > 0
+  ) {
+    throw new Error(
+      `Egress authorization is missing, expired, or not yet valid for ${decision.request.processingPurpose}; call blocked`,
+    );
   }
 }
 
@@ -247,7 +301,9 @@ export async function requireEgressAuthorization(
     !Number.isFinite(evaluatedAt) ||
     !Number.isFinite(approvedAt) ||
     !Number.isFinite(expiresAt) ||
+    approvedAt < requestedAt ||
     approvedAt > evaluatedAt ||
+    approvedAt >= expiresAt ||
     expiresAt <= evaluatedAt ||
     decision.request.requiredRedactions.length > 0
   ) {
