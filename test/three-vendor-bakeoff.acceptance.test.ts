@@ -1268,6 +1268,49 @@ test("a settled Bakeoff rejects a Mock adapter whose runtime scenario differs fr
   );
 });
 
+test("a settled Bakeoff rejects a changed execute entrypoint even when the caller reuses the declared implementation package", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let firstCalls = 0;
+  const firstAdapter: ProductAdapterPort = {
+    implementationPackage: delegate.implementationPackage,
+    productPackage: delegate.productPackage,
+    async execute(command) {
+      firstCalls += 1;
+      return delegate.execute(command);
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [firstAdapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  let changedCalls = 0;
+  const changedAdapter: ProductAdapterPort = {
+    implementationPackage: delegate.implementationPackage,
+    productPackage: delegate.productPackage,
+    async execute() {
+      changedCalls += 1;
+      throw new Error("changed execute entrypoint must not replay");
+    },
+  };
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [changedAdapter],
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /identity conflict|protocol mismatch/i,
+  );
+  assert.equal(firstCalls, 1);
+  assert.equal(changedCalls, 0);
+});
+
 test("package metadata and derived Run IDs are snapshotted before any adapter executes", async () => {
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();

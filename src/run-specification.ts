@@ -64,6 +64,7 @@ export interface RunSpecificationBundle {
     readonly vendorId: string;
     readonly egressDestination: ProductPackageSnapshot["egressDestination"];
     readonly implementationDigest: `sha256:${string}`;
+    readonly executionEntrypointDigest: `sha256:${string}`;
     readonly implementationPackageName: string;
     readonly implementationPackageByteSize: number;
   };
@@ -133,6 +134,7 @@ export interface CaptureRunSpecificationCommand {
   readonly productPackage: ProductPackageSnapshot;
   readonly protocolSnapshot: BakeoffProtocolSnapshot;
   readonly adapterImplementationPackage: ProductAdapterImplementationPackage;
+  readonly adapterExecutionEntrypointDigest: `sha256:${string}`;
 }
 
 export interface RunSpecificationVault {
@@ -310,6 +312,8 @@ export function createRunSpecificationVault({
           ),
           implementationDigest:
             command.adapterImplementationPackage.contentHash,
+          executionEntrypointDigest:
+            command.adapterExecutionEntrypointDigest,
           implementationPackageName:
             command.adapterImplementationPackage.packageName,
           implementationPackageByteSize:

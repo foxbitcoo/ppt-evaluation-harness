@@ -73,6 +73,11 @@ export interface ArtifactCaptureJournalPort {
     readonly captureAttemptId: string;
     readonly jobId: string;
     readonly artifactId: string;
+    readonly expectedWrites: readonly {
+      readonly storeId: string;
+      readonly key: string;
+      readonly contentHash: `sha256:${string}`;
+    }[];
   }): Promise<void>;
 }
 
@@ -129,6 +134,11 @@ export class InMemoryArtifactCaptureJournal
     readonly captureAttemptId: string;
     readonly jobId: string;
     readonly artifactId: string;
+    readonly expectedWrites: readonly {
+      readonly storeId: string;
+      readonly key: string;
+      readonly contentHash: `sha256:${string}`;
+    }[];
   }): Promise<void> {
     const events = this.#events.filter(
       (event) =>
@@ -136,10 +146,28 @@ export class InMemoryArtifactCaptureJournal
         event.jobId === input.jobId &&
         event.artifactId === input.artifactId,
     );
+    const [started, ...remaining] = events;
+    const completed = remaining.at(-1);
+    const writes = remaining.slice(0, -1);
+    const validWrites =
+      writes.length === input.expectedWrites.length &&
+      writes.every((event, index) => {
+        const expected = input.expectedWrites[index];
+        return (
+          expected !== undefined &&
+          event.eventType === "write_verified" &&
+          event.storeId === expected.storeId &&
+          event.key === expected.key &&
+          event.detail === expected.contentHash
+        );
+      });
     if (
-      !events.some(({ eventType }) => eventType === "started") ||
-      !events.some(({ eventType }) => eventType === "completed") ||
-      events.some(({ eventType }) => eventType === "failed")
+      events.length !== input.expectedWrites.length + 2 ||
+      started?.eventType !== "started" ||
+      started.detail !== `planned:${input.expectedWrites.length}` ||
+      !validWrites ||
+      completed?.eventType !== "completed" ||
+      completed.detail !== `verified:${input.expectedWrites.length}`
     ) {
       throw new Error(
         `Artifact capture journal trace is incomplete: ${input.captureAttemptId}`,
@@ -651,10 +679,10 @@ export function createArtifactVault({
         artifactId: artifact.artifactId,
         detail: `planned:${writePlan.length}`,
       });
-      await payloadInventory.register(command.jobId, payloadLocations);
       let verifiedWrites = 0;
       const createdLocations = new Set<string>();
       try {
+        await payloadInventory.register(command.jobId, payloadLocations);
         for (const planned of writePlan) {
           const authorization =
             await requireEgressAuthorization(
@@ -778,7 +806,7 @@ export function createArtifactVault({
           eventType: "cleanup_verified",
           storeId: null,
           key: null,
-          detail: `claims-released:${writePlan.length}`,
+          detail: `claims-released:${createdLocations.size}`,
         });
         throw error;
       }
@@ -826,11 +854,6 @@ export function createArtifactVault({
       ) {
         throw new Error("Artifact package manifest envelope is invalid");
       }
-      await captureJournal.verifyCompletedAttempt({
-        captureAttemptId: manifest.captureAttemptId,
-        jobId: manifest.jobId,
-        artifactId: manifest.artifact.artifactId,
-      });
       const expectedManifestHash = sha256(
         identityBytes(
           captureEnvelopeIdentity({
@@ -893,6 +916,16 @@ export function createArtifactVault({
       ) {
         throw new Error("Artifact package storage envelope is invalid");
       }
+      await captureJournal.verifyCompletedAttempt({
+        captureAttemptId: manifest.captureAttemptId,
+        jobId: manifest.jobId,
+        artifactId: manifest.artifact.artifactId,
+        expectedWrites: expectedWritePlan.map((planned) => ({
+          storeId: planned.store.storeId,
+          key: planned.key,
+          contentHash: planned.contentHash,
+        })),
+      });
       for (const [index, planned] of expectedWritePlan.entries()) {
         const authorization = manifest.egressAuthorizations[index];
         if (authorization === undefined) {

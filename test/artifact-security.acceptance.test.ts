@@ -417,6 +417,7 @@ function fixtureRenderManifest(): RenderManifest {
 test("ArtifactVault stores immutable original and derivative lineage in two controlled copies and verifies both readbacks", async () => {
   const primary = new InMemoryImmutableBlobStore("primary");
   const secondary = new InMemoryImmutableBlobStore("secondary");
+  const captureJournal = new InMemoryArtifactCaptureJournal();
   const payloadInventory = new InMemoryPayloadInventory(
     new InMemoryTombstoneLedger(),
   );
@@ -425,7 +426,7 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
     secondary,
     egressAuthorization: APPROVED_EGRESS,
     egressAudit: new InMemoryEgressAuthorizationAudit(),
-    captureJournal: new InMemoryArtifactCaptureJournal(),
+    captureJournal,
     payloadInventory,
   });
 
@@ -515,6 +516,38 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
     }),
     /immutable blob conflict|content hash mismatch/i,
   );
+  await assert.rejects(
+    vault.capture({
+      jobId: "job-stable-001",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
+      artifact: {
+        ...fixtureArtifact(),
+        filename: "conflicting-filename.pptx",
+      },
+      renderManifest: fixtureRenderManifest(),
+    }),
+    /payload inventory identity conflict/i,
+  );
+  const captureAttempts = [
+    ...new Set(
+      captureJournal
+        .list("job-stable-001", "artifact-stable-001")
+        .map(({ captureAttemptId }) => captureAttemptId),
+    ),
+  ];
+  const conflictingAttemptId = captureAttempts.at(-1);
+  assert.ok(conflictingAttemptId);
+  assert.deepEqual(
+    captureJournal
+      .list("job-stable-001", "artifact-stable-001")
+      .filter(
+        ({ captureAttemptId }) =>
+          captureAttemptId === conflictingAttemptId,
+      )
+      .map(({ eventType }) => eventType),
+    ["started", "failed", "cleanup_verified"],
+  );
   const forgedManifest = {
     ...manifest,
     schemaVersion: "artifact-package-manifest-v999",
@@ -540,6 +573,37 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
   await assert.rejects(
     vault.readFromSecondary(forgedManifest as never),
     /artifact.*manifest|capture journal|authorization|store/i,
+  );
+});
+
+test("Artifact capture journal rejects a completed trace that omitted its planned immutable writes", async () => {
+  const journal = new InMemoryArtifactCaptureJournal(
+    "journal-planned-write-validation",
+  );
+  const captureAttemptId = await journal.beginAttempt({
+    jobId: "job-journal-plan",
+    artifactId: "artifact-journal-plan",
+    detail: "planned:999",
+  });
+  await journal.append({
+    eventId: `${captureAttemptId}:completed`,
+    captureAttemptId,
+    jobId: "job-journal-plan",
+    artifactId: "artifact-journal-plan",
+    eventType: "completed",
+    storeId: null,
+    key: null,
+    detail: "verified:0",
+  });
+
+  await assert.rejects(
+    journal.verifyCompletedAttempt({
+      captureAttemptId,
+      jobId: "job-journal-plan",
+      artifactId: "artifact-journal-plan",
+      expectedWrites: [],
+    }),
+    /journal trace.*incomplete|planned.*write/i,
   );
 });
 
@@ -1341,6 +1405,187 @@ test("a concurrent Feishu scrub cannot be overwritten by the final replace of an
     productGapCardTable: [],
     reports: [],
   });
+});
+
+test("a Job B projection commit cannot restore Job A rows scrubbed by a concurrent transaction", async () => {
+  const target = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: target,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const seeded = target.snapshot();
+  const caseA = seeded.caseTable[0];
+  const jobA = seeded.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  assert.ok(caseA);
+  assert.ok(jobA);
+  const caseB = {
+    ...caseA,
+    recordId: "case-record-job-b",
+    caseId: "case-job-b",
+    title: "Independent Job B Case",
+  };
+  const jobB = {
+    ...jobA,
+    recordId: "job-record-b",
+    jobId: "job-b",
+    caseId: caseB.caseId,
+    selectedRunIds: [],
+  };
+  const snapshotB = {
+    caseTable: [caseB],
+    runRecordTable: [jobB],
+    capturedArtifactTable: [],
+    artifactScoreTable: [],
+    adjudicationEventTable: [],
+    reviewEventTable: [],
+    gapCardWorkflowEventTable: [],
+    githubIssueDeliveryReservationTable: [],
+    githubIssueLinkEventTable: [],
+    productGapCardTable: [],
+    reports: [],
+  };
+  const payloadHash = sha256Bytes(canonicalJsonBytes(snapshotB));
+  const authorizationB = await requireEgressAuthorization(
+    APPROVED_EGRESS,
+    {
+      requestId: `operational-ledger-projection:job-b:${payloadHash}`,
+      jobId: "job-b",
+      runId: null,
+      attemptId: null,
+      dataClassification: caseB.dataClassification,
+      sourceOwner: caseB.sourceOwner,
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: target.egressDestination.targetService,
+      targetAccount: target.egressDestination.targetAccount,
+      targetRegion: target.egressDestination.targetRegion,
+      subprocessors: target.egressDestination.subprocessors,
+      contentFields: [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ],
+      payloadHash,
+      requiredRedactions: [],
+    },
+  );
+
+  await Promise.all([
+    target.commitAuthorizedSnapshot(snapshotB, authorizationB),
+    target.scrubPayloadsForJob("MOCK-job-volcano-v1"),
+  ]);
+
+  assert.equal(
+    await target.hasPayloadsForJob("MOCK-job-volcano-v1"),
+    false,
+  );
+  assert.equal(
+    target
+      .snapshot()
+      .runRecordTable.filter(
+        ({ jobId }) => jobId === "MOCK-job-volcano-v1",
+      ).length,
+    0,
+  );
+  assert.equal(
+    target
+      .snapshot()
+      .runRecordTable.filter(({ jobId }) => jobId === "job-b")
+      .length,
+    1,
+  );
+});
+
+test("Feishu projection rejects a one-Job batch containing an unrelated Case outside that Job authorization", async () => {
+  const source = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const sourceSnapshot = source.snapshot();
+  const job = sourceSnapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const authorizedCase = sourceSnapshot.caseTable[0];
+  assert.ok(job);
+  assert.ok(authorizedCase);
+  const unrelatedRestrictedCase = {
+    ...authorizedCase,
+    recordId: "unrelated-restricted-case-record",
+    caseId: "unrelated-restricted-case",
+    title: "Unrelated restricted Case",
+    dataClassification: "restricted" as const,
+    sourceOwner: "unrelated-owner",
+  };
+  const snapshot = {
+    caseTable: [authorizedCase, unrelatedRestrictedCase],
+    runRecordTable: [job],
+    capturedArtifactTable: [],
+    artifactScoreTable: [],
+    adjudicationEventTable: [],
+    reviewEventTable: [],
+    gapCardWorkflowEventTable: [],
+    githubIssueDeliveryReservationTable: [],
+    githubIssueLinkEventTable: [],
+    productGapCardTable: [],
+    reports: [],
+  };
+  const target = new InMemoryFeishuProjection();
+  const payloadHash = sha256Bytes(canonicalJsonBytes(snapshot));
+  const authorization = await requireEgressAuthorization(
+    APPROVED_EGRESS,
+    {
+      requestId: `operational-ledger-projection:${job.jobId}:${payloadHash}`,
+      jobId: job.jobId,
+      runId: null,
+      attemptId: null,
+      dataClassification: authorizedCase.dataClassification,
+      sourceOwner: authorizedCase.sourceOwner,
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: target.egressDestination.targetService,
+      targetAccount: target.egressDestination.targetAccount,
+      targetRegion: target.egressDestination.targetRegion,
+      subprocessors: target.egressDestination.subprocessors,
+      contentFields: [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ],
+      payloadHash,
+      requiredRedactions: [],
+    },
+  );
+
+  await assert.rejects(
+    target.commitAuthorizedSnapshot(snapshot, authorization),
+    /Case.*scope|authorization mismatch|batch.*Case/i,
+  );
+  assert.deepEqual(target.snapshot().caseTable, []);
 });
 
 test("Feishu projection rejects a runtime-denied authorization even when destination and payload hash match", async () => {

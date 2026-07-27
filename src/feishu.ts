@@ -240,7 +240,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #expiredJobIds = new Set<string>();
   readonly #expiredCaseIds = new Set<string>();
   readonly #expiredJobCaseIds = new Map<string, Set<string>>();
-  readonly #jobLocks = new Map<string, Promise<void>>();
+  #projectionTail: Promise<void> = Promise.resolve();
   readonly #clock: ClockPort;
   readonly targetEnvironment: "test" | "production";
   readonly egressDestination: EgressDestinationMetadata;
@@ -272,25 +272,21 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
   }
 
-  async #runJobExclusive<T>(
-    jobId: string,
+  async #runProjectionExclusive<T>(
     operation: () => Promise<T>,
   ): Promise<T> {
-    const previous = this.#jobLocks.get(jobId) ?? Promise.resolve();
+    const previous = this.#projectionTail;
     let release = () => {};
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
     const tail = previous.then(() => gate);
-    this.#jobLocks.set(jobId, tail);
+    this.#projectionTail = tail;
     await previous;
     try {
       return await operation();
     } finally {
       release();
-      if (this.#jobLocks.get(jobId) === tail) {
-        this.#jobLocks.delete(jobId);
-      }
     }
   }
 
@@ -1010,7 +1006,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     if (jobId === undefined) {
       throw new Error("Operational ledger projection batch is empty");
     }
-    return this.#runJobExclusive(jobId, async () => {
+    return this.#runProjectionExclusive(async () => {
       this.#assertJobActive(jobId);
       const job = snapshot.runRecordTable.find(
         (record) =>
@@ -1037,6 +1033,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       if (
         job === undefined ||
         evaluationCase === undefined ||
+        snapshot.caseTable.length !== 1 ||
+        snapshot.caseTable.some(
+          ({ caseId }) => caseId !== job.caseId,
+        ) ||
+        snapshot.runRecordTable.some(
+          ({ caseId }) => caseId !== job.caseId,
+        ) ||
         !isDeepStrictEqual(authorization.request, {
           requestId: `operational-ledger-projection:${jobId}:${payloadHash}`,
           jobId,
@@ -1142,7 +1145,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   async scrubPayloadsForJob(jobId: string): Promise<void> {
-    return this.#runJobExclusive(jobId, async () => {
+    return this.#runProjectionExclusive(async () => {
       this.#expiredJobIds.add(jobId);
       const jobRuns = this.#runRecordTable.filter(
         (record) => record.jobId === jobId,

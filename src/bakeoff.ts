@@ -484,6 +484,7 @@ interface CapturedVendorResult {
 
 interface SelectedProductAdapter {
   readonly adapter: ProductAdapterPort;
+  readonly executionEntrypointDigest: `sha256:${string}`;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
@@ -518,8 +519,12 @@ function snapshotProductSelections(
             adapter.implementationPackage.content,
           ),
         });
+      const executionEntrypointDigest = sha256Bytes(
+        new TextEncoder().encode(adapter.execute.toString()),
+      );
       return Object.freeze({
         adapter,
+        executionEntrypointDigest,
         implementationPackage,
         productPackage,
         runId: runIdForPackage(productPackage.packageId),
@@ -530,9 +535,11 @@ function snapshotProductSelections(
 
 function adapterImplementationEvidence(
   implementationPackage: ProductAdapterImplementationPackage,
+  executionEntrypointDigest: `sha256:${string}`,
   productPackageId: string,
 ): {
   readonly implementationDigest: `sha256:${string}`;
+  readonly executionEntrypointDigest: `sha256:${string}`;
   readonly implementationPackageName: string;
   readonly implementationPackageByteSize: number;
 } {
@@ -550,6 +557,7 @@ function adapterImplementationEvidence(
   }
   return {
     implementationDigest,
+    executionEntrypointDigest,
     implementationPackageName:
       implementationPackage.packageName,
     implementationPackageByteSize:
@@ -652,6 +660,7 @@ function replayedBakeoffOutcome(
               selection.productPackage.egressDestination,
             ...adapterImplementationEvidence(
               selection.implementationPackage,
+              selection.executionEntrypointDigest,
               selection.productPackage.packageId,
             ),
           }),
@@ -1508,6 +1517,7 @@ export function createBakeoffHarness({
         await Promise.all(
           selections.map(async ({
             implementationPackage,
+            executionEntrypointDigest,
             productPackage,
             runId,
           }) => {
@@ -1520,6 +1530,8 @@ export function createBakeoffHarness({
               protocolSnapshot,
               adapterImplementationPackage:
                 implementationPackage,
+              adapterExecutionEntrypointDigest:
+                executionEntrypointDigest,
             });
             return [runId, reference] as const;
           }),

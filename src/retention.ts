@@ -75,23 +75,25 @@ export class InMemoryPayloadInventory implements PayloadInventoryPort {
     locations: readonly RetentionPayloadLocation[],
   ): Promise<void> {
     await this.tombstones.runIfActive(jobId, async () => {
-    const registered = this.#locationsByJob.get(jobId) ?? [];
-    for (const location of locations) {
-      const existing = registered.find(
-        ({ storeId, key }) =>
-          storeId === location.storeId && key === location.key,
+      const registered = structuredClone(
+        this.#locationsByJob.get(jobId) ?? [],
       );
-      if (existing !== undefined) {
-        if (!isDeepStrictEqual(existing, location)) {
-          throw new Error(
-            `Payload inventory identity conflict: ${location.storeId}/${location.key}`,
-          );
+      for (const location of locations) {
+        const existing = registered.find(
+          ({ storeId, key }) =>
+            storeId === location.storeId && key === location.key,
+        );
+        if (existing !== undefined) {
+          if (!isDeepStrictEqual(existing, location)) {
+            throw new Error(
+              `Payload inventory identity conflict: ${location.storeId}/${location.key}`,
+            );
+          }
+          continue;
         }
-        continue;
+        registered.push(structuredClone(location));
       }
-      registered.push(structuredClone(location));
-    }
-    this.#locationsByJob.set(jobId, registered);
+      this.#locationsByJob.set(jobId, registered);
     });
   }
 
