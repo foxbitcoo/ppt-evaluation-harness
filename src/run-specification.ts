@@ -30,9 +30,9 @@ import {
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterImplementationPackage,
   type ProductPackageSnapshot,
+  type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
 import type { PayloadInventoryPort } from "./retention.ts";
-import type { WpsAiPptBrowserDriverEvidence } from "./wps-aippt-driver.ts";
 
 export interface RunSpecificationVersionReferences {
   readonly caseVersion: string;
@@ -74,7 +74,7 @@ export interface RunSpecificationBundle {
     readonly executionConfiguration: ProductAdapterExecutionConfiguration;
     readonly implementationPackageName: string;
     readonly implementationPackageByteSize: number;
-    readonly browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null;
+    readonly browserDriverEvidence: TrustedBrowserDriverEvidence | null;
   };
   readonly schemaSnapshot: {
     readonly schemaVersion: "evaluation-framework-v0.8";
@@ -145,7 +145,7 @@ export interface CaptureRunSpecificationCommand {
   readonly adapterExecutionEntrypointDigest: `sha256:${string}`;
   readonly adapterExecutionConfigurationPackage:
     ProductAdapterImplementationPackage;
-  readonly browserDriverEvidence?: WpsAiPptBrowserDriverEvidence | null;
+  readonly browserDriverEvidence?: TrustedBrowserDriverEvidence | null;
 }
 
 export interface RunSpecificationVault {

@@ -188,7 +188,9 @@ export {
   type CommercialPlanObservation,
   type ProductPackageSnapshot,
   type ProductRunCommand,
+  type ProductionDriverExecutionEvidence,
   type SafeRasterRendererPort,
+  type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
 export {
   WPS_AIPPT_ADAPTER_VERSION,
@@ -218,6 +220,29 @@ export {
   type WpsAiPptTaskReconciliationEvidence,
   type WpsAiPptTaskReconciliationQuery,
 } from "./wps-aippt-driver.ts";
+export {
+  QWEN_ENTRY_URL,
+  QWEN_MAX_ATTEMPT_TIMEOUT_MS,
+  QWEN_PRODUCTION_ADAPTER_KIND,
+  QWEN_VOLCANO_SCENARIO,
+  QwenProductionProductAdapter,
+  QwenReplayProductAdapter,
+  createQwenRealProviderReplayPackage,
+  createQwenProductAdapterExecutorForTest,
+  registeredQwenBrowserDriverEvidence,
+  resolveQwenProductionAdapterExecutor,
+  type QwenBrowserDriverPort,
+  type QwenBrowserDriverEvidence,
+  type QwenBrowserExecution,
+  type QwenBrowserExecutionCommand,
+  type QwenBrowserMilestone,
+  type QwenManualAction,
+  type QwenObservedConfiguration,
+  type QwenProductAdapterExecutor,
+  type QwenProductAttemptResult,
+  type QwenStaticRender,
+  type QwenTraceEvent,
+} from "./qwen-production-adapter.ts";
 export type {
   Artifact,
   AdjudicationEventRecord,

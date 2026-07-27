@@ -492,6 +492,7 @@ function validatedZipEntries(content: Uint8Array): readonly ValidatedZipEntry[] 
   const diskEntryCount = view.getUint16(endOffset + 8, true);
   const entryCount = view.getUint16(endOffset + 10, true);
   const centralDirectorySize = view.getUint32(endOffset + 12, true);
+  const archiveCommentLength = view.getUint16(endOffset + 20, true);
   let offset = view.getUint32(endOffset + 16, true);
   if (
     diskNumber !== 0 ||
@@ -499,7 +500,8 @@ function validatedZipEntries(content: Uint8Array): readonly ValidatedZipEntry[] 
     diskEntryCount !== entryCount ||
     entryCount === 0 ||
     entryCount > MAX_ENTRY_COUNT ||
-    offset + centralDirectorySize > endOffset
+    offset + centralDirectorySize > endOffset ||
+    endOffset + 22 + archiveCommentLength !== content.byteLength
   ) {
     throw new Error("WPS Artifact ZIP central directory is unsafe");
   }
@@ -731,7 +733,7 @@ function parsePresentationSlideIds(
   return Object.freeze(slideIds);
 }
 
-function validatedOpcSlideNames(
+export function validatedOpcSlideNames(
   content: Uint8Array,
 ): readonly string[] {
   const entries = validatedZipEntries(content);

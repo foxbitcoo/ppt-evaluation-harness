@@ -79,7 +79,12 @@ import {
   type ProductAttemptResult,
   type ProductPackageSnapshot,
   type SafeRasterRendererPort,
+  type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
+import {
+  registeredQwenBrowserDriverEvidence,
+  type QwenBrowserDriverPort,
+} from "./qwen-production-adapter.ts";
 import { assertHarnessOwnedProductionCapabilities } from "./production-capabilities.ts";
 import {
   InMemoryReferencePackStore,
@@ -105,7 +110,6 @@ import {
 import { createAuthorizedSafeRasterManifest } from "./safe-raster.ts";
 import {
   registeredWpsAiPptBrowserDriverEvidence,
-  type WpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverPort,
 } from "./wps-aippt-driver.ts";
 
@@ -315,6 +319,7 @@ export interface BakeoffHarnessDependencies {
   readonly tombstones?: TombstoneLedgerPort;
   readonly egressAudit?: EgressAuthorizationAuditPort;
   readonly wpsAiPptBrowserDriver?: WpsAiPptBrowserDriverPort;
+  readonly qwenBrowserDriver?: QwenBrowserDriverPort;
   readonly attemptCheckpointStore?: AttemptCheckpointPort;
   readonly browserProfileLock?: BrowserProfileLockPort;
   readonly safeRasterRenderer?: SafeRasterRendererPort;
@@ -513,6 +518,9 @@ function bakeoffJobIdentity(
     readonly wpsAiPptBrowserDriver:
       | WpsAiPptBrowserDriverPort
       | undefined;
+    readonly qwenBrowserDriver:
+      | QwenBrowserDriverPort
+      | undefined;
     readonly attemptCheckpointStore: AttemptCheckpointPort;
     readonly browserProfileLock: BrowserProfileLockPort;
     readonly safeRasterRenderer: SafeRasterRendererPort | undefined;
@@ -581,6 +589,9 @@ function bakeoffJobIdentity(
       wpsAiPptBrowserDriver: dependencyIdentity(
         dependencies.wpsAiPptBrowserDriver,
       ),
+      qwenBrowserDriver: dependencyIdentity(
+        dependencies.qwenBrowserDriver,
+      ),
       attemptCheckpointStore:
         dependencies.attemptCheckpointStore.checkpointStoreId,
       browserProfileLock: {
@@ -648,7 +659,7 @@ interface SelectedProductAdapter {
   readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly productPackage: ProductPackageSnapshot;
-  readonly browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null;
+  readonly browserDriverEvidence: TrustedBrowserDriverEvidence | null;
   readonly runId: string;
 }
 
@@ -682,6 +693,9 @@ function snapshotProductSelections(
   dependencies: {
     readonly wpsAiPptBrowserDriver:
       | WpsAiPptBrowserDriverPort
+      | undefined;
+    readonly qwenBrowserDriver:
+      | QwenBrowserDriverPort
       | undefined;
     readonly attemptCheckpointStore: AttemptCheckpointPort;
   },
@@ -721,6 +735,11 @@ function snapshotProductSelections(
           ? registeredWpsAiPptBrowserDriverEvidence(
               dependencies.wpsAiPptBrowserDriver,
             )
+          : executionConfiguration.adapterKind ===
+              "qwen-web"
+            ? registeredQwenBrowserDriverEvidence(
+                dependencies.qwenBrowserDriver,
+              )
           : null;
       const selectedExecute =
         resolveHarnessProductAdapterExecutor(
@@ -754,7 +773,7 @@ function adapterImplementationEvidence(
   executionConfigurationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   productPackageId: string,
-  browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null = null,
+  browserDriverEvidence: TrustedBrowserDriverEvidence | null = null,
 ): {
   readonly implementationDigest: `sha256:${string}`;
   readonly executionEntrypointDigest: `sha256:${string}`;
@@ -764,7 +783,7 @@ function adapterImplementationEvidence(
   readonly executionConfiguration: ProductAdapterExecutionConfiguration;
   readonly implementationPackageName: string;
   readonly implementationPackageByteSize: number;
-  readonly browserDriverEvidence: WpsAiPptBrowserDriverEvidence | null;
+  readonly browserDriverEvidence: TrustedBrowserDriverEvidence | null;
 } {
   const implementationDigest = sha256Bytes(
     implementationPackage.content,
@@ -1570,7 +1589,7 @@ async function executeVendor(
         sha256Json(result.observableEvents ?? [])
     ) {
       throw new Error(
-        "Production WPS Artifact requires bound driver session, outcome, Artifact, and Trace evidence",
+        "Production Artifact requires bound driver session, outcome, Artifact, and Trace evidence",
       );
     }
   }
@@ -1852,6 +1871,7 @@ export function createBakeoffHarness({
   tombstones: configuredTombstones,
   egressAudit: configuredEgressAudit,
   wpsAiPptBrowserDriver,
+  qwenBrowserDriver,
   attemptCheckpointStore: configuredAttemptCheckpointStore,
   browserProfileLock: configuredBrowserProfileLock,
   safeRasterRenderer,
@@ -2438,7 +2458,11 @@ export function createBakeoffHarness({
       }
       const selections = snapshotProductSelections(
         selectedProductAdapters,
-        { wpsAiPptBrowserDriver, attemptCheckpointStore },
+        {
+          wpsAiPptBrowserDriver,
+          qwenBrowserDriver,
+          attemptCheckpointStore,
+        },
       );
       if (commandSnapshot.environment === "production") {
         if (
@@ -2479,6 +2503,35 @@ export function createBakeoffHarness({
           return Promise.reject(
             new Error(
               "Production Bakeoff rejects caller-supplied WPS browser sessions",
+            ),
+          );
+        }
+        const selectedQwenRuns = selections.filter(
+          ({ executionConfiguration }) =>
+            executionConfiguration.adapterKind === "qwen-web",
+        );
+        const isExplicitQwenRealProviderReplay =
+          qwenBrowserDriver?.runtimeProvenance ===
+            "PRODUCTION_REPLAY" &&
+          qwenBrowserDriver.captureSource ===
+            "REAL_PROVIDER_CAPTURE" &&
+          selectedQwenRuns.length > 0 &&
+          selectedQwenRuns.every(
+            ({ browserDriverEvidence, productPackage }) =>
+              productPackage.provenance ===
+                "PRODUCTION_REPLAY" &&
+              browserDriverEvidence?.provenance ===
+                "PRODUCTION_REPLAY" &&
+              browserDriverEvidence.captureSource ===
+                "REAL_PROVIDER_CAPTURE",
+          );
+        if (
+          qwenBrowserDriver !== undefined &&
+          !isExplicitQwenRealProviderReplay
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff rejects caller-supplied Qwen browser sessions",
             ),
           );
         }
@@ -2562,6 +2615,7 @@ export function createBakeoffHarness({
           egressAudit,
           specCommitSha,
           wpsAiPptBrowserDriver,
+          qwenBrowserDriver,
           attemptCheckpointStore,
           browserProfileLock,
           safeRasterRenderer,
