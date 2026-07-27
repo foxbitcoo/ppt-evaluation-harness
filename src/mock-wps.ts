@@ -859,6 +859,7 @@ export function resolveHarnessProductAdapterExecutor(
       implementationPackage,
       executionConfiguration,
       dependencies.qwenBrowserDriver,
+      dependencies.attemptCheckpointStore,
     );
   }
   if (adapterKind === "wps-aippt-browser") {

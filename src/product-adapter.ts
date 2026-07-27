@@ -106,6 +106,22 @@ export interface ProductionDriverExecutionEvidence {
   readonly liveBridgeTranscriptHash?: `sha256:${string}`;
 }
 
+export interface TrustedBrowserDriverEvidence {
+  readonly driverId: string;
+  readonly provenance:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY"
+    | "TEST_FAKE";
+  readonly captureSource:
+    | "LIVE_BROWSER_AUTOMATION"
+    | "REAL_PROVIDER_CAPTURE"
+    | "TEST_FIXTURE";
+  readonly driverVersion: string;
+  readonly browserProfileDigest: `sha256:${string}`;
+  readonly implementationDigest: `sha256:${string}`;
+  readonly configurationDigest: `sha256:${string}`;
+}
+
 export interface SafeRasterCandidate {
   readonly renderer: string;
   readonly fontPack: string;

@@ -13,30 +13,47 @@ import {
 import type {
   Artifact,
   BlockReason,
+  ObservableAttemptEvent,
   ProvenanceLabel,
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
 import type {
   ProductAdapterImplementationPackage,
+  AttemptCheckpointPort,
   ProductAdapterExecutionConfiguration,
   ProductAdapterExecutor,
   ProductAdapterPort,
   ProductAttemptResult,
   ProductPackageSnapshot,
   ProductRunCommand,
+  TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
+import { validatedOpcSlideNames } from "./wps-aippt.ts";
 
 const textEncoder = new TextEncoder();
 const implementationContent = readFileSync(new URL(import.meta.url));
 
 export const QWEN_PRODUCTION_ADAPTER_KIND = "qwen-web" as const;
-export const QWEN_VOLCANO_SCENARIO =
-  "volcano-16-best-zero-added-cost-v1" as const;
+export const QWEN_VOLCANO_SCENARIO = "production-live" as const;
 export const QWEN_ENTRY_URL = "https://www.qianwen.com/" as const;
 export const QWEN_MAX_ATTEMPT_TIMEOUT_MS = 30 * 60 * 1_000;
+export const QWEN_ADAPTER_VERSION = "qwen-web@1" as const;
+export const QWEN_BROWSER_DRIVER_VERSION =
+  "qwen-harness-browser-bridge@1" as const;
+export const QWEN_BROWSER_PROFILE_DIGEST = sha256(
+  textEncoder.encode(
+    JSON.stringify({
+      automationSurface: "codex-external-browser",
+      credentialSource: "existing-user-profile",
+      engine: "chrome",
+      profileSchemaVersion: "qwen-browser-profile-v1",
+    }),
+  ),
+);
 
 export interface QwenBrowserExecutionCommand {
+  readonly attemptSeq: number;
   readonly entryUrl: typeof QWEN_ENTRY_URL;
   readonly prompt: string;
   readonly pageCount: 16;
@@ -71,6 +88,9 @@ export interface QwenBrowserMilestone {
   readonly eventType: QwenBrowserMilestoneType;
   readonly observedAt: string;
   readonly url: string;
+  readonly evidenceId?: `ev_${string}`;
+  readonly vendorTaskId?: `task_${string}` | null;
+  readonly taskStateVersion?: string | null;
 }
 
 export type QwenManualActionType =
@@ -134,9 +154,39 @@ export interface QwenBrowserDriverPort {
     | "TEST"
     | "LIVE_PRODUCTION"
     | "PRODUCTION_REPLAY";
+  readonly driverId?:
+    | "qwen-test-fixture"
+    | "qwen-real-provider-replay";
+  readonly captureSource?:
+    | "TEST_FIXTURE"
+    | "REAL_PROVIDER_CAPTURE";
+  readonly driverVersion?: typeof QWEN_BROWSER_DRIVER_VERSION;
+  readonly browserProfileDigest?: typeof QWEN_BROWSER_PROFILE_DIGEST;
+  readonly implementationPackage?: ProductAdapterImplementationPackage;
+  readonly configurationPackage?: ProductAdapterImplementationPackage;
+  readonly sessions?: readonly QwenBrowserExecution[];
+  readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
   execute(
     command: QwenBrowserExecutionCommand,
   ): Promise<QwenBrowserExecution>;
+}
+
+export interface QwenTaskReconciliationQuery {
+  readonly vendorTaskId: `task_${string}`;
+  readonly taskStateVersion: string;
+  readonly eventHistoryHash: `sha256:${string}`;
+  readonly artifactContentHash: `sha256:${string}` | null;
+}
+
+export interface QwenTaskReconciliationEvidence {
+  readonly query: QwenTaskReconciliationQuery;
+  readonly observedState:
+    | "unknown"
+    | "submitted"
+    | "artifact_ready"
+    | "failed";
+  readonly observedAt: string;
+  readonly evidenceId: `ev_${string}`;
 }
 
 export type QwenTraceEventType =
@@ -170,6 +220,230 @@ export type QwenProductAdapterExecutor = (
 
 function sha256(content: Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function qwenDriverImplementationPackage():
+  ProductAdapterImplementationPackage {
+  const content = textEncoder.encode(
+    JSON.stringify({
+      driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+      executionPolicy:
+        "harness-owned-live-or-retained-real-provider-replay",
+      schemaVersion: "qwen-browser-driver-implementation-v1",
+    }),
+  );
+  return Object.freeze({
+    packageName:
+      "qwen-browser-driver#harness-owned-or-replay-runtime",
+    contentHash: sha256(content),
+    content,
+  });
+}
+
+function qwenDriverConfigurationPackage():
+  ProductAdapterImplementationPackage {
+  const content = textEncoder.encode(
+    JSON.stringify({
+      browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
+      driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+      schemaVersion: "qwen-browser-driver-configuration-v1",
+    }),
+  );
+  return Object.freeze({
+    packageName:
+      "qwen-browser-driver-configuration#harness-owned-bridge",
+    contentHash: sha256(content),
+    content,
+  });
+}
+
+function assertQwenDriverPackage(
+  actual: ProductAdapterImplementationPackage | undefined,
+  expected: ProductAdapterImplementationPackage,
+  label: string,
+): void {
+  if (
+    actual === undefined ||
+    actual.packageName !== expected.packageName ||
+    actual.contentHash !== expected.contentHash ||
+    sha256(actual.content) !== expected.contentHash ||
+    !Buffer.from(actual.content).equals(Buffer.from(expected.content))
+  ) {
+    throw new Error(`Qwen browser driver ${label} is not allowlisted`);
+  }
+}
+
+export interface QwenBrowserDriverEvidence
+  extends TrustedBrowserDriverEvidence {
+  readonly driverId:
+    | "qwen-harness-browser-bridge"
+    | "qwen-real-provider-replay";
+  readonly provenance:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
+  readonly captureSource:
+    | "LIVE_BROWSER_AUTOMATION"
+    | "REAL_PROVIDER_CAPTURE";
+  readonly driverVersion: typeof QWEN_BROWSER_DRIVER_VERSION;
+  readonly browserProfileDigest: typeof QWEN_BROWSER_PROFILE_DIGEST;
+}
+
+const HARNESS_OWNED_QWEN_DRIVER_EVIDENCE:
+  QwenBrowserDriverEvidence = Object.freeze({
+    driverId: "qwen-harness-browser-bridge",
+    provenance: "LIVE_PRODUCTION",
+    captureSource: "LIVE_BROWSER_AUTOMATION",
+    driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+    browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
+    implementationDigest:
+      qwenDriverImplementationPackage().contentHash,
+    configurationDigest:
+      qwenDriverConfigurationPackage().contentHash,
+  });
+
+export function registeredQwenBrowserDriverEvidence(
+  driver: QwenBrowserDriverPort | undefined,
+): QwenBrowserDriverEvidence {
+  if (driver === undefined) {
+    return HARNESS_OWNED_QWEN_DRIVER_EVIDENCE;
+  }
+  assertQwenDriverPackage(
+    driver.implementationPackage,
+    qwenDriverImplementationPackage(),
+    "implementation package",
+  );
+  assertQwenDriverPackage(
+    driver.configurationPackage,
+    qwenDriverConfigurationPackage(),
+    "configuration package",
+  );
+  if (
+    driver.driverId !== "qwen-real-provider-replay" ||
+    driver.runtimeProvenance !== "PRODUCTION_REPLAY" ||
+    driver.captureSource !== "REAL_PROVIDER_CAPTURE" ||
+    driver.driverVersion !== QWEN_BROWSER_DRIVER_VERSION ||
+    driver.browserProfileDigest !== QWEN_BROWSER_PROFILE_DIGEST ||
+    (driver.sessions?.length ?? 0) === 0 &&
+    (driver.reconciliations?.length ?? 0) === 0
+  ) {
+    throw new Error(
+      "Production registry requires an allowlisted Qwen browser driver package",
+    );
+  }
+  return Object.freeze({
+    driverId: driver.driverId,
+    provenance: driver.runtimeProvenance,
+    captureSource: driver.captureSource,
+    driverVersion: driver.driverVersion,
+    browserProfileDigest: driver.browserProfileDigest,
+    implementationDigest:
+      qwenDriverImplementationPackage().contentHash,
+    configurationDigest:
+      qwenDriverConfigurationPackage().contentHash,
+  });
+}
+
+function registeredProductionQwenDriver(
+  driver: QwenBrowserDriverPort | undefined,
+): QwenBrowserDriverPort & {
+  readonly runtimeProvenance:
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
+} {
+  if (driver === undefined) {
+    return Object.freeze({
+      runtimeProvenance: "LIVE_PRODUCTION" as const,
+      async execute() {
+        throw new Error(
+          "Harness-owned Qwen live executable is not embedded; production execution fails closed",
+        );
+      },
+    });
+  }
+  registeredQwenBrowserDriverEvidence(driver);
+  const sessions = driver.sessions ?? [];
+  const frozenSessions = Object.freeze(
+    sessions.map((session) =>
+      Object.freeze(structuredClone(session)),
+    ),
+  );
+  return Object.freeze({
+    runtimeProvenance: "PRODUCTION_REPLAY" as const,
+    async execute(command: QwenBrowserExecutionCommand) {
+      const session = frozenSessions[command.attemptSeq - 1];
+      if (session === undefined) {
+        throw new Error(
+          `Qwen replay driver has no retained session for attempt ${command.attemptSeq}`,
+        );
+      }
+      return Object.freeze(structuredClone(session));
+    },
+  });
+}
+
+export function createQwenRealProviderReplayPackage(input: {
+  readonly sessions: readonly QwenBrowserExecution[];
+  readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
+}): QwenBrowserDriverPort {
+  if (
+    input.sessions.length === 0 &&
+    (input.reconciliations?.length ?? 0) === 0
+  ) {
+    throw new Error(
+      "Qwen replay ingest requires retained real-provider evidence",
+    );
+  }
+  const sessions = Object.freeze(
+    input.sessions.map((session) =>
+      Object.freeze(structuredClone(session)),
+    ),
+  );
+  return Object.freeze({
+    driverId: "qwen-real-provider-replay",
+    runtimeProvenance: "PRODUCTION_REPLAY",
+    captureSource: "REAL_PROVIDER_CAPTURE",
+    driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+    browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
+    implementationPackage: qwenDriverImplementationPackage(),
+    configurationPackage: qwenDriverConfigurationPackage(),
+    sessions,
+    reconciliations: Object.freeze(
+      (input.reconciliations ?? []).map((entry) =>
+        Object.freeze(structuredClone(entry)),
+      ),
+    ),
+    async execute() {
+      throw new Error(
+        "Caller-supplied Qwen replay execute closures are never trusted",
+      );
+    },
+  });
+}
+
+function reconcileRegisteredQwenTask(
+  driver: QwenBrowserDriverPort | undefined,
+  query: QwenTaskReconciliationQuery,
+): QwenTaskReconciliationEvidence {
+  registeredQwenBrowserDriverEvidence(driver);
+  if (driver === undefined) {
+    throw new Error(
+      "Harness-owned Qwen live reconciliation executable is unavailable",
+    );
+  }
+  const evidence = driver.reconciliations?.find(
+    (candidate) =>
+      JSON.stringify(candidate.query) === JSON.stringify(query),
+  );
+  if (evidence === undefined) {
+    throw new Error(
+      "Qwen reconciliation API has no task/history/hash match",
+    );
+  }
+  assertIsoTimestamp(evidence.observedAt, "reconciliation time");
+  if (!/^ev_[a-f0-9]{16,64}$/.test(evidence.evidenceId)) {
+    throw new Error("Qwen reconciliation evidence ID must be opaque");
+  }
+  return Object.freeze(structuredClone(evidence));
 }
 
 function assertIsoTimestamp(value: string, field: string): void {
@@ -216,39 +490,7 @@ function assertSafeVisibleLabel(value: string, field: string): void {
 }
 
 function countPptxSlides(content: Uint8Array): number {
-  if (
-    content.byteLength < 4 ||
-    content[0] !== 0x50 ||
-    content[1] !== 0x4b
-  ) {
-    throw new Error("Qwen export is not an openable PPTX ZIP package");
-  }
-  const archiveNames = Buffer.from(content).toString("latin1");
-  if (
-    /(?:^|\/)vbaProject\.bin|\/activeX\/|\/macros\//i.test(
-      archiveNames,
-    )
-  ) {
-    throw new Error(
-      "Qwen export failed the unsafe PPTX macro safety gate",
-    );
-  }
-  const pages = new Set<number>();
-  for (const match of archiveNames.matchAll(
-    /ppt\/slides\/slide([1-9]\d*)\.xml/g,
-  )) {
-    pages.add(Number(match[1]));
-  }
-  if (
-    pages.size === 0 ||
-    [...pages].some(
-      (pageNumber) =>
-        pageNumber < 1 || pageNumber > pages.size,
-    )
-  ) {
-    throw new Error("Qwen export has an invalid PPTX slide manifest");
-  }
-  return pages.size;
+  return validatedOpcSlideNames(content).length;
 }
 
 function validateStaticRenders(
@@ -349,37 +591,53 @@ function artifactFromDownload(
 
 function createTrace(
   execution: QwenBrowserCompletedExecution,
-  configuration: QwenObservedConfiguration,
 ): readonly QwenTraceEvent[] {
   const milestones = execution.milestones.map((milestone) => {
     assertIsoTimestamp(milestone.observedAt, "milestone time");
-    const sourceUrl = safeQwenUrl(milestone.url);
+    safeQwenUrl(milestone.url);
+    const evidenceId =
+      milestone.evidenceId ??
+      opaqueEvidenceId({
+        eventType: milestone.eventType,
+        observedAt: milestone.observedAt,
+      });
     return Object.freeze({
       eventType: milestone.eventType,
       observedAt: milestone.observedAt,
-      sourceUrl,
-      evidenceRef: `qwen-ui:${milestone.eventType}:${sourceUrl}`,
+      sourceUrl: `urn:qwen-evidence:${evidenceId}`,
+      evidenceRef: evidenceId,
     });
   });
   const artifactEvents: readonly QwenTraceEvent[] = [
     {
       eventType: "artifact_downloaded",
       observedAt: execution.download.capturedAt,
-      sourceUrl: configuration.actualUrl,
-      evidenceRef: "qwen-download:pptx",
+      sourceUrl: "urn:qwen-evidence:artifact-download",
+      evidenceRef: opaqueEvidenceId({
+        eventType: "artifact_downloaded",
+        observedAt: execution.download.capturedAt,
+      }),
     },
     {
       eventType: "artifact_validated",
       observedAt: execution.download.capturedAt,
-      sourceUrl: configuration.actualUrl,
-      evidenceRef: "qwen-artifact:sha256-and-page-count",
+      sourceUrl: "urn:qwen-evidence:artifact-validation",
+      evidenceRef: opaqueEvidenceId({
+        eventType: "artifact_validated",
+        observedAt: execution.download.capturedAt,
+      }),
     },
-    {
-      eventType: "static_render_validated",
-      observedAt: execution.download.capturedAt,
-      sourceUrl: configuration.actualUrl,
-      evidenceRef: "qwen-render:16-static-pages",
-    },
+    ...(execution.staticRenders.length === 0
+      ? []
+      : [{
+          eventType: "static_render_validated" as const,
+          observedAt: execution.download.capturedAt,
+          sourceUrl: "urn:qwen-evidence:static-render",
+          evidenceRef: opaqueEvidenceId({
+            eventType: "static_render_validated",
+            observedAt: execution.download.capturedAt,
+          }),
+        }]),
   ];
   return Object.freeze([...milestones, ...artifactEvents]);
 }
@@ -389,30 +647,111 @@ function createTerminalTrace(
 ): readonly QwenTraceEvent[] {
   const milestones = execution.milestones.map((milestone) => {
     assertIsoTimestamp(milestone.observedAt, "milestone time");
-    const sourceUrl = safeQwenUrl(milestone.url);
+    safeQwenUrl(milestone.url);
+    const evidenceId =
+      milestone.evidenceId ??
+      opaqueEvidenceId({
+        eventType: milestone.eventType,
+        observedAt: milestone.observedAt,
+      });
     return Object.freeze({
       eventType: milestone.eventType,
       observedAt: milestone.observedAt,
-      sourceUrl,
-      evidenceRef: `qwen-ui:${milestone.eventType}:${sourceUrl}`,
+      sourceUrl: `urn:qwen-evidence:${evidenceId}`,
+      evidenceRef: evidenceId,
     });
   });
   const last = milestones.at(-1);
   assertIsoTimestamp(execution.observedAt, "terminal time");
-  const sourceUrl =
-    last?.sourceUrl ??
+  if (last === undefined) {
     safeQwenUrl(
       execution.observedConfiguration?.actualUrl ?? QWEN_ENTRY_URL,
     );
+  }
+  const terminalEvidenceId = opaqueEvidenceId({
+    eventType: "terminal_observed",
+    observedAt: execution.observedAt,
+    terminalReason: execution.terminalReason,
+  });
   return Object.freeze([
     ...milestones,
     Object.freeze({
       eventType: "terminal_observed" as const,
       observedAt: execution.observedAt,
-      sourceUrl,
-      evidenceRef: `qwen-terminal:${execution.terminalReason}`,
+      sourceUrl: `urn:qwen-evidence:${terminalEvidenceId}`,
+      evidenceRef: terminalEvidenceId,
     }),
   ]);
+}
+
+function opaqueEvidenceId(
+  value: unknown,
+): `ev_${string}` {
+  return `ev_${sha256(textEncoder.encode(JSON.stringify(value))).slice(7, 39)}`;
+}
+
+async function persistedObservableEvents(
+  command: ProductRunCommand,
+  execution: QwenBrowserExecution,
+  checkpointStore: AttemptCheckpointPort | undefined,
+  production: boolean,
+): Promise<readonly ObservableAttemptEvent[]> {
+  const events: ObservableAttemptEvent[] = [];
+  let submitted = false;
+  for (const [index, milestone] of execution.milestones.entries()) {
+    assertIsoTimestamp(milestone.observedAt, "milestone time");
+    safeQwenUrl(milestone.url);
+    const evidenceId =
+      milestone.evidenceId ??
+      opaqueEvidenceId({
+        attemptId: command.attemptId,
+        eventType: milestone.eventType,
+        index,
+        observedAt: milestone.observedAt,
+      });
+    if (!/^ev_[a-f0-9]{16,64}$/.test(evidenceId)) {
+      throw new Error("Qwen browser evidence ID must be opaque");
+    }
+    if (milestone.eventType === "submission_observed") {
+      submitted = true;
+    }
+    if (
+      production &&
+      submitted &&
+      (milestone.vendorTaskId === undefined ||
+        milestone.vendorTaskId === null ||
+        milestone.taskStateVersion === undefined ||
+        milestone.taskStateVersion === null)
+    ) {
+      throw new Error(
+        "Production Qwen checkpoints require vendor task identity and state version",
+      );
+    }
+    const event = Object.freeze({
+      eventId: `${command.attemptId}-qwen-event-${index + 1}`,
+      jobId: command.jobId,
+      caseId: command.evaluationCase.caseId,
+      runId: command.runId,
+      attemptId: command.attemptId,
+      attemptSeq: command.attemptSeq,
+      eventType: milestone.eventType,
+      sourceAt: milestone.observedAt,
+      observedAt: milestone.observedAt,
+      writerId: QWEN_ADAPTER_VERSION,
+      evidenceRef: evidenceId,
+      sourceUrl: `urn:qwen-evidence:${evidenceId}`,
+      submissionEvidenceAtCheckpoint: submitted
+        ? "submitted" as const
+        : "not_submitted" as const,
+      vendorTaskId: milestone.vendorTaskId ?? null,
+      taskStateVersion: milestone.taskStateVersion ?? null,
+      adapterVersion: QWEN_ADAPTER_VERSION,
+      artifactId: null,
+    });
+    await checkpointStore?.append(event);
+    events.push(event);
+  }
+  return Object.freeze(events);
 }
 
 function validateTerminalExecution(
@@ -434,12 +773,33 @@ function validateTerminalExecution(
   for (const action of execution.manualActions) {
     assertIsoTimestamp(action.observedAt, "manual-action time");
   }
+  assertSubmissionEvidenceMatchesMilestones(execution);
+}
+
+function assertSubmissionEvidenceMatchesMilestones(
+  execution: QwenBrowserExecution,
+): void {
+  const submissionObserved = execution.milestones.some(
+    ({ eventType }) => eventType === "submission_observed",
+  );
+  if (
+    (execution.submissionEvidence === "submitted" &&
+      !submissionObserved) ||
+    (execution.submissionEvidence === "not_submitted" &&
+      submissionObserved)
+  ) {
+    throw new Error(
+      "Qwen submission evidence contradicts observable checkpoints",
+    );
+  }
 }
 
 function qwenExecutor(
   driver: QwenBrowserDriverPort,
-  provenance: ProvenanceLabel,
+  provenance: "MOCK" | "LIVE_PRODUCTION" | "PRODUCTION_REPLAY",
   environmentOrigin: EnvironmentOrigin,
+  checkpointStore?: AttemptCheckpointPort,
+  reconciliationDriver?: QwenBrowserDriverPort,
 ): QwenProductAdapterExecutor {
   const executor: QwenProductAdapterExecutor = async (command) => {
     if (
@@ -460,7 +820,112 @@ function qwenExecutor(
         "Qwen production adapter requires an attempt deadline within 30 minutes",
       );
     }
+    const recoveredEvents =
+      (await checkpointStore?.readAttempt?.(command.attemptId)) ?? [];
+    if (recoveredEvents.length > 0) {
+      for (const event of recoveredEvents) {
+        if (
+          event.jobId !== command.jobId ||
+          event.caseId !== command.evaluationCase.caseId ||
+          event.runId !== command.runId ||
+          event.attemptId !== command.attemptId ||
+          event.attemptSeq !== command.attemptSeq ||
+          event.adapterVersion !== QWEN_ADAPTER_VERSION
+        ) {
+          throw new Error(
+            "Recovered Qwen checkpoint lineage does not match the Attempt",
+          );
+        }
+      }
+      const latestTaskCheckpoint = [...recoveredEvents].reverse().find(
+        (event) =>
+          event.vendorTaskId !== null &&
+          event.vendorTaskId !== undefined &&
+          event.taskStateVersion !== null &&
+          event.taskStateVersion !== undefined,
+      );
+      if (latestTaskCheckpoint === undefined) {
+        throw new Error(
+          "Recovered Qwen checkpoints require vendor task identity and state version",
+        );
+      }
+      const reconciliation = reconcileRegisteredQwenTask(
+        reconciliationDriver,
+        {
+          vendorTaskId:
+            latestTaskCheckpoint.vendorTaskId as `task_${string}`,
+          taskStateVersion:
+            latestTaskCheckpoint.taskStateVersion as string,
+          eventHistoryHash: sha256(
+            textEncoder.encode(JSON.stringify(recoveredEvents)),
+          ),
+          artifactContentHash: null,
+        },
+      );
+      const reconciliationEvent = Object.freeze({
+        eventId: `${command.attemptId}-qwen-reconciliation-${recoveredEvents.length + 1}`,
+        jobId: command.jobId,
+        caseId: command.evaluationCase.caseId,
+        runId: command.runId,
+        attemptId: command.attemptId,
+        attemptSeq: command.attemptSeq,
+        eventType: "task_reconciliation_result",
+        sourceAt: reconciliation.observedAt,
+        observedAt: reconciliation.observedAt,
+        writerId: QWEN_ADAPTER_VERSION,
+        evidenceRef: reconciliation.evidenceId,
+        sourceUrl:
+          `urn:qwen-evidence:${reconciliation.evidenceId}`,
+        submissionEvidenceAtCheckpoint: recoveredEvents.some(
+          ({ submissionEvidenceAtCheckpoint }) =>
+            submissionEvidenceAtCheckpoint === "submitted",
+        )
+          ? "submitted" as const
+          : "unknown" as const,
+        vendorTaskId: reconciliation.query.vendorTaskId,
+        taskStateVersion: reconciliation.query.taskStateVersion,
+        adapterVersion: QWEN_ADAPTER_VERSION,
+        artifactId: null,
+        reconciliationObservedState: reconciliation.observedState,
+        reconciliationTerminalReason:
+          reconciliation.observedState === "artifact_ready"
+            ? "download_failure" as const
+            : reconciliation.observedState === "failed"
+              ? "technical_failure" as const
+              : "task_state_unknown" as const,
+        reconciliationArtifactReference:
+          reconciliation.observedState === "artifact_ready"
+            ? `qwen-task:${reconciliation.query.vendorTaskId}`
+            : null,
+      });
+      await checkpointStore?.append(reconciliationEvent);
+      const reconciledEvents = Object.freeze([
+        ...recoveredEvents.map((event) =>
+          Object.freeze(structuredClone(event)),
+        ),
+        reconciliationEvent,
+      ]);
+      return Object.freeze({
+        terminalReason:
+          reconciliationEvent.reconciliationTerminalReason,
+        blockReason: null,
+        submissionEvidence: recoveredEvents.some(
+          ({ submissionEvidenceAtCheckpoint }) =>
+            submissionEvidenceAtCheckpoint === "submitted",
+        )
+          ? "submitted"
+          : "unknown",
+        elapsedMs: 0,
+        artifactCandidates: Object.freeze([]),
+        observableEvents: reconciledEvents,
+        observedConfiguration: null,
+        trace: Object.freeze([]),
+        manualActions: Object.freeze([]),
+        staticRenders: Object.freeze([]),
+      });
+    }
     const execution = await driver.execute({
+      attemptSeq: command.attemptSeq,
       entryUrl: QWEN_ENTRY_URL,
       prompt: command.evaluationCase.vendorPrompt,
       pageCount: 16,
@@ -471,6 +936,12 @@ function qwenExecutor(
       timeoutMs: command.timeoutMs,
       signal: command.signal,
     });
+    const observableEvents = await persistedObservableEvents(
+      command,
+      execution,
+      checkpointStore,
+      provenance !== "MOCK",
+    );
     if (execution.status === "terminal") {
       validateTerminalExecution(execution);
       return Object.freeze({
@@ -479,6 +950,7 @@ function qwenExecutor(
         submissionEvidence: execution.submissionEvidence,
         elapsedMs: execution.elapsedMs,
         artifactCandidates: Object.freeze([]),
+        observableEvents,
         observedConfiguration:
           execution.observedConfiguration === null
             ? null
@@ -494,6 +966,7 @@ function qwenExecutor(
         staticRenders: Object.freeze([]),
       });
     }
+    assertSubmissionEvidenceMatchesMilestones(execution);
     const observedConfiguration =
       validateObservedConfiguration(
         execution.observedConfiguration,
@@ -504,10 +977,21 @@ function qwenExecutor(
       provenance,
       environmentOrigin,
     );
-    const staticRenders = validateStaticRenders(
-      execution.staticRenders,
-      artifact.pageCount,
-    );
+    if (
+      provenance !== "MOCK" &&
+      execution.staticRenders.length > 0
+    ) {
+      throw new Error(
+        "Production Qwen driver cannot submit raster output before renderer authorization",
+      );
+    }
+    const staticRenders =
+      provenance === "MOCK"
+        ? validateStaticRenders(
+            execution.staticRenders,
+            artifact.pageCount,
+          )
+        : Object.freeze([] as QwenStaticRender[]);
     for (const action of execution.manualActions) {
       assertIsoTimestamp(action.observedAt, "manual-action time");
     }
@@ -517,10 +1001,63 @@ function qwenExecutor(
       submissionEvidence: execution.submissionEvidence,
       elapsedMs: execution.elapsedMs,
       artifactCandidates: Object.freeze([
-        Object.freeze({ artifact, policyCompliant: true }),
+        Object.freeze({
+          artifact,
+          ...(provenance === "MOCK"
+            ? {}
+            : {
+                productionExecutionEvidence: (() => {
+                  const latest = [...observableEvents].reverse().find(
+                    (event) =>
+                      event.vendorTaskId !== null &&
+                      event.vendorTaskId !== undefined &&
+                      event.taskStateVersion !== null &&
+                      event.taskStateVersion !== undefined,
+                  );
+                  if (latest === undefined) {
+                    throw new Error(
+                      "Production Qwen Artifact requires retained task lineage",
+                    );
+                  }
+                  return Object.freeze({
+                    executionMode: provenance,
+                    captureSource:
+                      provenance === "LIVE_PRODUCTION"
+                        ? "LIVE_BROWSER_AUTOMATION" as const
+                        : "REAL_PROVIDER_CAPTURE" as const,
+                    driverSessionId:
+                      `session_${provenance === "LIVE_PRODUCTION" ? "live" : "replay"}_${artifact.contentHash.slice(7, 39)}` as `session_${string}`,
+                    vendorTaskId:
+                      latest.vendorTaskId as `task_${string}`,
+                    taskStateVersion:
+                      latest.taskStateVersion as string,
+                    driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+                    adapterVersion: QWEN_ADAPTER_VERSION,
+                    outcome: "captured" as const,
+                    artifactContentHash: artifact.contentHash,
+                    traceHash: sha256(
+                      textEncoder.encode(
+                        JSON.stringify(observableEvents),
+                      ),
+                    ),
+                    ...(provenance === "LIVE_PRODUCTION"
+                      ? {
+                          liveBridgeTranscriptHash: sha256(
+                            textEncoder.encode(
+                              JSON.stringify(observableEvents),
+                            ),
+                          ),
+                        }
+                      : {}),
+                  });
+                })(),
+              }),
+          policyCompliant: true,
+        }),
       ]),
+      observableEvents,
       observedConfiguration,
-      trace: createTrace(execution, observedConfiguration),
+      trace: createTrace(execution),
       manualActions: Object.freeze(
         execution.manualActions.map((action) =>
           `${action.observedAt} ${action.action}`,
@@ -549,11 +1086,14 @@ export function resolveQwenProductionAdapterExecutor(
   implementation: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   driver: QwenBrowserDriverPort | undefined,
+  checkpointStore?: AttemptCheckpointPort,
 ): ProductAdapterExecutor {
   if (
     executionConfiguration.adapterKind !==
       QWEN_PRODUCTION_ADAPTER_KIND ||
-    executionConfiguration.scenario !== QWEN_VOLCANO_SCENARIO
+    !["production-live", "production-replay"].includes(
+      executionConfiguration.scenario,
+    )
   ) {
     throw new Error(
       "Qwen production adapter execution configuration is not registered",
@@ -571,23 +1111,23 @@ export function resolveQwenProductionAdapterExecutor(
       `Product Adapter implementation package is not registered for ${QWEN_PRODUCTION_ADAPTER_KIND}:${QWEN_VOLCANO_SCENARIO}`,
     );
   }
-  if (driver === undefined) {
-    throw new Error(
-      "Harness registry requires a production Qwen browser driver",
-    );
-  }
+  const registeredDriver = registeredProductionQwenDriver(driver);
   if (
-    driver.runtimeProvenance !== "LIVE_PRODUCTION" &&
-    driver.runtimeProvenance !== "PRODUCTION_REPLAY"
+    (executionConfiguration.scenario === "production-live" &&
+      registeredDriver.runtimeProvenance !== "LIVE_PRODUCTION") ||
+    (executionConfiguration.scenario === "production-replay" &&
+      registeredDriver.runtimeProvenance !== "PRODUCTION_REPLAY")
   ) {
     throw new Error(
-      "Harness registry requires a LIVE_PRODUCTION or PRODUCTION_REPLAY browser driver for Qwen",
+      "Qwen live and replay execution lineage must match the frozen driver provenance",
     );
   }
   return qwenExecutor(
-    driver,
-    driver.runtimeProvenance,
+    registeredDriver,
+    registeredDriver.runtimeProvenance,
     PRODUCTION_ENVIRONMENT_ORIGIN,
+    checkpointStore,
+    driver,
   );
 }
 
@@ -599,18 +1139,20 @@ function implementationPackage(): ProductAdapterImplementationPackage {
   });
 }
 
-function executionConfigurationPackage(): ProductAdapterImplementationPackage {
+function executionConfigurationPackage(
+  scenario: "production-live" | "production-replay",
+): ProductAdapterImplementationPackage {
   const content = textEncoder.encode(
     JSON.stringify({
       adapterKind: QWEN_PRODUCTION_ADAPTER_KIND,
-      scenario: QWEN_VOLCANO_SCENARIO,
+      scenario,
       schemaVersion:
         "product-adapter-execution-configuration-v1",
     }),
   );
   return Object.freeze({
     packageName:
-      "qwen-production-execution-configuration#volcano-16-best-zero-added-cost-v1",
+      `qwen-production-execution-configuration#${scenario}`,
     contentHash: sha256(content),
     content,
   });
@@ -620,7 +1162,7 @@ const QWEN_PRODUCT_PACKAGE: ProductPackageSnapshot = Object.freeze({
   packageId: "qwen-web-best-zero-added-cost-volcano-16-v1",
   vendorId: "qwen",
   displayName: "千问网页 PPT",
-  adapterVersion: "qwen-web@1",
+  adapterVersion: QWEN_ADAPTER_VERSION,
   provenance: "LIVE_PRODUCTION",
   environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
   egressDestination: Object.freeze({
@@ -644,11 +1186,32 @@ const QWEN_PRODUCT_PACKAGE: ProductPackageSnapshot = Object.freeze({
   }),
 });
 
+const QWEN_REPLAY_PRODUCT_PACKAGE: ProductPackageSnapshot =
+  Object.freeze({
+    ...QWEN_PRODUCT_PACKAGE,
+    packageId: "qwen-web-real-provider-replay-v1",
+    displayName: "千问网页 PPT retained real-provider replay",
+    provenance: "PRODUCTION_REPLAY",
+    egressDestination: Object.freeze({
+      targetService: "qwen-replay-ingest",
+      targetAccount: "retained-real-provider-capture",
+      targetRegion: "local",
+      subprocessors: [],
+    }),
+  });
+
 export class QwenProductionProductAdapter implements ProductAdapterPort {
   readonly implementationPackage = implementationPackage();
   readonly executionConfigurationPackage =
-    executionConfigurationPackage();
+    executionConfigurationPackage("production-live");
   readonly productPackage = QWEN_PRODUCT_PACKAGE;
+}
+
+export class QwenReplayProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage = implementationPackage();
+  readonly executionConfigurationPackage =
+    executionConfigurationPackage("production-replay");
+  readonly productPackage = QWEN_REPLAY_PRODUCT_PACKAGE;
 }
 
 export function expectedQwenProductionImplementationPackage():

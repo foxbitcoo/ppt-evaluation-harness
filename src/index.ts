@@ -188,7 +188,9 @@ export {
   type CommercialPlanObservation,
   type ProductPackageSnapshot,
   type ProductRunCommand,
+  type ProductionDriverExecutionEvidence,
   type SafeRasterRendererPort,
+  type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
 export {
   WPS_AIPPT_ADAPTER_VERSION,
@@ -224,9 +226,13 @@ export {
   QWEN_PRODUCTION_ADAPTER_KIND,
   QWEN_VOLCANO_SCENARIO,
   QwenProductionProductAdapter,
+  QwenReplayProductAdapter,
+  createQwenRealProviderReplayPackage,
   createQwenProductAdapterExecutorForTest,
+  registeredQwenBrowserDriverEvidence,
   resolveQwenProductionAdapterExecutor,
   type QwenBrowserDriverPort,
+  type QwenBrowserDriverEvidence,
   type QwenBrowserExecution,
   type QwenBrowserExecutionCommand,
   type QwenBrowserMilestone,
