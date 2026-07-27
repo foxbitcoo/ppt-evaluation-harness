@@ -74,6 +74,7 @@ export interface QwenObservedConfiguration {
   readonly expertMode: "enabled" | "disabled" | "unavailable";
   readonly networking: "enabled";
   readonly pageCount: 16;
+  readonly evidenceIds?: readonly `ev_${string}`[];
 }
 
 export type QwenBrowserMilestoneType =
@@ -473,6 +474,9 @@ function safeQwenUrl(value: string): string {
   url.password = "";
   url.search = "";
   url.hash = "";
+  if (url.pathname !== "/") {
+    url.pathname = "/chat/redacted";
+  }
   return url.toString();
 }
 
@@ -529,6 +533,7 @@ function validateStaticRenders(
 
 function validateObservedConfiguration(
   configuration: QwenObservedConfiguration,
+  production: boolean,
 ): QwenObservedConfiguration {
   const actualUrl = safeQwenUrl(configuration.actualUrl);
   assertSafeVisibleLabel(
@@ -545,6 +550,18 @@ function validateObservedConfiguration(
   ) {
     throw new Error(
       "Qwen browser did not prove the required zero-added-cost 16-page configuration",
+    );
+  }
+  if (
+    production &&
+    (configuration.evidenceIds === undefined ||
+      configuration.evidenceIds.length === 0 ||
+      configuration.evidenceIds.some(
+        (evidenceId) => !/^ev_[a-f0-9]{16,64}$/.test(evidenceId),
+      ))
+  ) {
+    throw new Error(
+      "Production Qwen configuration requires opaque evidence IDs",
     );
   }
   return Object.freeze({
@@ -956,6 +973,7 @@ function qwenExecutor(
             ? null
             : validateObservedConfiguration(
                 execution.observedConfiguration,
+                provenance !== "MOCK",
               ),
         trace: createTerminalTrace(execution),
         manualActions: Object.freeze(
@@ -970,7 +988,34 @@ function qwenExecutor(
     const observedConfiguration =
       validateObservedConfiguration(
         execution.observedConfiguration,
+        provenance !== "MOCK",
       );
+    if (
+      provenance !== "MOCK" &&
+      (!execution.milestones.some(
+        ({ eventType }) => eventType === "package_observed",
+      ) ||
+        !execution.milestones.some(
+          ({ eventType }) =>
+            eventType === "configuration_applied",
+        ))
+    ) {
+      throw new Error(
+        "Production Qwen capture requires package and configuration evidence checkpoints",
+      );
+    }
+    if (
+      provenance !== "MOCK" &&
+      !observedConfiguration.evidenceIds?.every((evidenceId) =>
+        execution.milestones.some(
+          (milestone) => milestone.evidenceId === evidenceId,
+        ),
+      )
+    ) {
+      throw new Error(
+        "Production Qwen configuration evidence is not bound to observable checkpoints",
+      );
+    }
     const artifact = artifactFromDownload(
       command,
       execution.download,

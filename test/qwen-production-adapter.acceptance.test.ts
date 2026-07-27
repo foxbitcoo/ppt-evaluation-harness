@@ -274,7 +274,7 @@ test("the Qwen workflow captures the first downloaded PPTX with hash, 16 static 
     Array.from({ length: 16 }, (_, index) => index + 1),
   );
   assert.deepEqual(result.observedConfiguration, {
-    actualUrl: "https://www.qianwen.com/chat/observable-task",
+    actualUrl: "https://www.qianwen.com/chat/redacted",
     accountReference: "current_signed_in_account",
     packageLabel: "current-account-included",
     addedCost: "zero",
@@ -687,7 +687,27 @@ test("a retained Qwen capture produces PRODUCTION_REPLAY Artifact and bound opaq
   });
   const replaySession = {
     ...captured,
-    milestones: captured.milestones.map((milestone, index) => ({
+    observedConfiguration: {
+      ...captured.observedConfiguration,
+      evidenceIds: [
+        "ev_2222222222222222",
+        "ev_3333333333333333",
+      ] as const,
+    },
+    milestones: [
+      captured.milestones[0]!,
+      {
+        eventType: "package_observed" as const,
+        observedAt: "2026-07-27T10:00:10.000Z",
+        url: "https://www.qianwen.com/chat/observable-task",
+      },
+      {
+        eventType: "configuration_applied" as const,
+        observedAt: "2026-07-27T10:00:20.000Z",
+        url: "https://www.qianwen.com/chat/observable-task",
+      },
+      ...captured.milestones.slice(1),
+    ].map((milestone, index) => ({
       ...milestone,
       evidenceId:
         `ev_${String(index + 1).repeat(16)}` as `ev_${string}`,
