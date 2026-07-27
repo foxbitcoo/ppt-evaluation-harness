@@ -113,7 +113,10 @@ ${vendorSections}
 Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分。本报告展示独立维度，不生成总分或总冠军，也不外推为稳定厂商排名。
 `;
   return {
-    reportId: MOCK_SCENARIO.reportId,
+    reportId:
+      lineage.provenance === "MOCK"
+        ? MOCK_SCENARIO.reportId
+        : `${jobId}-report`,
     provenance: lineage.provenance,
     environmentOrigin: lineage.environmentOrigin,
     title: `${reportPrefix}火山 Case Sample 三厂商评测报告`,

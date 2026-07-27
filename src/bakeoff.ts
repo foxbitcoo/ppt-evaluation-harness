@@ -178,12 +178,20 @@ function bakeoffProtocolSnapshot(
   referencePackMode: NonNullable<
     StartBakeoffJobCommand["referencePackMode"]
   >,
+  environment: "test" | "production" = "test",
 ): BakeoffProtocolSnapshot {
+  const base =
+    environment === "production"
+      ? Object.freeze({
+          ...MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+          protocolId: "production-query-default-cost-v1",
+        })
+      : MOCK_BAKEOFF_PROTOCOL_SNAPSHOT;
   if (referencePackMode === "automatic") {
-    return MOCK_BAKEOFF_PROTOCOL_SNAPSHOT;
+    return base;
   }
   return Object.freeze({
-    ...MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+    ...base,
     referencePackMode,
   });
 }
@@ -494,6 +502,7 @@ function bakeoffJobIdentity(
     referencePackMode: command.referencePackMode ?? "automatic",
     protocol: bakeoffProtocolSnapshot(
       command.referencePackMode ?? "automatic",
+      command.environment,
     ),
     selections: selections.map(
       ({
@@ -780,6 +789,7 @@ function replayedBakeoffOutcome(
   }
   const expectedProtocol = bakeoffProtocolSnapshot(
     command.referencePackMode ?? "automatic",
+    command.environment,
   );
   if (
     !isDeepStrictEqual(source.job.protocolSnapshot, expectedProtocol)
@@ -1480,7 +1490,8 @@ async function executeVendor(
     ...artifactPackageManifest.egressAuthorizations,
   );
   const scorecardId =
-    scenario?.scorecardId ?? runId.replace(/^MOCK-run-/, "MOCK-scorecard-");
+    scenario?.scorecardId ??
+    runId.replace(/-run-/, "-scorecard-");
   const visualScoringAllowed = renderManifest.renderOutcome === "faithful";
   const evaluationAttemptKind =
     judge === undefined || !visualScoringAllowed
@@ -1807,6 +1818,7 @@ export function createBakeoffHarness({
 
       const protocolSnapshot = bakeoffProtocolSnapshot(
         command.referencePackMode ?? "automatic",
+        command.environment,
       );
       if ((await tombstones.findByJobId(context.jobId)) !== null) {
         throw new Error(
