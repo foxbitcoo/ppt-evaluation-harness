@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import type {
   ArtifactScoreTableRecord,
@@ -135,8 +136,10 @@ function comparePair(
     left.score.renderManifest.renderer !==
       right.score.renderManifest.renderer ||
     left.score.environmentOrigin !== right.score.environmentOrigin ||
-    JSON.stringify(left.score.comparisonCompatibilityFingerprint) !==
-      JSON.stringify(right.score.comparisonCompatibilityFingerprint) ||
+    !isDeepStrictEqual(
+      left.score.comparisonCompatibilityFingerprint,
+      right.score.comparisonCompatibilityFingerprint,
+    ) ||
     !compatibleJudgeConfiguration(left.score, right.score)
   ) {
     throw new Error("Selected Runs are not compatible for direct comparison");

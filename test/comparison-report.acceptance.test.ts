@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   InMemoryFeishuProjection,
+  MOCK_TEST_ENVIRONMENT_ORIGIN,
   MockDoubaoProductAdapter,
   MockQwenProductAdapter,
   MockWpsProductAdapter,
@@ -552,4 +553,103 @@ test("append-only reevaluations require explicit scorecard selection and bind co
     outcome.comparisons[0]?.comparisonId ?? "",
     /^comparison-[a-f0-9]{16}$/,
   );
+});
+
+test("replaying the same stable Bakeoff IDs is idempotent while conflicting capture payloads are rejected", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const harness = createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  });
+  const command = {
+    environment: "test" as const,
+    caseId: VOLCANO_CASE_ID,
+  };
+  await harness.startBakeoffJob(command);
+  const first = feishu.snapshot();
+
+  await harness.startBakeoffJob(command);
+  const replayed = feishu.snapshot();
+
+  assert.equal(replayed.runRecordTable.length, first.runRecordTable.length);
+  assert.equal(
+    replayed.capturedArtifactTable.length,
+    first.capturedArtifactTable.length,
+  );
+  assert.equal(
+    replayed.artifactScoreTable.length,
+    first.artifactScoreTable.length,
+  );
+  assert.equal(
+    replayed.productGapCardTable.length,
+    first.productGapCardTable.length,
+  );
+  assert.equal(replayed.reports.length, first.reports.length);
+
+  const capture = first.capturedArtifactTable[0];
+  assert.ok(capture);
+  await assert.rejects(
+    feishu.appendCapturedArtifact({
+      ...capture,
+      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      artifact: {
+        ...capture.artifact,
+        environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+        filename: "conflicting-replay.pptx",
+      },
+      renderManifest: {
+        ...capture.renderManifest,
+        environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      },
+    }),
+    /identity conflict/i,
+  );
+});
+
+test("compatibility fingerprint equality is independent of object key insertion order", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    artifactScores: source.artifactScores.map((record) =>
+      record.runId !== "MOCK-run-doubao-volcano-v1"
+        ? record
+        : {
+            ...record,
+            comparisonCompatibilityFingerprint: Object.fromEntries(
+              Object.entries(
+                record.comparisonCompatibilityFingerprint,
+              ).reverse(),
+            ) as ArtifactScoreTableRecord["comparisonCompatibilityFingerprint"],
+          },
+    ),
+  }));
+
+  const outcome = await createComparisonReportService({
+    feishu: projection,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        rightRunId: "MOCK-run-doubao-volcano-v1",
+      },
+    ],
+  });
+
+  assert.equal(outcome.comparisons.length, 1);
 });

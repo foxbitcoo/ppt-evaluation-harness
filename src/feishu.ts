@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import type {
   ArtifactScorecard,
   ArtifactScoreTableRecord,
@@ -13,6 +15,27 @@ import {
   assertEnvironmentOriginAllowed,
   type EnvironmentOrigin,
 } from "./environment-origin.ts";
+
+function stableRunReplayPayload(record: RunRecord): unknown {
+  const {
+    elapsedMs: _elapsedMs,
+    vendorGenerationMs: _vendorGenerationMs,
+    humanWaitMs: _humanWaitMs,
+    timingPausedAt: _timingPausedAt,
+    reportUrl: _reportUrl,
+    auxiliaryReportUrls: _auxiliaryReportUrls,
+    observableEvents,
+    ...stable
+  } = record;
+  return {
+    ...stable,
+    observableEvents:
+      observableEvents?.map(
+        ({ sourceAt: _sourceAt, observedAt: _observedAt, ...event }) =>
+          event,
+      ) ?? null,
+  };
+}
 
 export interface EvaluationCaseTablePort {
   upsertCase(record: EvaluationCaseRecord): Promise<void>;
@@ -119,6 +142,20 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
 
   async appendRunRecord(record: RunRecord): Promise<void> {
     this.#assertAllowed(record.environmentOrigin, "Run/Attempt");
+    const existing = this.#runRecordTable.find(
+      (candidate) => candidate.recordId === record.recordId,
+    );
+    if (existing !== undefined) {
+      if (
+        !isDeepStrictEqual(
+          stableRunReplayPayload(existing),
+          stableRunReplayPayload(record),
+        )
+      ) {
+        throw new Error(`Run record identity conflict: ${record.recordId}`);
+      }
+      return;
+    }
     this.#runRecordTable.push(record);
   }
 
@@ -168,6 +205,17 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "Artifact score projection contains inconsistent lineage",
       );
     }
+    const existing = this.#artifactScoreTable.find(
+      (candidate) => candidate.recordId === record.recordId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, record)) {
+        throw new Error(
+          `Artifact Score identity conflict: ${record.recordId}`,
+        );
+      }
+      return;
+    }
     this.#artifactScoreTable.push(record);
   }
 
@@ -192,6 +240,17 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "Artifact capture projection contains inconsistent lineage",
       );
     }
+    const existing = this.#capturedArtifactTable.find(
+      (candidate) => candidate.recordId === record.recordId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, record)) {
+        throw new Error(
+          `Captured Artifact identity conflict: ${record.recordId}`,
+        );
+      }
+      return;
+    }
     this.#capturedArtifactTable.push(record);
   }
 
@@ -203,7 +262,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         candidate.comparisonId === record.comparisonId,
     );
     if (existing !== undefined) {
-      if (JSON.stringify(existing) !== JSON.stringify(record)) {
+      if (!isDeepStrictEqual(existing, record)) {
         throw new Error(
           `Comparison identity conflict: ${record.comparisonId}`,
         );
@@ -221,7 +280,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         candidate.gapCardId === record.gapCardId,
     );
     if (existing !== undefined) {
-      if (JSON.stringify(existing) !== JSON.stringify(record)) {
+      if (!isDeepStrictEqual(existing, record)) {
         throw new Error(`Gap Card identity conflict: ${record.gapCardId}`);
       }
       return;
@@ -239,7 +298,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       (candidate) => candidate.reportId === report.reportId,
     );
     if (existing !== undefined) {
-      if (JSON.stringify(existing) !== JSON.stringify(report)) {
+      if (!isDeepStrictEqual(existing, report)) {
         throw new Error(`Report identity conflict: ${report.reportId}`);
       }
       return structuredClone(existing);
