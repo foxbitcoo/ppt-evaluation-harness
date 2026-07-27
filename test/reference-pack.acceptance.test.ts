@@ -38,6 +38,26 @@ test("Reference Pack off mode suppresses a matching volcano pack", () => {
   assert.deepEqual(selection, { mode: "off", pack: null });
 });
 
+test("Bakeoff off mode leaves no staged pack and marks factual scoring NOT_ASSESSABLE", async () => {
+  const store = new InMemoryReferencePackStore();
+  const outcome = await createBakeoffHarness({
+    feishu: new InMemoryFeishuProjection(),
+    productAdapter: new MockWpsProductAdapter(),
+    referencePackStore: store,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+    referencePackMode: "off",
+  });
+  const factual = outcome.scorecard?.dimensions.find(
+    ({ dimension }) => dimension === "factual_accuracy_and_content_quality",
+  );
+
+  assert.equal(factual?.assessmentStatus, "NOT_ASSESSABLE");
+  assert.equal(factual?.value, null);
+  assert.deepEqual(store.snapshot(), { temporary: [], used: [] });
+});
+
 test("Reference Pack force mode fails closed when no reviewed pack exists", () => {
   assert.throws(
     () =>
@@ -149,6 +169,11 @@ test("a staged Reference Pack becomes an immutable persisted usage when scoring 
       "MOCK-scorecard-qwen-volcano-v1",
       "MOCK-scorecard-doubao-volcano-v1",
     ],
+    evaluationAttemptIds: [
+      "MOCK-evaluation-attempt-wps",
+      "MOCK-evaluation-attempt-qwen",
+      "MOCK-evaluation-attempt-doubao",
+    ],
   });
 
   assert.equal(usage.pack.contentHash, pack?.contentHash);
@@ -184,10 +209,12 @@ test("concurrent Jobs stage independent usages of the same canonical Reference P
   store.retainUsed(first.stagingId, {
     jobId: "MOCK-job-concurrent-a",
     scorecardIds: ["MOCK-scorecard-a"],
+    evaluationAttemptIds: ["MOCK-evaluation-attempt-a"],
   });
   store.retainUsed(second.stagingId, {
     jobId: "MOCK-job-concurrent-b",
     scorecardIds: ["MOCK-scorecard-b"],
+    evaluationAttemptIds: ["MOCK-evaluation-attempt-b"],
   });
 
   assert.equal(store.snapshot().temporary.length, 0);
@@ -205,9 +232,7 @@ test("one Bakeoff Job shares one frozen automatic pack across three scorecards w
     new MockDoubaoProductAdapter(),
   ].map((adapter) => ({
     productPackage: adapter.productPackage,
-    async execute(
-      command: Parameters<typeof adapter.execute>[0],
-    ) {
+    async execute(command: Parameters<typeof adapter.execute>[0]) {
       observedVendorPrompts.push(command.evaluationCase.vendorPrompt);
       return adapter.execute(command);
     },
@@ -231,7 +256,10 @@ test("one Bakeoff Job shares one frozen automatic pack across three scorecards w
     ),
     Array(3).fill(used?.pack.contentHash),
   );
-  assert.deepEqual(used?.scorecardIds, outcome.scorecards.map(({ scorecardId }) => scorecardId));
+  assert.deepEqual(
+    used?.scorecardIds,
+    outcome.scorecards.map(({ scorecardId }) => scorecardId),
+  );
   assert.equal(
     observedVendorPrompts.every(
       (prompt) => !prompt.includes("usgs.gov") && !prompt.includes("Magma is"),

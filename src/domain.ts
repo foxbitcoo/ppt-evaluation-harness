@@ -74,10 +74,7 @@ export interface EvaluationCaseRecord {
 
 export interface RunRecord {
   readonly recordId: string;
-  readonly recordType:
-    | "bakeoff_job"
-    | "vendor_run"
-    | "evaluation_attempt";
+  readonly recordType: "bakeoff_job" | "vendor_run" | "evaluation_attempt";
   readonly jobId: string;
   readonly parentRecordId: string | null;
   readonly caseId: string;
@@ -110,6 +107,8 @@ export interface RunRecord {
   readonly artifactId: string | null;
   readonly renderManifestId: string | null;
   readonly scorecardId: string | null;
+  readonly judgeEgressAttempt?: JudgeEgressAttemptAudit | null;
+  readonly judgeFailure?: JudgeFailureLineage | null;
 }
 
 export interface Artifact {
@@ -156,9 +155,23 @@ export type ScoreDimension =
 
 export type ScoreValue = 1 | 2 | 3 | 4 | 5;
 
+export type DimensionAssessmentStatus = "ASSESSED" | "NOT_ASSESSABLE";
+
+export type DimensionDeductionBasis =
+  | "no_deduction"
+  | "visible_requirement_or_coverage_gap"
+  | "validated_reference_pack_errors"
+  | "not_assessable_no_reference_pack"
+  | "visible_narrative_or_audience_gap"
+  | "visible_visual_finish_gap"
+  | "visible_layout_or_readability_gap"
+  | "visible_information_expression_gap";
+
 export interface DimensionScore {
   readonly dimension: ScoreDimension;
-  readonly value: ScoreValue;
+  readonly assessmentStatus: DimensionAssessmentStatus;
+  readonly value: ScoreValue | null;
+  readonly deductionBasis: DimensionDeductionBasis;
   readonly evidencePages: readonly number[];
   readonly rationale: string;
 }
@@ -201,6 +214,26 @@ export interface JudgeEgressAuthorizationLineage {
   readonly expiresAt: string;
 }
 
+export interface JudgeEgressAttemptAudit {
+  readonly attemptId: string;
+  readonly jobId: string;
+  readonly runId: string;
+  readonly artifactId: string;
+  readonly scorecardId: string;
+  readonly payloadHash: `sha256:${string}`;
+  readonly idempotencyKey: `judge_${string}`;
+  readonly egressAuthorizationHash: `sha256:${string}`;
+  readonly egressAuthorization: JudgeEgressAuthorizationLineage;
+  readonly recordedAt: string;
+}
+
+export interface JudgeFailureLineage {
+  readonly failureClass: "judge_failure";
+  readonly submissionStatus: "submitted" | "unknown";
+  readonly message: string;
+  readonly egressAttempt: JudgeEgressAttemptAudit | null;
+}
+
 export interface JudgeLineage {
   readonly provider: "openai";
   readonly adapterVersion: "openai-responses-judge@1";
@@ -215,6 +248,8 @@ export interface JudgeLineage {
   readonly payloadHash: `sha256:${string}`;
   readonly egressAuthorizationHash: `sha256:${string}`;
   readonly egressAuthorization: JudgeEgressAuthorizationLineage;
+  readonly egressAttemptId: string;
+  readonly egressAttempt: JudgeEgressAttemptAudit;
   readonly inputHash: `sha256:${string}`;
   readonly idempotencyKey: `judge_${string}`;
   readonly rasterizerVersion: string;

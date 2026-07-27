@@ -49,6 +49,7 @@ export interface UsedReferencePackRecord {
   readonly jobId: string;
   readonly pack: ReferencePack;
   readonly scorecardIds: readonly string[];
+  readonly evaluationAttemptIds: readonly string[];
   readonly usedAt: string;
 }
 
@@ -67,6 +68,7 @@ export interface ReferencePackStorePort {
     input: {
       readonly jobId: string;
       readonly scorecardIds: readonly string[];
+      readonly evaluationAttemptIds: readonly string[];
     },
   ): UsedReferencePackRecord;
   deleteUnused(stagingId: string): boolean;
@@ -87,8 +89,7 @@ export class InMemoryReferencePackStore implements ReferencePackStorePort {
     input: { readonly jobId: string },
   ): StagedReferencePack {
     this.#leaseSequence += 1;
-    const stagingId =
-      `temporary:${input.jobId}:${pack.contentHash}:lease-${this.#leaseSequence}`;
+    const stagingId = `temporary:${input.jobId}:${pack.contentHash}:lease-${this.#leaseSequence}`;
     const staged = Object.freeze({ stagingId, pack });
     this.#temporary.set(stagingId, staged);
     return staged;
@@ -99,17 +100,24 @@ export class InMemoryReferencePackStore implements ReferencePackStorePort {
     input: {
       readonly jobId: string;
       readonly scorecardIds: readonly string[];
+      readonly evaluationAttemptIds: readonly string[];
     },
   ): UsedReferencePackRecord {
     const staged = this.#temporary.get(stagingId);
     if (staged === undefined) {
       throw new Error(`Temporary Reference Pack not found: ${stagingId}`);
     }
+    if (input.evaluationAttemptIds.length === 0) {
+      throw new Error(
+        "A used Reference Pack requires at least one evaluation attempt",
+      );
+    }
     const record = Object.freeze({
       recordId: `reference-pack-usage:${input.jobId}:${staged.pack.contentHash}`,
       jobId: input.jobId,
       pack: staged.pack,
       scorecardIds: Object.freeze([...input.scorecardIds]),
+      evaluationAttemptIds: Object.freeze([...input.evaluationAttemptIds]),
       usedAt: this.#now(),
     });
     this.#temporary.delete(stagingId);
@@ -257,10 +265,7 @@ export class ReviewedReferencePackGenerator
           factId: "magma-and-lava",
           statement:
             "Molten rock below the surface is magma; after it erupts from a volcano it is called lava.",
-          sourceIds: [
-            "usgs-eruption-faq",
-            "usgs-nature-of-volcanoes",
-          ],
+          sourceIds: ["usgs-eruption-faq", "usgs-nature-of-volcanoes"],
         },
       ],
     });

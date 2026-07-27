@@ -49,7 +49,7 @@ export function createMockReportDraft(
       const scoreRows = scorecard.dimensions
         .map(
           ({ dimension, value, evidencePages, rationale }) =>
-            `| ${DIMENSION_LABELS[dimension]} | ${value} | ${evidencePages.join("、")} | ${rationale} |`,
+            `| ${DIMENSION_LABELS[dimension]} | ${value ?? "NOT_ASSESSABLE"} | ${evidencePages.join("、") || "—"} | ${rationale} |`,
         )
         .join("\n");
       return `## ${product}
@@ -61,7 +61,7 @@ export function createMockReportDraft(
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
 
-| 六维评分 | 1–5 整数分 | 页码证据 | 简短理由 |
+| 六维评分 | 1–5 整数分 / NOT_ASSESSABLE | 页码证据 | 简短理由 |
 |---|---:|---|---|
 ${scoreRows}`;
     })

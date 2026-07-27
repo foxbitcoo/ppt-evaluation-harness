@@ -12,7 +12,10 @@ import {
   VOLCANO_EVALUATION_CASE,
   createBakeoffHarness,
   resolveReferencePackForCase,
+  type JudgeEgressAuditPort,
+  type JudgeEgressAuthorizationRequest,
   type OpenAiResponsesJudgeAdapterOptions,
+  type OpenAiResponsesTransport,
 } from "../src/index.ts";
 
 const SIX_DIMENSIONS = [
@@ -33,32 +36,58 @@ function testPng(...markers: number[]): Uint8Array {
   return Uint8Array.from([...VALID_ONE_PIXEL_PNG, ...markers]);
 }
 
+function approvedEgressDecision(
+  request: JudgeEgressAuthorizationRequest,
+  decisionId = "test-egress-decision-v1",
+) {
+  return {
+    decisionId,
+    decision: "approved" as const,
+    policyVersion: "test-public-synthetic-egress-v1",
+    dataClassification: request.dataClassification,
+    sourceOwner: request.sourceOwner,
+    processingPurpose: request.processingPurpose,
+    targetService: request.targetService,
+    targetAccount: request.targetAccount,
+    targetRegion: request.targetRegion,
+    subprocessors: [],
+    allowedContentFields: request.contentFields,
+    requiredRedactions: [],
+    legalSecurityBasis: "synthetic test data policy",
+    approvedAt: "2026-01-01T00:00:00.000Z",
+    expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+}
+
 function createTestJudge(
-  options: OpenAiResponsesJudgeAdapterOptions,
+  options: Omit<
+    OpenAiResponsesJudgeAdapterOptions,
+    "transport" | "egressAudit"
+  > & {
+    readonly transport: Omit<OpenAiResponsesTransport, "destination"> & {
+      readonly destination?: OpenAiResponsesTransport["destination"];
+    };
+    readonly egressAudit?: JudgeEgressAuditPort;
+  },
 ): OpenAiResponsesJudgeAdapter {
+  const { transport, egressAudit, ...rest } = options;
   return new OpenAiResponsesJudgeAdapter({
     egressAuthorization: {
       async authorize(request) {
-        return {
-          decisionId: "test-egress-decision-v1",
-          decision: "approved",
-          policyVersion: "test-public-synthetic-egress-v1",
-          dataClassification: request.dataClassification,
-          sourceOwner: request.sourceOwner,
-          processingPurpose: request.processingPurpose,
-          targetService: request.targetService,
-          targetAccount: "test-openai-project",
-          targetRegion: "us",
-          subprocessors: [],
-          allowedContentFields: request.contentFields,
-          requiredRedactions: [],
-          legalSecurityBasis: "synthetic test data policy",
-          approvedAt: "2026-01-01T00:00:00.000Z",
-          expiresAt: "2099-01-01T00:00:00.000Z",
-        };
+        return approvedEgressDecision(request);
       },
     },
-    ...options,
+    ...rest,
+    transport: {
+      destination: transport.destination ?? {
+        targetAccount: "test-openai-project",
+        targetRegion: "us",
+      },
+      create: transport.create.bind(transport),
+    },
+    egressAudit: egressAudit ?? {
+      async recordAuthorizedAttempt() {},
+    },
   });
 }
 
@@ -66,7 +95,10 @@ function validJudgePayload() {
   return {
     dimensions: SIX_DIMENSIONS.map((dimension, index) => ({
       dimension,
-      value: index === 1 ? 4 : 5,
+      assessmentStatus: "ASSESSED",
+      value: (index === 1 ? 4 : 5) as number | null,
+      deductionBasis:
+        index === 1 ? "validated_reference_pack_errors" : "no_deduction",
       evidencePages: [Math.min(index + 1, 16)],
       rationale: `第 ${Math.min(index + 1, 16)} 页提供该维度的直接证据。`,
     })),
@@ -104,6 +136,7 @@ async function volcanoJudgeCommand(scorecardId: string) {
     jobId: "MOCK-job-volcano-v1",
     runId: artifact.runId,
     scorecardId,
+    evaluationAttemptId: `judge-attempt:${scorecardId}`,
     evaluationCase: VOLCANO_EVALUATION_CASE,
     artifact,
     renderManifest,
@@ -114,7 +147,10 @@ async function volcanoJudgeCommand(scorecardId: string) {
 }
 
 test("OpenAiJudgePort makes one content-addressed Responses call with pinned multimodal structured-output config", async () => {
-  const requests: Array<{ request: Record<string, unknown>; idempotencyKey: string }> = [];
+  const requests: Array<{
+    request: Record<string, unknown>;
+    idempotencyKey: string;
+  }> = [];
   const transport = {
     async create(request: Record<string, unknown>, idempotencyKey: string) {
       requests.push({ request, idempotencyKey });
@@ -147,6 +183,7 @@ test("OpenAiJudgePort makes one content-addressed Responses call with pinned mul
     jobId: "MOCK-job-volcano-v1",
     runId: artifact.runId,
     scorecardId: "MOCK-openai-scorecard-wps-volcano-v1",
+    evaluationAttemptId: "judge-attempt:MOCK-openai-scorecard-wps-volcano-v1",
     evaluationCase: VOLCANO_EVALUATION_CASE,
     artifact,
     renderManifest,
@@ -187,7 +224,10 @@ test("OpenAiJudgePort makes one content-addressed Responses call with pinned mul
     content.filter(({ type }) => type === "input_image"),
   );
   assert.equal(images.length, 16);
-  assert.equal(images.every(({ detail }) => detail === "high"), true);
+  assert.equal(
+    images.every(({ detail }) => detail === "high"),
+    true,
+  );
   assert.equal(
     images.every(({ image_url }) =>
       image_url?.startsWith("data:image/png;base64,"),
@@ -222,6 +262,10 @@ test("OpenAiJudgePort makes one content-addressed Responses call with pinned mul
 test("OpenAiJudgePort blocks transport when egress authorization is missing or denied", async () => {
   let transportCalls = 0;
   const transport = {
+    destination: {
+      targetAccount: "test-openai-project",
+      targetRegion: "us",
+    },
     async create() {
       transportCalls += 1;
       throw new Error("transport must not be reached");
@@ -252,6 +296,17 @@ test("OpenAiJudgePort blocks transport when egress authorization is missing or d
       },
     },
   });
+  const mismatchedDestination = createTestJudge({
+    transport,
+    egressAuthorization: {
+      async authorize(request) {
+        return {
+          ...approvedEgressDecision(request),
+          targetAccount: "different-openai-project",
+        };
+      },
+    },
+  });
 
   await assert.rejects(
     missing.score(
@@ -269,7 +324,107 @@ test("OpenAiJudgePort blocks transport when egress authorization is missing or d
     ),
     /egress authorization.*denied|incompatible/i,
   );
+  await assert.rejects(
+    mismatchedDestination.score(
+      await volcanoJudgeCommand(
+        "MOCK-openai-mismatched-egress-scorecard-wps-volcano-v1",
+      ),
+    ),
+    /egress authorization.*incompatible|denied/i,
+  );
   assert.equal(transportCalls, 0);
+});
+
+test("OpenAiJudgePort binds authorization to transport destination and persists audit before a failed submission", async () => {
+  const audits: Parameters<
+    JudgeEgressAuditPort["recordAuthorizedAttempt"]
+  >[0][] = [];
+  let transportCalls = 0;
+  const command = await volcanoJudgeCommand(
+    "MOCK-openai-egress-audit-scorecard-wps-volcano-v1",
+  );
+  const judge = createTestJudge({
+    egressAudit: {
+      async recordAuthorizedAttempt(audit) {
+        audits.push(audit);
+      },
+    },
+    transport: {
+      destination: {
+        targetAccount: "bound-openai-project",
+        targetRegion: "eu",
+      },
+      async create() {
+        transportCalls += 1;
+        throw new Error("simulated network uncertainty");
+      },
+    },
+  });
+
+  await assert.rejects(
+    judge.score(command),
+    /transport failed|network uncertainty/i,
+  );
+
+  assert.equal(transportCalls, 1);
+  assert.equal(audits.length, 1);
+  assert.equal(
+    audits[0]?.egressAuthorization.targetAccount,
+    "bound-openai-project",
+  );
+  assert.equal(audits[0]?.egressAuthorization.targetRegion, "eu");
+});
+
+test("OpenAiJudgePort keeps idempotency payload-stable across renewed authorization decisions", async () => {
+  const idempotencyKeys: string[] = [];
+  const command = await volcanoJudgeCommand(
+    "MOCK-openai-stable-idempotency-scorecard-wps-volcano-v1",
+  );
+  const createJudge = (decisionId: string) =>
+    createTestJudge({
+      egressAuthorization: {
+        async authorize(request) {
+          return approvedEgressDecision(request, decisionId);
+        },
+      },
+      transport: {
+        async create(_request, idempotencyKey) {
+          idempotencyKeys.push(idempotencyKey);
+          return {
+            id: `resp_${decisionId}`,
+            model: "gpt-5.6-sol",
+            status: "completed",
+            incomplete_details: null,
+            output: [
+              {
+                type: "message",
+                status: "completed",
+                content: [
+                  {
+                    type: "output_text",
+                    text: JSON.stringify(validJudgePayload()),
+                  },
+                ],
+              },
+            ],
+          };
+        },
+      },
+    });
+
+  const first = await createJudge("renewal-a").score(command);
+  const second = await createJudge("renewal-b").score(command);
+
+  assert.equal(idempotencyKeys.length, 2);
+  assert.equal(idempotencyKeys[0], idempotencyKeys[1]);
+  assert.equal(
+    first.judgeLineage?.payloadHash,
+    second.judgeLineage?.payloadHash,
+  );
+  assert.notEqual(
+    first.judgeLineage?.egressAuthorizationHash,
+    second.judgeLineage?.egressAuthorizationHash,
+  );
 });
 
 test("OpenAiJudgePort fails closed when a message remains incomplete", async () => {
@@ -420,9 +575,7 @@ test("OpenAiJudgePort fails closed on an explicit refusal", async () => {
 
   await assert.rejects(
     judge.score(
-      await volcanoJudgeCommand(
-        "MOCK-openai-refusal-scorecard-wps-volcano-v1",
-      ),
+      await volcanoJudgeCommand("MOCK-openai-refusal-scorecard-wps-volcano-v1"),
     ),
     /refused/i,
   );
@@ -512,6 +665,99 @@ test("OpenAiJudgePort rejects a factual score containing hidden deductions not b
   );
 });
 
+test("OpenAiJudgePort forbids Reference Pack deductions from leaking into non-factual dimensions", async () => {
+  const payload = validJudgePayload();
+  payload.dimensions[0] = {
+    ...payload.dimensions[0]!,
+    value: 1,
+    deductionBasis: "no_deduction",
+    rationale: "因未覆盖的知识包事实而降低需求覆盖分。",
+  };
+  const judge = createTestJudge({
+    transport: {
+      async create() {
+        return {
+          id: "resp_cross_dimension_pack_deduction",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          incomplete_details: null,
+          output: [
+            {
+              type: "message",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(payload),
+                },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    judge.score(
+      await volcanoJudgeCommand(
+        "MOCK-openai-cross-dimension-scorecard-wps-volcano-v1",
+      ),
+    ),
+    /non-factual|deduction basis|hidden/i,
+  );
+});
+
+test("OpenAiJudgePort marks the factual criterion NOT_ASSESSABLE when Reference Pack mode is off", async () => {
+  const payload = validJudgePayload();
+  payload.knowledgeErrors = [];
+  payload.dimensions[1] = {
+    ...payload.dimensions[1]!,
+    assessmentStatus: "NOT_ASSESSABLE",
+    value: null,
+    deductionBasis: "not_assessable_no_reference_pack",
+    evidencePages: [],
+    rationale: "未提供知识包，事实维度不作评估。",
+  };
+  const judge = createTestJudge({
+    transport: {
+      async create() {
+        return {
+          id: "resp_pack_off",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          incomplete_details: null,
+          output: [
+            {
+              type: "message",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(payload),
+                },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  });
+  const command = await volcanoJudgeCommand(
+    "MOCK-openai-pack-off-scorecard-wps-volcano-v1",
+  );
+  const scorecard = await judge.score({
+    ...command,
+    referencePack: null,
+  });
+  const factual = scorecard.dimensions.find(
+    ({ dimension }) => dimension === "factual_accuracy_and_content_quality",
+  );
+
+  assert.equal(factual?.assessmentStatus, "NOT_ASSESSABLE");
+  assert.equal(factual?.value, null);
+});
+
 test("OpenAiJudgePort rejects claimed PNG input that lacks valid PNG bytes before transport", async () => {
   let transportCalls = 0;
   const judge = createTestJudge({
@@ -520,7 +766,7 @@ test("OpenAiJudgePort rejects claimed PNG input that lacks valid PNG bytes befor
       async rasterize() {
         return {
           mimeType: "image/png",
-          content: Uint8Array.from([1, 2, 3]),
+          content: VALID_ONE_PIXEL_PNG.subarray(0, 41),
         };
       },
     },
@@ -586,10 +832,7 @@ test("OpenAiJudgePort hashes the exact rasterized PNG inputs and rasterizer vers
   const first = await createJudge(1).score(command);
   const second = await createJudge(2).score(command);
 
-  assert.equal(
-    first.judgeLineage?.rasterizerVersion,
-    "test-rasterizer@1",
-  );
+  assert.equal(first.judgeLineage?.rasterizerVersion, "test-rasterizer@1");
   assert.equal(first.judgeLineage?.rasterizedImageHashes.length, 16);
   assert.match(
     first.judgeLineage?.rasterizedImageHashes[0]?.contentHash ?? "",
@@ -655,8 +898,14 @@ test("OpenAiJudgePort hashes the exact evaluator context even when a Case versio
   });
 
   assert.equal(requests.length, 2);
-  assert.notEqual(first.judgeLineage?.contextHash, second.judgeLineage?.contextHash);
-  assert.notEqual(first.judgeLineage?.inputHash, second.judgeLineage?.inputHash);
+  assert.notEqual(
+    first.judgeLineage?.contextHash,
+    second.judgeLineage?.contextHash,
+  );
+  assert.notEqual(
+    first.judgeLineage?.inputHash,
+    second.judgeLineage?.inputHash,
+  );
 });
 
 test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the same pack", async () => {
@@ -731,6 +980,7 @@ test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the
 
 test("Bakeoff waits for sibling Judge calls and retains the shared pack when one Judge branch fails", async () => {
   const referencePackStore = new InMemoryReferencePackStore();
+  const feishu = new InMemoryFeishuProjection();
   const observedRuns: string[] = [];
   const judge = createTestJudge({
     rasterizer: {
@@ -780,28 +1030,39 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
     },
   });
 
-  await assert.rejects(
-    createBakeoffHarness({
-      feishu: new InMemoryFeishuProjection(),
-      productAdapters: [
-        new MockWpsProductAdapter(),
-        new MockQwenProductAdapter(),
-        new MockDoubaoProductAdapter(),
-      ],
-      referencePackStore,
-      judge,
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_EVALUATION_CASE.caseId,
-    }),
-    /simulated WPS Judge failure/,
-  );
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+    referencePackStore,
+    judge,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+  });
 
   assert.equal(observedRuns.length, 3);
+  assert.equal(outcome.job.status, "partial");
+  assert.equal(outcome.scorecards.length, 2);
+  assert.equal(feishu.snapshot().artifactScoreTable.length, 2);
+  const failedJudgeRun = feishu
+    .snapshot()
+    .runRecordTable.find(
+      ({ recordId }) => recordId === "MOCK-run-wps-volcano-v1",
+    );
+  assert.equal(failedJudgeRun?.judgeFailure?.failureClass, "judge_failure");
+  assert.equal(
+    failedJudgeRun?.judgeEgressAttempt?.egressAuthorization.targetAccount,
+    "test-openai-project",
+  );
   assert.equal(referencePackStore.snapshot().temporary.length, 0);
   assert.equal(referencePackStore.snapshot().used.length, 1);
+  assert.equal(referencePackStore.snapshot().used[0]?.scorecardIds.length, 2);
   assert.equal(
-    referencePackStore.snapshot().used[0]?.scorecardIds.length,
+    referencePackStore.snapshot().used[0]?.evaluationAttemptIds.length,
     3,
   );
 });
@@ -820,15 +1081,18 @@ test("Bakeoff fails closed without persisting scores and retains the pack involv
     },
   });
 
-  await assert.rejects(
-    harness.startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_EVALUATION_CASE.caseId,
-    }),
-    /Judge unavailable/,
-  );
+  const outcome = await harness.startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+  });
 
+  assert.equal(outcome.job.status, "failed");
   assert.deepEqual(feishu.snapshot().artifactScoreTable, []);
   assert.equal(referencePackStore.snapshot().temporary.length, 0);
   assert.equal(referencePackStore.snapshot().used.length, 1);
+  assert.equal(referencePackStore.snapshot().used[0]?.scorecardIds.length, 0);
+  assert.equal(
+    referencePackStore.snapshot().used[0]?.evaluationAttemptIds.length,
+    1,
+  );
 });
