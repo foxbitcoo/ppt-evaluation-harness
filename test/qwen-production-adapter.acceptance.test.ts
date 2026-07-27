@@ -671,6 +671,67 @@ test("a restarted Qwen replay reads durable checkpoints and reconciles before an
   );
 });
 
+test("Qwen replay rejects unknown final evidence after a durable submission checkpoint", async () => {
+  const descriptor = new QwenReplayProductAdapter();
+  const checkpointStore = new InMemoryAttemptCheckpointStore(
+    "qwen-unknown-after-submission-checkpoints",
+  );
+  const executor = resolveHarnessProductAdapterExecutor(
+    descriptor.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      descriptor.executionConfigurationPackage,
+    ),
+    {
+      qwenBrowserDriver: createQwenRealProviderReplayPackage({
+        sessions: [
+          {
+            status: "terminal",
+            terminalReason: "task_state_unknown",
+            blockReason: null,
+            submissionEvidence: "unknown",
+            elapsedMs: 30_000,
+            observedAt: "2026-07-27T10:01:30.000Z",
+            observedConfiguration: null,
+            milestones: [
+              {
+                eventType: "submission_observed",
+                observedAt: "2026-07-27T10:01:00.000Z",
+                url: "https://www.qianwen.com/chat/observable-task",
+                evidenceId: "ev_4444444444444444",
+                vendorTaskId: "task_qwen_unknown_1234",
+                taskStateVersion: "submitted@1",
+              },
+            ],
+            manualActions: [],
+          },
+        ],
+      }),
+      attemptCheckpointStore: checkpointStore,
+    },
+  );
+
+  await assert.rejects(
+    executor({
+      jobId: "job-qwen-unknown-after-submission",
+      runId: "run-qwen-unknown-after-submission",
+      attemptId: "attempt-qwen-unknown-after-submission-1",
+      attemptSeq: 1,
+      timeoutMs: 30 * 60 * 1_000,
+      signal: new AbortController().signal,
+      evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+    }),
+    /submission evidence contradicts observable checkpoints/i,
+  );
+  assert.equal(
+    (
+      await checkpointStore.readAttempt?.(
+        "attempt-qwen-unknown-after-submission-1",
+      )
+    )?.at(-1)?.submissionEvidenceAtCheckpoint,
+    "submitted",
+  );
+});
+
 test("a retained Qwen capture produces PRODUCTION_REPLAY Artifact and bound opaque execution evidence", async () => {
   const fixture = await qwenPptxFixture();
   const captured = await new SuccessfulQwenBrowserFake(fixture).execute({

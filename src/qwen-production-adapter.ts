@@ -802,7 +802,7 @@ function assertSubmissionEvidenceMatchesMilestones(
   if (
     (execution.submissionEvidence === "submitted" &&
       !submissionObserved) ||
-    (execution.submissionEvidence === "not_submitted" &&
+    (execution.submissionEvidence !== "submitted" &&
       submissionObserved)
   ) {
     throw new Error(
