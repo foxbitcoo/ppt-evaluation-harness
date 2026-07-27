@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import type {
   Artifact,
   ArtifactScorecard,
+  BakeoffProtocolSnapshot,
   BakeoffJobOutcome,
   BlockReason,
   JudgeFailureLineage,
@@ -13,11 +15,15 @@ import type {
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
+import { createComparisonReportService } from "./comparison-report.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
 } from "./environment-origin.ts";
-import type { FeishuProjectionPort } from "./feishu.ts";
+import type {
+  ComparisonReportSource,
+  FeishuProjectionPort,
+} from "./feishu.ts";
 import {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
@@ -45,6 +51,30 @@ import {
 } from "./reference-pack.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
+
+const MOCK_BAKEOFF_PROTOCOL_SNAPSHOT: BakeoffProtocolSnapshot =
+  Object.freeze({
+    protocolId: "MOCK-query-default-cost-v1",
+    referencePackMode: "automatic",
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    retryPolicy: "one_if_provably_not_submitted",
+    resultSelectionPolicy: "first_policy_compliant_artifact",
+    cancellationPolicy: "independent_vendor_runs_continue",
+  });
+
+function bakeoffProtocolSnapshot(
+  referencePackMode: NonNullable<
+    StartBakeoffJobCommand["referencePackMode"]
+  >,
+): BakeoffProtocolSnapshot {
+  if (referencePackMode === "automatic") {
+    return MOCK_BAKEOFF_PROTOCOL_SNAPSHOT;
+  }
+  return Object.freeze({
+    ...MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+    referencePackMode,
+  });
+}
 
 export type AttemptDeadlineResult<T> =
   | {
@@ -114,6 +144,129 @@ export interface BakeoffHarnessDependencies {
   readonly judge?: OpenAiJudgePort;
 }
 
+interface InFlightBakeoffJob {
+  readonly jobIdentity: string;
+  readonly outcome: Promise<BakeoffJobOutcome>;
+}
+
+const IN_FLIGHT_BAKEOFF_JOBS = new WeakMap<
+  FeishuProjectionPort,
+  Map<string, InFlightBakeoffJob>
+>();
+const DEFAULT_REFERENCE_PACK_GENERATOR =
+  new ReviewedReferencePackGenerator();
+const DEFAULT_REFERENCE_PACK_STORES = new WeakMap<
+  FeishuProjectionPort,
+  ReferencePackStorePort
+>();
+const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
+let nextDependencyIdentity = 1;
+
+function defaultReferencePackStore(
+  feishu: FeishuProjectionPort,
+): ReferencePackStorePort {
+  const existing = DEFAULT_REFERENCE_PACK_STORES.get(feishu);
+  if (existing !== undefined) return existing;
+  const created = new InMemoryReferencePackStore(
+    () => MOCK_SCENARIO.fixedTime,
+  );
+  DEFAULT_REFERENCE_PACK_STORES.set(feishu, created);
+  return created;
+}
+
+function dependencyIdentity(dependency: object | undefined): string | null {
+  if (dependency === undefined) return null;
+  const existing = DEPENDENCY_IDENTITIES.get(dependency);
+  if (existing !== undefined) return existing;
+  const created = `dependency-${nextDependencyIdentity}`;
+  nextDependencyIdentity += 1;
+  DEPENDENCY_IDENTITIES.set(dependency, created);
+  return created;
+}
+
+function snapshotBakeoffCommand(
+  command: StartBakeoffJobCommand,
+): Readonly<StartBakeoffJobCommand> {
+  return Object.freeze({
+    environment: command.environment,
+    caseId: command.caseId,
+    referencePackMode: command.referencePackMode ?? "automatic",
+  });
+}
+
+function bakeoffJobIdentity(
+  command: StartBakeoffJobCommand,
+  selections: readonly SelectedProductAdapter[],
+  dependencies: {
+    readonly attemptDeadline: AttemptDeadlinePort;
+    readonly referencePackStore: ReferencePackStorePort;
+    readonly referencePackGenerator: ReferencePackGeneratorPort;
+    readonly judge: OpenAiJudgePort | undefined;
+  },
+): string {
+  return JSON.stringify({
+    environment: command.environment,
+    caseId: command.caseId,
+    referencePackMode: command.referencePackMode ?? "automatic",
+    protocol: bakeoffProtocolSnapshot(
+      command.referencePackMode ?? "automatic",
+    ),
+    selections: selections.map(({ adapter, productPackage, runId }) => ({
+      runId,
+      adapter: dependencyIdentity(adapter),
+      packageId: productPackage.packageId,
+      vendorId: productPackage.vendorId,
+      displayName: productPackage.displayName,
+      adapterVersion: productPackage.adapterVersion,
+      provenance: productPackage.provenance,
+      environmentOriginId: productPackage.environmentOrigin.originId,
+      environment: productPackage.environmentOrigin.environment,
+    })),
+    dependencies: {
+      attemptDeadline: dependencyIdentity(dependencies.attemptDeadline),
+      referencePackStore: dependencyIdentity(
+        dependencies.referencePackStore,
+      ),
+      referencePackGenerator: dependencyIdentity(
+        dependencies.referencePackGenerator,
+      ),
+      judge: dependencyIdentity(dependencies.judge),
+    },
+  });
+}
+
+function coalesceBakeoffJob(
+  feishu: FeishuProjectionPort,
+  jobId: string,
+  jobIdentity: string,
+  operation: () => Promise<BakeoffJobOutcome>,
+): Promise<BakeoffJobOutcome> {
+  let jobs = IN_FLIGHT_BAKEOFF_JOBS.get(feishu);
+  if (jobs === undefined) {
+    jobs = new Map();
+    IN_FLIGHT_BAKEOFF_JOBS.set(feishu, jobs);
+  }
+  const existing = jobs.get(jobId);
+  if (existing !== undefined) {
+    if (existing.jobIdentity !== jobIdentity) {
+      return Promise.reject(
+        new Error(`Bakeoff Job identity conflict: ${jobId}`),
+      );
+    }
+    return existing.outcome;
+  }
+
+  let outcome!: Promise<BakeoffJobOutcome>;
+  outcome = operation().finally(() => {
+    const current = jobs?.get(jobId);
+    if (current?.outcome === outcome) {
+      jobs?.delete(jobId);
+    }
+  });
+  jobs.set(jobId, { jobIdentity, outcome });
+  return outcome;
+}
+
 interface CapturedVendorResult {
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
@@ -131,6 +284,142 @@ interface SelectedProductAdapter {
   readonly adapter: ProductAdapterPort;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
+}
+
+function snapshotProductSelections(
+  adapters: readonly ProductAdapterPort[],
+): readonly SelectedProductAdapter[] {
+  return Object.freeze(
+    adapters.map((adapter) => {
+      const productPackage = Object.freeze({
+        ...adapter.productPackage,
+      });
+      return Object.freeze({
+        adapter,
+        productPackage,
+        runId: runIdForPackage(productPackage.packageId),
+      });
+    }),
+  );
+}
+
+function replayedBakeoffOutcome(
+  command: StartBakeoffJobCommand,
+  selections: readonly SelectedProductAdapter[],
+  source: ComparisonReportSource,
+): BakeoffJobOutcome {
+  const expectedRunIds = selections.map(({ runId }) => runId);
+  const selectedRunIds = source.job.selectedRunIds;
+  if (
+    source.job.caseId !== command.caseId ||
+    selectedRunIds === null ||
+    selectedRunIds.length !== expectedRunIds.length ||
+    selectedRunIds.some((runId, index) => runId !== expectedRunIds[index])
+  ) {
+    throw new Error(
+      `Bakeoff Job identity conflict: ${source.job.recordId}`,
+    );
+  }
+  const expectedProtocol = bakeoffProtocolSnapshot(
+    command.referencePackMode ?? "automatic",
+  );
+  if (
+    !isDeepStrictEqual(source.job.protocolSnapshot, expectedProtocol)
+  ) {
+    throw new Error(
+      `Bakeoff Job protocol mismatch: ${source.job.recordId}`,
+    );
+  }
+  assertEnvironmentOriginAllowed(
+    source.job.environmentOrigin,
+    command.environment,
+    `Bakeoff Job ${source.job.recordId}`,
+  );
+  if (
+    source.job.status !== "active" &&
+    source.job.status !== "completed" &&
+    source.job.status !== "partial" &&
+    source.job.status !== "failed"
+  ) {
+    throw new Error(
+      `Bakeoff Job has invalid parent status: ${source.job.status}`,
+    );
+  }
+  if (source.primaryReport === null) {
+    throw new Error(
+      `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
+    );
+  }
+
+  const vendorRuns = new Map(
+    source.vendorRuns.map((record) => [record.recordId, record]),
+  );
+  if (vendorRuns.size !== selections.length) {
+    throw new Error(
+      `Bakeoff Job identity conflict: ${source.job.recordId}`,
+    );
+  }
+  const capturesByArtifactId = new Map(
+    source.capturedArtifacts.map((record) => [record.artifactId, record]),
+  );
+  const scoresByScorecardId = new Map(
+    source.artifactScores.map((record) => [
+      record.scorecard.scorecardId,
+      record,
+    ]),
+  );
+  const captures = [];
+  const scorecards = [];
+  for (const selection of selections) {
+    const run = vendorRuns.get(selection.runId);
+    if (
+      run === undefined ||
+      run.product !== selection.productPackage.displayName ||
+      run.productVendorId !== selection.productPackage.vendorId ||
+      run.productPackageId !== selection.productPackage.packageId ||
+      run.adapterVersion !== selection.productPackage.adapterVersion
+    ) {
+      throw new Error(
+        `Bakeoff Job identity conflict: ${source.job.recordId}`,
+      );
+    }
+    if (run.artifactId !== null) {
+      const capture = capturesByArtifactId.get(run.artifactId);
+      if (capture === undefined || capture.runId !== run.recordId) {
+        throw new Error(
+          `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
+        );
+      }
+      captures.push(capture);
+    }
+    if (run.scorecardId !== null) {
+      const score = scoresByScorecardId.get(run.scorecardId);
+      if (score === undefined || score.runId !== run.recordId) {
+        throw new Error(
+          `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
+        );
+      }
+      scorecards.push(score.scorecard);
+    }
+  }
+
+  return {
+    job: {
+      jobId: source.job.jobId,
+      caseId: source.job.caseId,
+      environment: command.environment,
+      status: source.job.status,
+      provenance: "MOCK",
+      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    },
+    artifact: captures[0]?.artifact ?? null,
+    renderManifest: captures[0]?.renderManifest ?? null,
+    scorecard: scorecards[0] ?? null,
+    artifacts: captures.map(({ artifact }) => artifact),
+    renderManifests: captures.map(({ renderManifest }) => renderManifest),
+    scorecards,
+    report: source.primaryReport,
+  };
 }
 
 const KNOWN_VENDOR_SLUGS = new Map<string, string>([
@@ -208,6 +497,52 @@ function fixedTimestampAfter(elapsedMs: number): string {
   ).toISOString();
 }
 
+function sha256Json(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(value))
+    .digest("hex")}`;
+}
+
+function comparisonCompatibilityFingerprint(
+  scorecard: ArtifactScorecard,
+  protocolSnapshot: BakeoffProtocolSnapshot,
+) {
+  const judge = scorecard.judgeLineage;
+  return Object.freeze({
+    caseManifestHash: sha256Json(VOLCANO_EVALUATION_CASE),
+    caseInputHash: sha256Json({
+      vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+    }),
+    track: VOLCANO_EVALUATION_CASE.track,
+    protocolHash: sha256Json(protocolSnapshot),
+    rubricVersion: scorecard.rubricVersion,
+    scenarioWeightProfile: null,
+    judgeConfigurationHash:
+      judge === null
+        ? sha256Json({ scorer: "mock-score@1" })
+        : sha256Json({
+            provider: judge.provider,
+            adapterVersion: judge.adapterVersion,
+            requestedModel: judge.requestedModel,
+            responseModel: judge.responseModel,
+            promptVersion: judge.promptVersion,
+            promptHash: judge.promptHash,
+            configHash: judge.configHash,
+            schemaHash: judge.schemaHash,
+          }),
+    renderPipelineHash: sha256Json({
+      renderer: scorecard.evaluationInputManifest.renderer,
+    }),
+    designJudgmentSurfaceHash: sha256Json({
+      surfaceClass: "canonical",
+      renderer: scorecard.evaluationInputManifest.renderer,
+      compatibilityStatus: "compatible",
+    }),
+    referencePackHash:
+      scorecard.evaluationInputManifest.referencePackHash,
+  });
+}
+
 function attemptRecord(input: {
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
@@ -228,6 +563,7 @@ function attemptRecord(input: {
     parentRecordId: input.runId,
     caseId: input.caseId,
     product: input.productPackage.displayName,
+    productVendorId: input.productPackage.vendorId,
     productPackageId: input.productPackage.packageId,
     adapterVersion: input.productPackage.adapterVersion,
     status: input.status,
@@ -281,6 +617,7 @@ function attemptRecord(input: {
     createdAt: MOCK_SCENARIO.fixedTime,
     lastSyncedAt: MOCK_SCENARIO.fixedTime,
     reportUrl: null,
+    auxiliaryReportUrls: null,
     artifactId: null,
     renderManifestId: null,
     scorecardId: null,
@@ -553,6 +890,7 @@ function sharedRunFields(caseId: string) {
     createdAt: MOCK_SCENARIO.fixedTime,
     lastSyncedAt: MOCK_SCENARIO.fixedTime,
     reportUrl: null,
+    auxiliaryReportUrls: null,
   };
 }
 
@@ -560,13 +898,17 @@ export function createBakeoffHarness({
   feishu,
   productAdapter,
   productAdapters,
-  attemptDeadline = WALL_CLOCK_ATTEMPT_DEADLINE,
-  referencePackStore = new InMemoryReferencePackStore(
-    () => MOCK_SCENARIO.fixedTime,
-  ),
-  referencePackGenerator = new ReviewedReferencePackGenerator(),
+  attemptDeadline: configuredAttemptDeadline,
+  referencePackStore: configuredReferencePackStore,
+  referencePackGenerator: configuredReferencePackGenerator,
   judge,
 }: BakeoffHarnessDependencies): BakeoffHarness {
+  const attemptDeadline =
+    configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
+  const referencePackStore =
+    configuredReferencePackStore ?? defaultReferencePackStore(feishu);
+  const referencePackGenerator =
+    configuredReferencePackGenerator ?? DEFAULT_REFERENCE_PACK_GENERATOR;
   const selectedProductAdapters = Object.freeze([
     ...(productAdapters ??
       (productAdapter === undefined ? [] : [productAdapter])),
@@ -575,8 +917,11 @@ export function createBakeoffHarness({
     throw new Error("A Bakeoff Job requires at least one Product Adapter");
   }
 
-  return {
-    async startBakeoffJob(command) {
+  const executor = {
+    async startBakeoffJob(
+      command: StartBakeoffJobCommand,
+      selections: readonly SelectedProductAdapter[],
+    ): Promise<BakeoffJobOutcome> {
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
       }
@@ -585,18 +930,6 @@ export function createBakeoffHarness({
           `${command.environment} command cannot use ${feishu.targetEnvironment} projection environment`,
         );
       }
-      const selections = Object.freeze(
-        selectedProductAdapters.map((adapter) => {
-          const productPackage = Object.freeze({
-            ...adapter.productPackage,
-          });
-          return Object.freeze({
-            adapter,
-            productPackage,
-            runId: runIdForPackage(productPackage.packageId),
-          });
-        }),
-      );
       const packageIds = selections.map(
         ({ productPackage }) => productPackage.packageId,
       );
@@ -612,6 +945,20 @@ export function createBakeoffHarness({
           productPackage.environmentOrigin,
           command.environment,
           `Product Package ${productPackage.packageId}`,
+        );
+      }
+
+      const protocolSnapshot = bakeoffProtocolSnapshot(
+        command.referencePackMode ?? "automatic",
+      );
+      const existingSource = await feishu.findComparisonReportSource(
+        MOCK_SCENARIO.jobId,
+      );
+      if (existingSource !== null) {
+        return replayedBakeoffOutcome(
+          command,
+          selections,
+          existingSource,
         );
       }
 
@@ -711,6 +1058,7 @@ export function createBakeoffHarness({
         recordType: "bakeoff_job",
         parentRecordId: null,
         product: null,
+        productVendorId: null,
         productPackageId: null,
         adapterVersion: null,
         status: jobStatus,
@@ -722,13 +1070,7 @@ export function createBakeoffHarness({
         blockReason: null,
         retryOfAttemptId: null,
         selectedRunIds: results.map(({ runId }) => runId),
-        protocolSnapshot: {
-          protocolId: "MOCK-query-default-cost-v1",
-          timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-          retryPolicy: "one_if_provably_not_submitted",
-          resultSelectionPolicy: "first_policy_compliant_artifact",
-          cancellationPolicy: "independent_vendor_runs_continue",
-        },
+        protocolSnapshot,
         deadlineAt: fixedTimestampAfter(VENDOR_GENERATION_TIMEOUT_MS),
         vendorGenerationMs: null,
         vendorReportedElapsedMs: null,
@@ -748,6 +1090,7 @@ export function createBakeoffHarness({
           recordType: "vendor_run",
           parentRecordId: MOCK_SCENARIO.jobId,
           product: result.productPackage.displayName,
+          productVendorId: result.productPackage.vendorId,
           productPackageId: result.productPackage.packageId,
           adapterVersion: result.productPackage.adapterVersion,
           status: result.status,
@@ -816,56 +1159,50 @@ export function createBakeoffHarness({
             artifact: result.artifact,
             renderManifest: result.renderManifest,
             scorecard: result.scorecard,
+            comparisonCompatibilityFingerprint:
+              comparisonCompatibilityFingerprint(
+                result.scorecard,
+                protocolSnapshot,
+              ),
           });
         }
       }
 
-      const leftResult = successful[0];
-      for (const rightResult of successful.slice(1)) {
-        if (leftResult === undefined) break;
-        const leftSlug = vendorSlug(leftResult.productPackage.packageId);
-        const rightSlug = vendorSlug(rightResult.productPackage.packageId);
-        const comparisonId = `MOCK-comparison-${leftSlug}-${rightSlug}-volcano-v1`;
-        await feishu.appendComparison({
-          recordType: "comparison",
-          comparisonId,
-          caseId: command.caseId,
-          jobId: MOCK_SCENARIO.jobId,
-          leftRunId: leftResult.runId,
-          rightRunId: rightResult.runId,
-          leftScorecardId: leftResult.scorecard.scorecardId,
-          rightScorecardId: rightResult.scorecard.scorecardId,
-          provenance: "MOCK",
-          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-        });
-        await feishu.appendProductGapCard({
-          recordType: "gap_card",
-          gapCardId: `MOCK-gap-${leftSlug}-${rightSlug}-volcano-v1`,
-          caseId: command.caseId,
-          jobId: MOCK_SCENARIO.jobId,
-          comparisonId,
-          provenance: "MOCK",
-          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-          workflowState: "draft",
-          causeAttribution: "HYPOTHESIS",
-        });
-      }
-      const report = await feishu.createReport(
-        createMockReportDraft(
-          MOCK_SCENARIO.jobId,
-          jobStatus,
-          results.map((result) => ({
-            product: result.productPackage.displayName,
-            runId: result.runId,
-            status: result.status,
-            stateReason: result.terminalReason,
-            artifact: result.artifact,
-            scorecard: result.scorecard,
-            judgeFailure: result.judgeFailure ?? null,
-          })),
-        ),
+      const successfulVendorIds = new Set(
+        successful.map(({ productPackage }) => productPackage.vendorId),
       );
-      await feishu.linkReportToBakeoffJob(MOCK_SCENARIO.jobId, report.url);
+      const hasDefaultComparison =
+        successfulVendorIds.has("wps") &&
+        (successfulVendorIds.has("qwen") ||
+          successfulVendorIds.has("doubao"));
+      let report;
+      if (hasDefaultComparison) {
+        report = (
+          await createComparisonReportService({ feishu }).createReport({
+            jobId: MOCK_SCENARIO.jobId,
+          })
+        ).report;
+      } else {
+        report = await feishu.createReport(
+          createMockReportDraft(
+            MOCK_SCENARIO.jobId,
+            jobStatus,
+            results.map((result) => ({
+              product: result.productPackage.displayName,
+              runId: result.runId,
+              status: result.status,
+              stateReason: result.terminalReason,
+              artifact: result.artifact,
+              scorecard: result.scorecard,
+              judgeFailure: result.judgeFailure ?? null,
+            })),
+          ),
+        );
+        await feishu.linkReportToBakeoffJob(
+          MOCK_SCENARIO.jobId,
+          report.url,
+        );
+      }
 
       return {
         job: {
@@ -884,6 +1221,30 @@ export function createBakeoffHarness({
         scorecards: successful.map(({ scorecard }) => scorecard),
         report,
       };
+    },
+  };
+  return {
+    startBakeoffJob(command) {
+      const commandSnapshot = snapshotBakeoffCommand(command);
+      const selections = snapshotProductSelections(
+        selectedProductAdapters,
+      );
+      const jobIdentity = bakeoffJobIdentity(
+        commandSnapshot,
+        selections,
+        {
+          attemptDeadline,
+          referencePackStore,
+          referencePackGenerator,
+          judge,
+        },
+      );
+      return coalesceBakeoffJob(
+        feishu,
+        MOCK_SCENARIO.jobId,
+        jobIdentity,
+        () => executor.startBakeoffJob(commandSnapshot, selections),
+      );
     },
   };
 }

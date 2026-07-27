@@ -8,6 +8,7 @@ import type { EnvironmentOrigin } from "./environment-origin.ts";
 
 export interface ProductPackageSnapshot {
   readonly packageId: string;
+  readonly vendorId: "wps" | "qwen" | "doubao" | (string & {});
   readonly displayName: string;
   readonly adapterVersion: string;
   readonly provenance: "MOCK" | "PRODUCTION";
