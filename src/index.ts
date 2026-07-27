@@ -24,7 +24,10 @@ export {
   type ReportDocumentPort,
   type RunRecordTablePort,
 } from "./feishu.ts";
-export { VOLCANO_CASE_ID } from "./fixtures/volcano-case.ts";
+export {
+  VOLCANO_CASE_ID,
+  VOLCANO_EVALUATION_CASE,
+} from "./fixtures/volcano-case.ts";
 export {
   MockDoubaoProductAdapter,
   MockQwenProductAdapter,
@@ -60,6 +63,8 @@ export type {
   RenderManifest,
   RunRecord,
   RunStatus,
+  JudgeLineage,
+  KnowledgeErrorDeduction,
   ScoreDimension,
   ScoreValue,
   StartBakeoffJobCommand,
@@ -67,3 +72,33 @@ export type {
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
+export {
+  InMemoryReferencePackStore,
+  createContentAddressedReferencePack,
+  resolveReferencePackForCase,
+  type ReferenceFact,
+  type ReferencePack,
+  type ReferencePackMode,
+  type ReferencePackSelection,
+  type ReferencePackStorePort,
+  type ReferencePackStoreSnapshot,
+  type ReferenceSource,
+  type ReferenceSourceAuthority,
+  type ReferenceSourceCandidate,
+  type StagedReferencePack,
+  type UsedReferencePackRecord,
+} from "./reference-pack.ts";
+export {
+  OPENAI_JUDGE_ADAPTER_VERSION,
+  OPENAI_JUDGE_MODEL,
+  OPENAI_JUDGE_PROMPT_VERSION,
+  OpenAiSdkResponsesTransport,
+  OpenAiResponsesJudgeAdapter,
+  SharpStaticRenderRasterizer,
+  type OpenAiJudgeCommand,
+  type OpenAiJudgePort,
+  type OpenAiResponsesJudgeAdapterOptions,
+  type OpenAiResponsesTransport,
+  type RasterizedJudgeImage,
+  type StaticRenderRasterizerPort,
+} from "./openai-judge.ts";

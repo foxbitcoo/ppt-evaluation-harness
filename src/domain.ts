@@ -163,10 +163,45 @@ export interface DimensionScore {
   readonly rationale: string;
 }
 
+export interface KnowledgeErrorDeduction {
+  readonly pageNumber: number;
+  readonly claim: string;
+  readonly correction: string;
+  readonly factId: string;
+  readonly sourceIds: readonly string[];
+}
+
+export interface RasterizedImageLineage {
+  readonly pageNumber: number;
+  readonly mimeType: "image/png";
+  readonly contentHash: `sha256:${string}`;
+}
+
+export interface JudgeLineage {
+  readonly provider: "openai";
+  readonly adapterVersion: "openai-responses-judge@1";
+  readonly requestedModel: "gpt-5.6-sol";
+  readonly responseModel: string;
+  readonly responseId: string;
+  readonly promptVersion: "query-six-dimension-judge-prompt-v1";
+  readonly promptHash: `sha256:${string}`;
+  readonly configHash: `sha256:${string}`;
+  readonly schemaHash: `sha256:${string}`;
+  readonly contextHash: `sha256:${string}`;
+  readonly inputHash: `sha256:${string}`;
+  readonly idempotencyKey: `judge_${string}`;
+  readonly rasterizerVersion: string;
+  readonly rasterizedImagesHash: `sha256:${string}`;
+  readonly rasterizedImageHashes: readonly RasterizedImageLineage[];
+  readonly imageDetail: "high";
+  readonly store: false;
+}
+
 export interface EvaluationInputManifest {
   readonly artifactHash: `sha256:${string}`;
   readonly renderManifestHash: `sha256:${string}`;
   readonly renderer: "mock-static-svg@1";
+  readonly referencePackHash: `sha256:${string}` | null;
 }
 
 export interface DeliveryQualityGate {
@@ -188,6 +223,8 @@ export interface ArtifactScorecard {
   readonly rubricVersion: "query-six-dimension-v1";
   readonly evaluationInputManifest: EvaluationInputManifest;
   readonly dimensions: readonly DimensionScore[];
+  readonly knowledgeErrors: readonly KnowledgeErrorDeduction[];
+  readonly judgeLineage: JudgeLineage | null;
   readonly deliveryQualityGates: readonly DeliveryQualityGate[];
   readonly createdAt: string;
 }
@@ -270,4 +307,5 @@ export interface BakeoffJobOutcome {
 export interface StartBakeoffJobCommand {
   readonly environment: "test" | "production";
   readonly caseId: string;
+  readonly referencePackMode?: "automatic" | "force" | "off";
 }

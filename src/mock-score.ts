@@ -7,11 +7,13 @@ import type {
 } from "./domain.ts";
 import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
+import type { ReferencePack } from "./reference-pack.ts";
 
 export interface ScoreContext {
   readonly jobId: string;
   readonly runId: string;
   readonly scorecardId?: string;
+  readonly referencePack?: ReferencePack | null;
 }
 
 function boundedScore(passedChecks: number, totalChecks: number): ScoreValue {
@@ -148,8 +150,11 @@ export function scoreRenderedArtifact(
       artifactHash: artifact.contentHash,
       renderManifestHash: renderManifest.contentHash,
       renderer: renderManifest.renderer,
+      referencePackHash: context.referencePack?.contentHash ?? null,
     },
     dimensions: scoreDimensions(renderManifest),
+    knowledgeErrors: [],
+    judgeLineage: null,
     deliveryQualityGates: [
       {
         gate: "artifact_captured_and_openable",

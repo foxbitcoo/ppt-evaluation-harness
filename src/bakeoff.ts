@@ -25,11 +25,18 @@ import { renderStaticArtifact } from "./mock-wps.ts";
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import { scoreRenderedArtifact } from "./mock-score.ts";
+import type { OpenAiJudgePort } from "./openai-judge.ts";
 import type {
   ProductAdapterPort,
   ProductAttemptResult,
   ProductPackageSnapshot,
 } from "./product-adapter.ts";
+import {
+  InMemoryReferencePackStore,
+  resolveReferencePackForCase,
+  type ReferencePack,
+  type ReferencePackStorePort,
+} from "./reference-pack.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 
@@ -96,6 +103,8 @@ export interface BakeoffHarnessDependencies {
   readonly productAdapter?: ProductAdapterPort;
   readonly productAdapters?: readonly ProductAdapterPort[];
   readonly attemptDeadline?: AttemptDeadlinePort;
+  readonly referencePackStore?: ReferencePackStorePort;
+  readonly judge?: OpenAiJudgePort;
 }
 
 interface CapturedVendorResult {
@@ -277,6 +286,8 @@ async function executeVendor(
   caseId: string,
   attemptDeadline: AttemptDeadlinePort,
   jobDeadlineAtEpochMs: number,
+  referencePack: ReferencePack | null,
+  judge: OpenAiJudgePort | undefined,
 ): Promise<CapturedVendorResult> {
   const { adapter, productPackage, runId } = selection;
   const scenario = KNOWN_VENDOR_SCENARIOS.get(
@@ -431,13 +442,42 @@ async function executeVendor(
     scenario?.renderManifestId ??
       runId.replace(/^MOCK-run-/, "MOCK-render-"),
   );
-  const scorecard = scoreRenderedArtifact(artifact, renderManifest, {
-    jobId: MOCK_SCENARIO.jobId,
-    runId,
-    scorecardId:
-      scenario?.scorecardId ??
-      runId.replace(/^MOCK-run-/, "MOCK-scorecard-"),
-  });
+  const scorecardId =
+    scenario?.scorecardId ??
+    runId.replace(/^MOCK-run-/, "MOCK-scorecard-");
+  const scorecard =
+    judge === undefined
+      ? scoreRenderedArtifact(artifact, renderManifest, {
+          jobId: MOCK_SCENARIO.jobId,
+          runId,
+          referencePack,
+          scorecardId,
+        })
+      : await judge.score({
+          jobId: MOCK_SCENARIO.jobId,
+          runId,
+          scorecardId,
+          evaluationCase: VOLCANO_EVALUATION_CASE,
+          artifact,
+          renderManifest,
+          referencePack,
+        });
+  if (
+    scorecard.scorecardId !== scorecardId ||
+    scorecard.jobId !== MOCK_SCENARIO.jobId ||
+    scorecard.runId !== runId ||
+    scorecard.artifactId !== artifact.artifactId ||
+    scorecard.provenance !== artifact.provenance ||
+    scorecard.environmentOrigin !== artifact.environmentOrigin ||
+    scorecard.evaluationInputManifest.artifactHash !==
+      artifact.contentHash ||
+    scorecard.evaluationInputManifest.renderManifestHash !==
+      renderManifest.contentHash ||
+    scorecard.evaluationInputManifest.referencePackHash !==
+      (referencePack?.contentHash ?? null)
+  ) {
+    throw new Error("Judge returned an inconsistent Scorecard lineage");
+  }
   return {
     productPackage,
     runId,
@@ -472,6 +512,10 @@ export function createBakeoffHarness({
   productAdapter,
   productAdapters,
   attemptDeadline = WALL_CLOCK_ATTEMPT_DEADLINE,
+  referencePackStore = new InMemoryReferencePackStore(
+    () => MOCK_SCENARIO.fixedTime,
+  ),
+  judge,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const selectedProductAdapters = Object.freeze([
     ...(productAdapters ??
@@ -521,18 +565,38 @@ export function createBakeoffHarness({
         );
       }
 
+      const referencePackSelection = resolveReferencePackForCase({
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+        ...(command.referencePackMode === undefined
+          ? {}
+          : { mode: command.referencePackMode }),
+      });
+      const stagedReferencePack =
+        referencePackSelection.pack === null
+          ? null
+          : referencePackStore.stage(referencePackSelection.pack);
       const jobDeadlineAtEpochMs =
         Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
-      const results = await Promise.all(
-        selections.map((selection) =>
-          executeVendor(
-            selection,
-            command.caseId,
-            attemptDeadline,
-            jobDeadlineAtEpochMs,
+      let results: readonly CapturedVendorResult[];
+      try {
+        results = await Promise.all(
+          selections.map((selection) =>
+            executeVendor(
+              selection,
+              command.caseId,
+              attemptDeadline,
+              jobDeadlineAtEpochMs,
+              referencePackSelection.pack,
+              judge,
+            ),
           ),
-        ),
-      );
+        );
+      } catch (error) {
+        if (stagedReferencePack !== null) {
+          referencePackStore.deleteUnused(stagedReferencePack.stagingId);
+        }
+        throw error;
+      }
       const artifactIds = results.flatMap(({ artifact }) =>
         artifact === null ? [] : [artifact.artifactId],
       );
@@ -561,6 +625,18 @@ export function createBakeoffHarness({
             ? "failed"
             : "partial";
       const firstSuccessful = successful[0];
+      if (stagedReferencePack !== null) {
+        if (successful.length === 0) {
+          referencePackStore.deleteUnused(stagedReferencePack.stagingId);
+        } else {
+          referencePackStore.retainUsed(stagedReferencePack.stagingId, {
+            jobId: MOCK_SCENARIO.jobId,
+            scorecardIds: successful.map(
+              ({ scorecard }) => scorecard.scorecardId,
+            ),
+          });
+        }
+      }
 
       await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
       await feishu.appendRunRecord({
