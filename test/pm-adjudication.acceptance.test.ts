@@ -11,9 +11,33 @@ import {
   createComparisonReportService,
   createProductGapCardWorkflowService,
   createScoreAdjudicationService,
+  type AdjudicationEventRecord,
+  type FeishuProjectionPort,
   type GitHubIssueCreateCommand,
   type GitHubIssuePort,
 } from "../src/index.ts";
+
+function withAdjudicationEvents(
+  feishu: InMemoryFeishuProjection,
+  transform: (
+    events: readonly AdjudicationEventRecord[],
+  ) => readonly AdjudicationEventRecord[],
+): FeishuProjectionPort {
+  return new Proxy(feishu, {
+    get(target, property, receiver) {
+      if (property === "listAdjudicationEvents") {
+        return async (scorecardId: string) =>
+          transform(
+            await target.listAdjudicationEvents(scorecardId),
+          );
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function"
+        ? value.bind(target)
+        : value;
+    },
+  });
+}
 
 async function createScoredWpsProjection(): Promise<{
   readonly feishu: InMemoryFeishuProjection;
@@ -159,6 +183,93 @@ test("a PM adjudication is append-only and exposes the latest human score withou
   );
 });
 
+test("effective scores resolve the unique causal adjudication head independent of Feishu row order and reject broken histories", async () => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const first = await service.adjudicateDimension({
+    adjudicationEventId: "adj-causal-001",
+    scorecardId,
+    dimension: "narrative_and_audience_fit",
+    humanFinalScore: 2,
+    actorId: "pm-chen",
+    occurredAt: "2026-07-27T05:00:00.000Z",
+    reason: "首次复核。",
+    priorAdjudicationEventId: null,
+  });
+  const second = await service.adjudicateDimension({
+    adjudicationEventId: "adj-causal-002",
+    scorecardId,
+    dimension: "narrative_and_audience_fit",
+    humanFinalScore: 3,
+    actorId: "pm-chen",
+    occurredAt: "2026-07-27T05:05:00.000Z",
+    reason: "基于首次复核的最终决定。",
+    priorAdjudicationEventId: first.adjudicationEventId,
+  });
+  const stored = await feishu.listAdjudicationEvents(scorecardId);
+
+  const shuffled = await createScoreAdjudicationService({
+    feishu: withAdjudicationEvents(feishu, (events) =>
+      [...events].reverse(),
+    ),
+  }).getEffectiveScorecard(scorecardId);
+  assert.equal(
+    shuffled.dimensions.find(
+      ({ dimension }) => dimension === "narrative_and_audience_fit",
+    )?.effectiveValue,
+    3,
+  );
+
+  const histories: readonly {
+    readonly label: string;
+    readonly events: readonly AdjudicationEventRecord[];
+  }[] = [
+    {
+      label: "missing parent",
+      events: [
+        {
+          ...second,
+          priorAdjudicationEventId: "adj-causal-missing",
+        },
+      ],
+    },
+    {
+      label: "fork",
+      events: [
+        ...stored,
+        {
+          ...second,
+          adjudicationEventId: "adj-causal-fork",
+          humanFinalScore: 1,
+          priorAdjudicationEventId: first.adjudicationEventId,
+        },
+      ],
+    },
+    {
+      label: "cycle",
+      events: [
+        {
+          ...first,
+          priorAdjudicationEventId: second.adjudicationEventId,
+        },
+        second,
+      ],
+    },
+  ];
+  for (const history of histories) {
+    await assert.rejects(
+      createScoreAdjudicationService({
+        feishu: withAdjudicationEvents(
+          feishu,
+          () => history.events,
+        ),
+      }).getEffectiveScorecard(scorecardId),
+      /invalid adjudication causal history/i,
+      history.label,
+    );
+  }
+});
+
 test("a no-change ReviewEvent makes human review visible while keeping the model value effective", async () => {
   const { feishu, scorecardId } = await createScoredWpsProjection();
   const service = createScoreAdjudicationService({ feishu });
@@ -219,7 +330,7 @@ test("a no-change ReviewEvent makes human review visible while keeping the model
   ]);
 });
 
-test("human adjudication preserves NOT_ASSESSABLE unless the factual domain rule is explicit", async () => {
+test("human adjudication preserves NOT_ASSESSABLE until a new scorecard freezes the reviewed Reference Pack", async () => {
   const feishu = new InMemoryFeishuProjection();
   const outcome = await createBakeoffHarness({
     feishu,
@@ -245,19 +356,9 @@ test("human adjudication preserves NOT_ASSESSABLE unless the factual domain rule
 
   await assert.rejects(
     service.adjudicateDimension(command),
-    /cannot invent assessability without an allowed domain rule/i,
+    /cannot invent assessability.*new scorecard.*reference pack/i,
   );
   assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
-
-  await service.adjudicateDimension({
-    ...command,
-    assessabilityOverride: {
-      rule: "reviewed_reference_pack_available",
-      referencePackHash: `sha256:${"a".repeat(64)}`,
-      evidenceReference: "feishu://reference-packs/volcano-reviewed-v2",
-    },
-    evidencePages: [3, 5, 9],
-  });
 
   const effective = await service.getEffectiveScorecard(scorecardId);
   const factual = effective.dimensions.find(
@@ -277,12 +378,13 @@ test("human adjudication preserves NOT_ASSESSABLE unless the factual domain rule
     {
       modelOriginalAssessmentStatus: "NOT_ASSESSABLE",
       modelOriginalValue: null,
-      effectiveAssessmentStatus: "ASSESSED",
-      effectiveValue: 4,
-      evidencePages: [3, 5, 9],
-      reviewState: "human_reviewed",
+      effectiveAssessmentStatus: "NOT_ASSESSABLE",
+      effectiveValue: null,
+      evidencePages: [],
+      reviewState: "model_not_reviewed",
     },
   );
+  assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
 });
 
 test("dynamic comparisons and reports use the latest valid human score and expose review state without requiring every score to be reviewed", async () => {
@@ -346,6 +448,11 @@ test("dynamic comparisons and reports use the latest valid human score and expos
   );
   assert.match(outcome.report.markdown, /4（模型未复核）/);
   assert.match(outcome.report.markdown, /5（人工已复核）/);
+  assert.doesNotMatch(
+    outcome.report.markdown,
+    /盲评|blind review/i,
+    "the frozen MVP protocol is explicitly non-blind",
+  );
   assert.equal(
     feishu.snapshot().reviewEventTable.length,
     0,
@@ -377,13 +484,27 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
   assert.ok(pendingId && rejectedId && confirmedId);
 
   const githubCalls: GitHubIssueCreateCommand[] = [];
+  const issuesByKey = new Map<
+    string,
+    { readonly issueNumber: number; readonly issueUrl: string }
+  >();
+  let createdIssues = 0;
   const githubIssues: GitHubIssuePort = {
-    async createIssue(command) {
+    async createOrGetIssue(command) {
       githubCalls.push(command);
-      return {
-        issueNumber: 42,
-        issueUrl: "https://github.example/ppt-evaluation/issues/42",
+      const existing = issuesByKey.get(command.idempotencyKey);
+      if (existing !== undefined) {
+        return existing;
+      }
+      createdIssues += 1;
+      const created = {
+        issueNumber: 41 + createdIssues,
+        issueUrl: `https://github.example/ppt-evaluation/issues/${
+          41 + createdIssues
+        }`,
       };
+      issuesByKey.set(command.idempotencyKey, created);
+      return created;
     },
   };
   const workflow = createProductGapCardWorkflowService({
@@ -403,6 +524,7 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
     }),
     /must be confirmed_for_delivery/i,
   );
+  assert.equal(githubCalls.length, 0);
   await workflow.recordDecision({
     workflowEventId: "gap-decision-rejected-001",
     gapCardId: rejectedId,
@@ -420,6 +542,7 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
     }),
     /must be confirmed_for_delivery/i,
   );
+  assert.equal(githubCalls.length, 0);
   const confirmation = await workflow.recordDecision({
     workflowEventId: "gap-decision-confirmed-001",
     gapCardId: confirmedId,
@@ -430,13 +553,18 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
     priorWorkflowEventId: null,
   });
 
+  const concurrentWorkflow =
+    createProductGapCardWorkflowService({
+      feishu,
+      githubIssues,
+    });
   const [firstLink, replayedLink] = await Promise.all([
     workflow.createLinkedIssue({
       gapCardId: confirmedId,
       actorId: "pm-chen",
       occurredAt: "2026-07-27T06:04:00.000Z",
     }),
-    workflow.createLinkedIssue({
+    concurrentWorkflow.createLinkedIssue({
       gapCardId: confirmedId,
       actorId: "pm-chen",
       occurredAt: "2026-07-27T06:05:00.000Z",
@@ -448,7 +576,8 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
     occurredAt: "2026-07-27T06:06:00.000Z",
   });
 
-  assert.equal(githubCalls.length, 1);
+  assert.equal(createdIssues, 1);
+  assert.ok(githubCalls.length >= 1 && githubCalls.length <= 2);
   assert.deepEqual(githubCalls[0]?.labels, ["needs-triage"]);
   assert.equal(
     githubCalls[0]?.idempotencyKey,
@@ -462,6 +591,23 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
     issueUrl: "https://github.example/ppt-evaluation/issues/42",
   });
   assert.equal(firstLink.workflowState, "confirmed_for_delivery");
+  assert.deepEqual(
+    feishu.snapshot().githubIssueDeliveryReservationTable.map(
+      (reservation) => ({
+        gapCardId: reservation.gapCardId,
+        idempotencyKey: reservation.idempotencyKey,
+        confirmedByWorkflowEventId:
+          reservation.confirmedByWorkflowEventId,
+      }),
+    ),
+    [
+      {
+        gapCardId: confirmedId,
+        idempotencyKey: `product-gap-card:${confirmedId}`,
+        confirmedByWorkflowEventId: confirmation.workflowEventId,
+      },
+    ],
+  );
   assert.deepEqual(
     feishu.snapshot().githubIssueLinkEventTable.map((event) => ({
       gapCardId: event.gapCardId,
@@ -486,5 +632,76 @@ test("only confirmed Product Gap Cards create one traceable GitHub Issue while p
   assert.equal(
     (await workflow.getGapCard(rejectedId)).workflowState,
     "rejected",
+  );
+
+  await workflow.recordDecision({
+    workflowEventId: "gap-decision-recovery-001",
+    gapCardId: pendingId,
+    decision: "confirmed_for_delivery",
+    actorId: "pm-chen",
+    occurredAt: "2026-07-27T06:10:00.000Z",
+    reason: "用于验证外部创建成功、投影暂时失败后的恢复。",
+    priorWorkflowEventId: null,
+  });
+  let failFirstLinkWrite = true;
+  const flakyFeishu = new Proxy(feishu, {
+    get(target, property, receiver) {
+      if (
+        property === "appendGitHubIssueLinkEvent" &&
+        failFirstLinkWrite
+      ) {
+        return async () => {
+          failFirstLinkWrite = false;
+          throw new Error("simulated Feishu link write outage");
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function"
+        ? value.bind(target)
+        : value;
+    },
+  });
+  const interrupted = createProductGapCardWorkflowService({
+    feishu: flakyFeishu,
+    githubIssues,
+  });
+  await assert.rejects(
+    interrupted.createLinkedIssue({
+      gapCardId: pendingId,
+      actorId: "pm-chen",
+      occurredAt: "2026-07-27T06:11:00.000Z",
+    }),
+    /simulated Feishu link write outage/,
+  );
+  assert.equal(createdIssues, 2);
+  assert.equal(
+    feishu.snapshot().githubIssueDeliveryReservationTable.length,
+    2,
+  );
+  assert.equal(
+    feishu
+      .snapshot()
+      .githubIssueLinkEventTable.filter(
+        (event) => event.gapCardId === pendingId,
+      ).length,
+    0,
+  );
+
+  const recovered = await createProductGapCardWorkflowService({
+    feishu,
+    githubIssues,
+  }).createLinkedIssue({
+    gapCardId: pendingId,
+    actorId: "pm-chen",
+    occurredAt: "2026-07-27T06:12:00.000Z",
+  });
+  assert.deepEqual(recovered.githubIssue, {
+    issueNumber: 43,
+    issueUrl: "https://github.example/ppt-evaluation/issues/43",
+  });
+  assert.equal(
+    createdIssues,
+    2,
+    "restart recovery must reuse the externally created Issue",
   );
 });

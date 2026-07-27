@@ -278,6 +278,7 @@ test("the Feishu domain tables keep Artifact capture independent from scoring an
       "capturedArtifactTable",
       "caseTable",
       "gapCardWorkflowEventTable",
+      "githubIssueDeliveryReservationTable",
       "githubIssueLinkEventTable",
       "productGapCardTable",
       "reviewEventTable",

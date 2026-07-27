@@ -73,7 +73,6 @@ export type {
 export type {
   Artifact,
   AdjudicationEventRecord,
-  AssessabilityOverrideRule,
   ArtifactScorecard,
   ArtifactScoreTableRecord,
   CapturedArtifactTableRecord,
@@ -100,6 +99,7 @@ export type {
   EvaluationInputManifest,
   FeishuReport,
   FeishuReportDraft,
+  GitHubIssueDeliveryReservationRecord,
   GitHubIssueLinkEventRecord,
   LinkedGitHubIssue,
   ProductGapCardRecord,

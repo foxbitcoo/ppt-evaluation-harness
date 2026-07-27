@@ -9,6 +9,7 @@ import type {
   EvaluationCaseRecord,
   FeishuReport,
   FeishuReportDraft,
+  GitHubIssueDeliveryReservationRecord,
   GitHubIssueLinkEventRecord,
   ProductGapCardRecord,
   ProductGapCardWorkflowEventRecord,
@@ -27,6 +28,15 @@ function stableRunReplayPayload(record: RunRecord): unknown {
     ...stable
   } = record;
   return stable;
+}
+
+function cloneWithEnvironmentOrigin<
+  T extends { readonly environmentOrigin: EnvironmentOrigin },
+>(record: T): T {
+  return {
+    ...structuredClone(record),
+    environmentOrigin: record.environmentOrigin,
+  };
 }
 
 export interface EvaluationCaseTablePort {
@@ -79,6 +89,15 @@ export interface ProductGapCardWorkflowTablePort {
   listProductGapCardWorkflowEvents(
     gapCardId: string,
   ): Promise<readonly ProductGapCardWorkflowEventRecord[]>;
+  /**
+   * Atomically creates or returns the unique reservation for a Gap Card.
+   */
+  reserveGitHubIssueDelivery(
+    record: GitHubIssueDeliveryReservationRecord,
+  ): Promise<GitHubIssueDeliveryReservationRecord>;
+  loadGitHubIssueDeliveryReservation(
+    gapCardId: string,
+  ): Promise<GitHubIssueDeliveryReservationRecord | null>;
   appendGitHubIssueLinkEvent(
     record: GitHubIssueLinkEventRecord,
   ): Promise<void>;
@@ -134,6 +153,7 @@ export interface FeishuProjectionSnapshot {
   readonly adjudicationEventTable: readonly AdjudicationEventRecord[];
   readonly reviewEventTable: readonly ReviewEventRecord[];
   readonly gapCardWorkflowEventTable: readonly ProductGapCardWorkflowEventRecord[];
+  readonly githubIssueDeliveryReservationTable: readonly GitHubIssueDeliveryReservationRecord[];
   readonly githubIssueLinkEventTable: readonly GitHubIssueLinkEventRecord[];
   readonly productGapCardTable: readonly (
     | ComparisonRecord
@@ -154,6 +174,8 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #adjudicationEventTable: AdjudicationEventRecord[] = [];
   readonly #reviewEventTable: ReviewEventRecord[] = [];
   readonly #gapCardWorkflowEventTable: ProductGapCardWorkflowEventRecord[] =
+    [];
+  readonly #githubIssueDeliveryReservationTable: GitHubIssueDeliveryReservationRecord[] =
     [];
   readonly #githubIssueLinkEventTable: GitHubIssueLinkEventRecord[] = [];
   readonly #productGapCardTable: (ComparisonRecord | ProductGapCardRecord)[] =
@@ -293,6 +315,8 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       dimension.assessmentStatus !==
         record.modelOriginalAssessmentStatus ||
       dimension.value !== record.modelOriginalScore ||
+      dimension.assessmentStatus !== "ASSESSED" ||
+      dimension.value === null ||
       record.evidencePages.length === 0 ||
       new Set(record.evidencePages).size !==
         record.evidencePages.length ||
@@ -305,27 +329,6 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     ) {
       throw new Error(
         "Adjudication Event contains inconsistent model-score lineage",
-      );
-    }
-    const makesAssessable =
-      dimension.assessmentStatus === "NOT_ASSESSABLE";
-    if (
-      makesAssessable
-        ? !(
-            record.dimension ===
-              "factual_accuracy_and_content_quality" &&
-            record.assessabilityOverride?.rule ===
-              "reviewed_reference_pack_available" &&
-            /^sha256:[a-f0-9]{64}$/.test(
-              record.assessabilityOverride.referencePackHash,
-            ) &&
-            record.assessabilityOverride.evidenceReference.trim().length >
-              0
-          )
-        : record.assessabilityOverride !== null
-    ) {
-      throw new Error(
-        "Adjudication Event has an invalid assessability override",
       );
     }
     const priorEvents = this.#adjudicationEventTable.filter(
@@ -342,7 +345,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         }`,
       );
     }
-    this.#adjudicationEventTable.push(record);
+    this.#adjudicationEventTable.push(
+      cloneWithEnvironmentOrigin(record),
+    );
   }
 
   async listAdjudicationEvents(
@@ -401,7 +406,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         }`,
       );
     }
-    this.#reviewEventTable.push(record);
+    this.#reviewEventTable.push(cloneWithEnvironmentOrigin(record));
   }
 
   async listReviewEvents(
@@ -569,7 +574,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "Product Gap Card already has a terminal workflow decision",
       );
     }
-    this.#gapCardWorkflowEventTable.push(record);
+    this.#gapCardWorkflowEventTable.push(
+      cloneWithEnvironmentOrigin(record),
+    );
   }
 
   async listProductGapCardWorkflowEvents(
@@ -580,6 +587,76 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         (event) => event.gapCardId === gapCardId,
       ),
     );
+  }
+
+  async reserveGitHubIssueDelivery(
+    record: GitHubIssueDeliveryReservationRecord,
+  ): Promise<GitHubIssueDeliveryReservationRecord> {
+    this.#assertAllowed(
+      record.environmentOrigin,
+      "GitHub Issue delivery reservation",
+    );
+    const card = await this.loadProductGapCard(record.gapCardId);
+    const existing =
+      this.#githubIssueDeliveryReservationTable.find(
+        (reservation) =>
+          reservation.gapCardId === record.gapCardId ||
+          reservation.reservationId === record.reservationId,
+      );
+    if (existing !== undefined) {
+      if (
+        existing.gapCardId !== record.gapCardId ||
+        existing.reservationId !== record.reservationId ||
+        existing.idempotencyKey !== record.idempotencyKey ||
+        existing.confirmedByWorkflowEventId !==
+          record.confirmedByWorkflowEventId
+      ) {
+        throw new Error(
+          `GitHub Issue delivery reservation conflict: ${record.gapCardId}`,
+        );
+      }
+      return {
+        ...structuredClone(existing),
+        environmentOrigin: existing.environmentOrigin,
+      };
+    }
+    const confirmation = this.#gapCardWorkflowEventTable.find(
+      (event) =>
+        event.workflowEventId ===
+          record.confirmedByWorkflowEventId &&
+        event.gapCardId === record.gapCardId &&
+        event.decision === "confirmed_for_delivery",
+    );
+    if (
+      confirmation === undefined ||
+      card.provenance !== record.provenance ||
+      card.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "GitHub Issue delivery reservation requires a matching confirmed Product Gap Card",
+      );
+    }
+    const stored = cloneWithEnvironmentOrigin(record);
+    this.#githubIssueDeliveryReservationTable.push(stored);
+    return {
+      ...structuredClone(stored),
+      environmentOrigin: stored.environmentOrigin,
+    };
+  }
+
+  async loadGitHubIssueDeliveryReservation(
+    gapCardId: string,
+  ): Promise<GitHubIssueDeliveryReservationRecord | null> {
+    const reservation =
+      this.#githubIssueDeliveryReservationTable.find(
+        (candidate) => candidate.gapCardId === gapCardId,
+      );
+    return reservation === undefined
+      ? null
+      : {
+          ...structuredClone(reservation),
+          environmentOrigin: reservation.environmentOrigin,
+        };
   }
 
   async appendGitHubIssueLinkEvent(
@@ -612,6 +689,19 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     const card = await this.loadProductGapCard(record.gapCardId);
+    const concurrentExisting = this.#githubIssueLinkEventTable.find(
+      (event) =>
+        event.linkEventId === record.linkEventId ||
+        event.gapCardId === record.gapCardId,
+    );
+    if (concurrentExisting !== undefined) {
+      if (!isDeepStrictEqual(concurrentExisting, record)) {
+        throw new Error(
+          `Product Gap Card GitHub linkage conflict: ${record.gapCardId}`,
+        );
+      }
+      return;
+    }
     const confirmation = this.#gapCardWorkflowEventTable.find(
       (event) =>
         event.workflowEventId ===
@@ -619,8 +709,17 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         event.gapCardId === record.gapCardId &&
         event.decision === "confirmed_for_delivery",
     );
+    const reservation =
+      this.#githubIssueDeliveryReservationTable.find(
+        (candidate) =>
+          candidate.gapCardId === record.gapCardId &&
+          candidate.idempotencyKey === record.idempotencyKey &&
+          candidate.confirmedByWorkflowEventId ===
+            record.confirmedByWorkflowEventId,
+      );
     if (
       confirmation === undefined ||
+      reservation === undefined ||
       card.provenance !== record.provenance ||
       card.environmentOrigin !== record.environmentOrigin
     ) {
@@ -628,7 +727,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "GitHub Issue link requires a matching confirmed Product Gap Card",
       );
     }
-    this.#githubIssueLinkEventTable.push(record);
+    this.#githubIssueLinkEventTable.push(
+      cloneWithEnvironmentOrigin(record),
+    );
   }
 
   async listGitHubIssueLinkEvents(
@@ -751,6 +852,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       reviewEventTable: structuredClone(this.#reviewEventTable),
       gapCardWorkflowEventTable: structuredClone(
         this.#gapCardWorkflowEventTable,
+      ),
+      githubIssueDeliveryReservationTable: structuredClone(
+        this.#githubIssueDeliveryReservationTable,
       ),
       githubIssueLinkEventTable: structuredClone(
         this.#githubIssueLinkEventTable,

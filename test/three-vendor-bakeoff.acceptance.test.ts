@@ -131,6 +131,7 @@ test("the Feishu projections preserve stable Case, Run, Artifact, score, and pro
       "capturedArtifactTable",
       "caseTable",
       "gapCardWorkflowEventTable",
+      "githubIssueDeliveryReservationTable",
       "githubIssueLinkEventTable",
       "productGapCardTable",
       "reviewEventTable",

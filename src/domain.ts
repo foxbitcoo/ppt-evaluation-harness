@@ -334,12 +334,6 @@ export interface ReviewEventRecord {
   readonly environmentOrigin: EnvironmentOrigin;
 }
 
-export interface AssessabilityOverrideRule {
-  readonly rule: "reviewed_reference_pack_available";
-  readonly referencePackHash: `sha256:${string}`;
-  readonly evidenceReference: string;
-}
-
 export interface AdjudicationEventRecord {
   readonly recordType: "adjudication_event";
   readonly schemaVersion: "adjudication-event-v1";
@@ -354,7 +348,6 @@ export interface AdjudicationEventRecord {
   readonly humanFinalAssessmentStatus: "ASSESSED";
   readonly humanFinalScore: ScoreValue;
   readonly evidencePages: readonly number[];
-  readonly assessabilityOverride: AssessabilityOverrideRule | null;
   readonly actorId: string;
   readonly occurredAt: string;
   readonly createdAt: string;
@@ -548,6 +541,21 @@ export interface GitHubIssueLinkEventRecord {
   readonly issueNumber: number;
   readonly issueUrl: string;
   readonly actorId: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+  readonly lastSyncedAt: string;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
+export interface GitHubIssueDeliveryReservationRecord {
+  readonly recordType: "github_issue_delivery_reservation";
+  readonly schemaVersion: "github-issue-delivery-reservation-v1";
+  readonly reservationId: string;
+  readonly gapCardId: string;
+  readonly idempotencyKey: string;
+  readonly confirmedByWorkflowEventId: string;
+  readonly requestedByActorId: string;
   readonly occurredAt: string;
   readonly createdAt: string;
   readonly lastSyncedAt: string;

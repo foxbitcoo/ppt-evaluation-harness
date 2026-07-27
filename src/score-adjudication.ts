@@ -1,6 +1,5 @@
 import type {
   AdjudicationEventRecord,
-  AssessabilityOverrideRule,
   ArtifactScoreTableRecord,
   EffectiveArtifactScorecard,
   EffectiveDimensionScore,
@@ -23,7 +22,6 @@ export interface AdjudicateDimensionCommand {
   readonly reason: string;
   readonly priorAdjudicationEventId: string | null;
   readonly evidencePages?: readonly number[];
-  readonly assessabilityOverride?: AssessabilityOverrideRule;
 }
 
 export interface RecordScoreReviewCommand {
@@ -61,6 +59,74 @@ function requireNonBlank(value: string, field: string): void {
   }
 }
 
+function causalAdjudicationHead(
+  events: readonly AdjudicationEventRecord[],
+): AdjudicationEventRecord | undefined {
+  if (events.length === 0) {
+    return undefined;
+  }
+  const byId = new Map(
+    events.map((event) => [event.adjudicationEventId, event]),
+  );
+  if (byId.size !== events.length) {
+    throw new Error(
+      "Invalid adjudication causal history: duplicate event ID",
+    );
+  }
+  const referencedParents = new Set<string>();
+  for (const event of events) {
+    const prior = event.priorAdjudicationEventId;
+    if (prior === null) {
+      continue;
+    }
+    if (!byId.has(prior)) {
+      throw new Error(
+        `Invalid adjudication causal history: missing parent ${prior}`,
+      );
+    }
+    if (referencedParents.has(prior)) {
+      throw new Error(
+        `Invalid adjudication causal history: fork at ${prior}`,
+      );
+    }
+    referencedParents.add(prior);
+  }
+  const heads = events.filter(
+    (event) => !referencedParents.has(event.adjudicationEventId),
+  );
+  if (heads.length !== 1) {
+    throw new Error(
+      "Invalid adjudication causal history: expected one causal head",
+    );
+  }
+  const head = heads[0];
+  if (head === undefined) {
+    throw new Error(
+      "Invalid adjudication causal history: missing causal head",
+    );
+  }
+  const visited = new Set<string>();
+  let current: AdjudicationEventRecord | undefined = head;
+  while (current !== undefined) {
+    if (visited.has(current.adjudicationEventId)) {
+      throw new Error(
+        "Invalid adjudication causal history: cycle detected",
+      );
+    }
+    visited.add(current.adjudicationEventId);
+    current =
+      current.priorAdjudicationEventId === null
+        ? undefined
+        : byId.get(current.priorAdjudicationEventId);
+  }
+  if (visited.size !== events.length) {
+    throw new Error(
+      "Invalid adjudication causal history: disconnected events",
+    );
+  }
+  return head;
+}
+
 function effectiveScorecard(
   score: Awaited<
     ReturnType<AdjudicationEventTablePort["loadArtifactScoreByScorecardId"]>
@@ -68,16 +134,32 @@ function effectiveScorecard(
   events: readonly AdjudicationEventRecord[],
   reviews: readonly ReviewEventRecord[],
 ): EffectiveArtifactScorecard {
+  const scoreDimensions = new Set(
+    score.scorecard.dimensions.map(({ dimension }) => dimension),
+  );
+  if (events.some((event) => !scoreDimensions.has(event.dimension))) {
+    throw new Error(
+      "Invalid adjudication causal history: unknown score dimension",
+    );
+  }
   const dimensions: EffectiveDimensionScore[] =
     score.scorecard.dimensions.map((modelOriginal) => {
       const matching = events.filter(
-        (event) =>
-          event.dimension === modelOriginal.dimension &&
-          event.modelOriginalAssessmentStatus ===
-            modelOriginal.assessmentStatus &&
-          event.modelOriginalScore === modelOriginal.value,
+        (event) => event.dimension === modelOriginal.dimension,
       );
-      const latest = matching[matching.length - 1];
+      if (
+        matching.some(
+          (event) =>
+            event.modelOriginalAssessmentStatus !==
+              modelOriginal.assessmentStatus ||
+            event.modelOriginalScore !== modelOriginal.value,
+        )
+      ) {
+        throw new Error(
+          "Invalid adjudication causal history: model-original lineage mismatch",
+        );
+      }
+      const latest = causalAdjudicationHead(matching);
       const acceptedByHuman = reviews.some((review) =>
         review.reviewedDimensions.includes(modelOriginal.dimension),
       );
@@ -164,30 +246,11 @@ export function createScoreAdjudicationService({
         );
       }
       if (
-        (modelOriginal.assessmentStatus !== "ASSESSED" ||
-          modelOriginal.value === null) &&
-        !(
-          command.dimension ===
-            "factual_accuracy_and_content_quality" &&
-          command.assessabilityOverride?.rule ===
-            "reviewed_reference_pack_available" &&
-          /^sha256:[a-f0-9]{64}$/.test(
-            command.assessabilityOverride.referencePackHash,
-          ) &&
-          command.assessabilityOverride.evidenceReference.trim().length >
-            0
-        )
+        modelOriginal.assessmentStatus !== "ASSESSED" ||
+        modelOriginal.value === null
       ) {
         throw new Error(
-          "Human adjudication cannot invent assessability without an allowed domain rule",
-        );
-      }
-      if (
-        modelOriginal.assessmentStatus === "ASSESSED" &&
-        command.assessabilityOverride !== undefined
-      ) {
-        throw new Error(
-          "Assessability override is only valid for a NOT_ASSESSABLE factual score",
+          "Human adjudication cannot invent assessability without an allowed domain rule; create a new Scorecard that freezes the reviewed Reference Pack",
         );
       }
       const evidencePages =
@@ -220,8 +283,6 @@ export function createScoreAdjudicationService({
         humanFinalAssessmentStatus: "ASSESSED",
         humanFinalScore: command.humanFinalScore,
         evidencePages: [...evidencePages],
-        assessabilityOverride:
-          command.assessabilityOverride ?? null,
         actorId: command.actorId,
         occurredAt: command.occurredAt,
         createdAt: command.occurredAt,

@@ -465,13 +465,13 @@ const DIMENSION_SPECS: Readonly<
     label: "叙事与受众适配",
     hypothesis: "outline_or_content",
     experiment: "冻结视觉模板，A/B 测试叙事顺序和受众约束注入。",
-    metric: "盲评叙事维度提高至少 1 个等级，关键页阅读路径无回退。",
+    metric: "按冻结的 evaluation_mode: non_blind 协议，叙事维度提高至少 1 个等级，关键页阅读路径无回退。",
   },
   visual_aesthetics_and_professional_finish: {
     label: "视觉美感与专业完成度",
     hypothesis: "layout_selection",
     experiment: "冻结内容，A/B 测试模板检索与视觉风格选择。",
-    metric: "盲评视觉完成度提高至少 1 个等级，静态一致性门禁保持通过。",
+    metric: "按冻结的 evaluation_mode: non_blind 协议，视觉完成度提高至少 1 个等级，静态一致性门禁保持通过。",
   },
   layout_hierarchy_and_readability: {
     label: "版式层级与可读性",

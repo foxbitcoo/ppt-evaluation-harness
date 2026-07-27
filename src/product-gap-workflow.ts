@@ -1,4 +1,5 @@
 import type {
+  GitHubIssueDeliveryReservationRecord,
   GitHubIssueLinkEventRecord,
   LinkedGitHubIssue,
   ProductGapCardWorkflowEventRecord,
@@ -14,7 +15,11 @@ export interface GitHubIssueCreateCommand {
 }
 
 export interface GitHubIssuePort {
-  createIssue(
+  /**
+   * Atomically creates or returns the one Issue bound to idempotencyKey.
+   * Implementations must preserve this guarantee across process restarts.
+   */
+  createOrGetIssue(
     command: GitHubIssueCreateCommand,
   ): Promise<LinkedGitHubIssue>;
 }
@@ -194,8 +199,24 @@ export function createProductGapCardWorkflowService({
           );
         }
         const idempotencyKey = `product-gap-card:${command.gapCardId}`;
-        const githubIssue = await githubIssues.createIssue({
+        const reservation: GitHubIssueDeliveryReservationRecord = {
+          recordType: "github_issue_delivery_reservation",
+          schemaVersion: "github-issue-delivery-reservation-v1",
+          reservationId: `github-reservation:${command.gapCardId}`,
+          gapCardId: command.gapCardId,
           idempotencyKey,
+          confirmedByWorkflowEventId: confirmationId,
+          requestedByActorId: command.actorId,
+          occurredAt: command.occurredAt,
+          createdAt: command.occurredAt,
+          lastSyncedAt: command.occurredAt,
+          provenance: view.gapCard.provenance,
+          environmentOrigin: view.gapCard.environmentOrigin,
+        };
+        const durableReservation =
+          await feishu.reserveGitHubIssueDelivery(reservation);
+        const githubIssue = await githubIssues.createOrGetIssue({
+          idempotencyKey: durableReservation.idempotencyKey,
           title: `[Product Gap] ${view.gapCard.dimension}`,
           body: issueBody(view),
           labels: ["needs-triage"],
@@ -212,8 +233,9 @@ export function createProductGapCardWorkflowService({
           schemaVersion: "github-issue-link-event-v1",
           linkEventId: `github-link:${command.gapCardId}`,
           gapCardId: command.gapCardId,
-          idempotencyKey,
-          confirmedByWorkflowEventId: confirmationId,
+          idempotencyKey: durableReservation.idempotencyKey,
+          confirmedByWorkflowEventId:
+            durableReservation.confirmedByWorkflowEventId,
           issueNumber: githubIssue.issueNumber,
           issueUrl: githubIssue.issueUrl,
           actorId: command.actorId,
