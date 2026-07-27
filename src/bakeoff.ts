@@ -46,7 +46,10 @@ import {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
 } from "./fixtures/volcano-case.ts";
-import { renderStaticArtifact } from "./mock-wps.ts";
+import {
+  renderStaticArtifact,
+  resolveHarnessProductAdapterExecutor,
+} from "./mock-wps.ts";
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import { scoreRenderedArtifact } from "./mock-score.ts";
@@ -55,7 +58,6 @@ import {
   type OpenAiJudgePort,
 } from "./openai-judge.ts";
 import {
-  isProductAdapterExecutorFactory,
   parseAdapterExecutionConfiguration,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
@@ -554,21 +556,11 @@ function snapshotProductSelections(
         parseAdapterExecutionConfiguration(
           executionConfigurationPackage,
         );
-      const executorFactory = adapter.executorFactory;
-      if (!isProductAdapterExecutorFactory(executorFactory)) {
-        throw new Error(
-          `Product Adapter requires a trusted executor factory: ${productPackage.packageId}`,
-        );
-      }
-      Object.freeze(adapter);
       const selectedExecute =
-        executorFactory(executionConfiguration);
-      if (typeof selectedExecute !== "function") {
-        throw new Error(
-          `Product Adapter executor factory is invalid: ${productPackage.packageId}`,
+        resolveHarnessProductAdapterExecutor(
+          implementationPackage,
+          executionConfiguration,
         );
-      }
-      Object.freeze(selectedExecute);
       const executionEntrypointDigest = sha256Bytes(
         new TextEncoder().encode(selectedExecute.toString()),
       );

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { Artifact, EvaluationCaseRecord } from "./domain.ts";
 import type {
   BlockReason,
@@ -53,54 +55,10 @@ export interface ProductAdapterExecutionConfiguration {
     "product-adapter-execution-configuration-v1";
 }
 
-const PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND = Symbol(
-  "ProductAdapterExecutorFactory",
-);
-
 export type ProductAdapterExecutor = (
   this: void,
   command: ProductRunCommand,
 ) => Promise<Artifact | ProductAttemptResult>;
-
-export type ProductAdapterExecutorFactory = {
-  (
-    this: void,
-    executionConfiguration: ProductAdapterExecutionConfiguration,
-  ): ProductAdapterExecutor;
-  readonly [PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND]:
-    "product-adapter-executor-factory-v1";
-};
-
-export function defineProductAdapterExecutorFactory(
-  factory: (
-    this: void,
-    executionConfiguration: ProductAdapterExecutionConfiguration,
-  ) => ProductAdapterExecutor,
-): ProductAdapterExecutorFactory {
-  Object.defineProperty(
-    factory,
-    PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND,
-    {
-      configurable: false,
-      enumerable: false,
-      value: "product-adapter-executor-factory-v1",
-      writable: false,
-    },
-  );
-  return Object.freeze(factory) as ProductAdapterExecutorFactory;
-}
-
-export function isProductAdapterExecutorFactory(
-  value: unknown,
-): value is ProductAdapterExecutorFactory {
-  return (
-    typeof value === "function" &&
-    (
-      value as Partial<ProductAdapterExecutorFactory>
-    )[PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND] ===
-      "product-adapter-executor-factory-v1"
-  );
-}
 
 export function parseAdapterExecutionConfiguration(
   executionConfigurationPackage: ProductAdapterImplementationPackage,
@@ -111,6 +69,18 @@ export function parseAdapterExecutionConfiguration(
   ) {
     throw new Error(
       "Adapter execution configuration package has an invalid size",
+    );
+  }
+  const actualContentHash =
+    `sha256:${createHash("sha256")
+      .update(executionConfigurationPackage.content)
+      .digest("hex")}` as const;
+  if (
+    actualContentHash !==
+    executionConfigurationPackage.contentHash
+  ) {
+    throw new Error(
+      "Adapter execution configuration package hash mismatch",
     );
   }
   let decoded: string;
@@ -179,5 +149,4 @@ export interface ProductAdapterPort {
   readonly productPackage: ProductPackageSnapshot;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
-  readonly executorFactory: ProductAdapterExecutorFactory;
 }

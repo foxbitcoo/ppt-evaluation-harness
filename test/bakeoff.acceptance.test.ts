@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -7,19 +6,12 @@ import {
   MockWpsProductAdapter,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
-  defineProductAdapterExecutorFactory,
   type Artifact,
   type BakeoffJobOutcome,
   type ArtifactScorecard,
   type RenderManifest,
   type ProductAdapterPort,
-  type ProductAdapterExecutor,
-  type ProductRunCommand,
 } from "../src/index.ts";
-
-function testExecutorFactory(executor: ProductAdapterExecutor) {
-  return defineProductAdapterExecutorFactory(() => executor);
-}
 
 type CapturedBakeoffOutcome = BakeoffJobOutcome & {
   readonly artifact: Artifact;
@@ -320,7 +312,7 @@ test("the Feishu domain tables keep Artifact capture independent from scoring an
   assert.match(parentRecord?.reportUrl ?? "", /^mock-feishu:\/\//);
 });
 
-test("the public product adapter port can be replaced without changing the Bakeoff Job seam", async () => {
+test("the public product adapter descriptor can be versioned without changing the Bakeoff Job seam", async () => {
   const fixedMockAdapter = new MockWpsProductAdapter();
   const replacementAdapter: ProductAdapterPort = {
     implementationPackage: fixedMockAdapter.implementationPackage,
@@ -332,13 +324,6 @@ test("the public product adapter port can be replaced without changing the Bakeo
       displayName: "Replacement Playwright-ready WPS Adapter",
       adapterVersion: "replacement-test@1",
     },
-    executorFactory: testExecutorFactory(async (command): Promise<Artifact> => {
-      const artifact = await fixedMockAdapter.execute(command);
-      return {
-        ...artifact,
-        filename: "MOCK-replacement-wps-volcano-16.pptx",
-      };
-    }),
   };
   const feishu = new InMemoryFeishuProjection();
 
@@ -359,26 +344,13 @@ test("the public product adapter port can be replaced without changing the Bakeo
     feishu.snapshot().runRecordTable[1]?.productPackageId,
     "MOCK-replacement-package-v1",
   );
-  assert.equal(
-    outcome.artifact.filename,
-    "MOCK-replacement-wps-volcano-16.pptx",
-  );
+  assert.equal(outcome.artifact.filename, "MOCK-wps-volcano-16.pptx");
 });
 
 test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match its content hash", async () => {
-  const fixedMockAdapter = new MockWpsProductAdapter();
-  const tamperingAdapter: ProductAdapterPort = {
-    implementationPackage: fixedMockAdapter.implementationPackage,
-    executionConfigurationPackage:
-      fixedMockAdapter.executionConfigurationPackage,
-    productPackage: fixedMockAdapter.productPackage,
-    executorFactory: testExecutorFactory(async (command): Promise<Artifact> => {
-      const artifact = await fixedMockAdapter.execute(command);
-      const content = artifact.content.slice();
-      content[100] = (content[100] ?? 0) ^ 0xff;
-      return { ...artifact, content };
-    }),
-  };
+  const tamperingAdapter = new MockWpsProductAdapter({
+    scenario: "tampered_artifact",
+  });
   const feishu = new InMemoryFeishuProjection();
 
   await assert.rejects(
@@ -398,30 +370,9 @@ test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match it
 
 test("Artifact byte changes with a valid new hash drive new static renders and evidence-based scores", async () => {
   const fixedMockAdapter = new MockWpsProductAdapter();
-  const variantAdapter: ProductAdapterPort = {
-    implementationPackage: fixedMockAdapter.implementationPackage,
-    executionConfigurationPackage:
-      fixedMockAdapter.executionConfigurationPackage,
-    productPackage: {
-      ...fixedMockAdapter.productPackage,
-      packageId: "MOCK-content-variant-package-v1",
-    },
-    executorFactory: testExecutorFactory(async (command): Promise<Artifact> => {
-      const artifact = await fixedMockAdapter.execute(command);
-      const original = Buffer.from("火山为什么会喷发");
-      const replacement = Buffer.from("岩浆为什么会上升");
-      assert.equal(original.byteLength, replacement.byteLength);
-      const content = artifact.content.slice();
-      const firstMatch = Buffer.from(content).indexOf(original);
-      assert.notEqual(firstMatch, -1);
-      content.set(replacement, firstMatch);
-      return {
-        ...artifact,
-        content,
-        contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
-      };
-    }),
-  };
+  const variantAdapter = new MockWpsProductAdapter({
+    scenario: "content_variant",
+  });
   const fixedOutcome = await createBakeoffHarness({
     feishu: new InMemoryFeishuProjection(),
     productAdapter: fixedMockAdapter,

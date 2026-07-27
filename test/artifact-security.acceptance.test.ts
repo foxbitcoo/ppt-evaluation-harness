@@ -17,7 +17,6 @@ import {
   createRetentionService,
   createRunSpecificationVault,
   createScoreAdjudicationService,
-  defineProductAdapterExecutorFactory,
   InMemoryTombstoneLedger,
   approvedEgressAuthorizationHash,
   assertApprovedEgressAuthorizationCurrent,
@@ -28,10 +27,10 @@ import {
   sha256Bytes,
   type Artifact,
   type ArtifactCaptureJournalPort,
+  type AttemptDeadlinePort,
   type ClockPort,
   type EgressAuthorizationPort,
   type ImmutableBlobStorePort,
-  type ProductAdapterExecutor,
   type ProductAdapterPort,
   type RenderManifest,
   type RunSpecificationVault,
@@ -52,26 +51,6 @@ function testAdapterImplementationPackage(packageName: string) {
     contentHash: sha256Bytes(content),
     content,
   } as const;
-}
-
-function testAdapterExecutionConfigurationPackage(name: string) {
-  const content = new TextEncoder().encode(
-    JSON.stringify({
-      adapterKind: "test",
-      scenario: name,
-      schemaVersion:
-        "product-adapter-execution-configuration-v1",
-    }),
-  );
-  return {
-    packageName: `test-execution-configuration:${name}`,
-    contentHash: sha256Bytes(content),
-    content,
-  } as const;
-}
-
-function testExecutorFactory(executor: ProductAdapterExecutor) {
-  return defineProductAdapterExecutorFactory(() => executor);
 }
 
 const APPROVED_EGRESS: EgressAuthorizationPort = {
@@ -1013,11 +992,17 @@ test("a successful late-joining Artifact capture retains its shared blob when th
 
 test("Bakeoff fails closed before a vendor call when its call-boundary egress authorization is denied", async () => {
   let vendorCalls = 0;
+  const delegate = new MockWpsProductAdapter();
+  const attemptDeadline: AttemptDeadlinePort = {
+    async run() {
+      vendorCalls += 1;
+      throw new Error("vendor must not be called");
+    },
+  };
   const adapter: ProductAdapterPort = {
-    implementationPackage:
-      testAdapterImplementationPackage("denied-vendor-adapter-test"),
+    implementationPackage: delegate.implementationPackage,
     executionConfigurationPackage:
-      testAdapterExecutionConfigurationPackage("denied-vendor"),
+      delegate.executionConfigurationPackage,
     productPackage: {
       packageId: "MOCK-denied-vendor-package-v1",
       vendorId: "denied-vendor",
@@ -1032,10 +1017,6 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
         subprocessors: [],
       },
     },
-    executorFactory: testExecutorFactory(async () => {
-      vendorCalls += 1;
-      throw new Error("vendor must not be called");
-    }),
   };
   const authorization: EgressAuthorizationPort = {
     async authorize(request) {
@@ -1059,6 +1040,7 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
       feishu,
       productAdapters: [adapter],
       egressAuthorization: authorization,
+      attemptDeadline,
     }).startBakeoffJob({
       environment: "test",
       caseId: VOLCANO_CASE_ID,
@@ -1253,33 +1235,32 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     /protocol mismatch/i,
   );
   const changedAdapterDelegate = new MockWpsProductAdapter();
-  await assert.rejects(
-    createBakeoffHarness({
-      feishu,
-      productAdapters: [
-        {
-          implementationPackage: testAdapterImplementationPackage(
-            "changed-adapter-implementation-test",
-          ),
-          executionConfigurationPackage:
-            changedAdapterDelegate.executionConfigurationPackage,
-          productPackage: changedAdapterDelegate.productPackage,
-          executorFactory: testExecutorFactory((command) =>
-            changedAdapterDelegate.execute(command),
-          ),
-        },
-      ],
-      egressAuthorization: authorization,
-      egressAudit,
-      artifactVault,
-      runSpecificationVault,
-      payloadInventory,
-      specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_CASE_ID,
-    }),
-    /protocol mismatch/i,
+  assert.throws(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapters: [
+          {
+            implementationPackage: testAdapterImplementationPackage(
+              "changed-adapter-implementation-test",
+            ),
+            executionConfigurationPackage:
+              changedAdapterDelegate.executionConfigurationPackage,
+            productPackage: changedAdapterDelegate.productPackage,
+          },
+        ],
+        egressAuthorization: authorization,
+        egressAudit,
+        artifactVault,
+        runSpecificationVault,
+        payloadInventory,
+        specCommitSha:
+          "9e68de5801bc14f00c187336000c83ce8cc37efa",
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /implementation package|protocol mismatch/i,
   );
   await assert.rejects(
     createBakeoffHarness({
@@ -1915,24 +1896,24 @@ test("a tombstone racing a long vendor run prevents the final Feishu projection 
   const release = new Promise<void>((resolve) => {
     releaseVendor = resolve;
   });
-  const adapter: ProductAdapterPort = {
-    implementationPackage:
-      testAdapterImplementationPackage("delayed-adapter-test"),
-    executionConfigurationPackage:
-      delegate.executionConfigurationPackage,
-    productPackage: delegate.productPackage,
-    executorFactory: testExecutorFactory(async (command) => {
+  const attemptDeadline: AttemptDeadlinePort = {
+    async run(operation) {
       signalStarted();
       await release;
-      return delegate.execute(command);
-    }),
+      return {
+        timedOut: false,
+        value: await operation(new AbortController().signal),
+        elapsedMs: 0,
+      };
+    },
   };
   const tombstones = new InMemoryTombstoneLedger();
   const inventory = new InMemoryPayloadInventory(tombstones);
   const feishu = new InMemoryFeishuProjection();
   const pending = createBakeoffHarness({
     feishu,
-    productAdapters: [adapter],
+    productAdapters: [delegate],
+    attemptDeadline,
     egressAuthorization: APPROVED_EGRESS,
     tombstones,
     payloadInventory: inventory,

@@ -143,13 +143,10 @@ export {
   type MockAdapterScenario,
 } from "./mock-wps.ts";
 export {
-  defineProductAdapterExecutorFactory,
-  isProductAdapterExecutorFactory,
   parseAdapterExecutionConfiguration,
   type ArtifactCandidate,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
-  type ProductAdapterExecutorFactory,
   type ProductAttemptResult,
   type ProductAdapterPort,
   type ProductPackageSnapshot,
