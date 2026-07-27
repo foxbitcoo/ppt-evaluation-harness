@@ -43,6 +43,17 @@ export interface ReportDocumentPort {
   createReport(draft: FeishuReportDraft): Promise<FeishuReport>;
 }
 
+export interface ComparisonReportSource {
+  readonly job: RunRecord;
+  readonly vendorRuns: readonly RunRecord[];
+  readonly artifactScores: readonly ArtifactScoreTableRecord[];
+}
+
+export interface ComparisonReportSourcePort {
+  loadComparisonReportSource(jobId: string): Promise<ComparisonReportSource>;
+  artifactPageEvidenceUrl(artifactId: string, pageNumber: number): string;
+}
+
 export interface FeishuProjectionPort
   extends EvaluationCaseTablePort,
     RunRecordTablePort,
@@ -50,7 +61,8 @@ export interface FeishuProjectionPort
     ArtifactScoreTablePort,
     ComparisonTablePort,
     ProductGapCardTablePort,
-    ReportDocumentPort {
+    ReportDocumentPort,
+    ComparisonReportSourcePort {
   readonly targetEnvironment: "test" | "production";
 }
 
@@ -170,11 +182,35 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
 
   async appendComparison(record: ComparisonRecord): Promise<void> {
     this.#assertAllowed(record.environmentOrigin, "Comparison");
+    const existing = this.#productGapCardTable.find(
+      (candidate) =>
+        candidate.recordType === "comparison" &&
+        candidate.comparisonId === record.comparisonId,
+    );
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) !== JSON.stringify(record)) {
+        throw new Error(
+          `Comparison identity conflict: ${record.comparisonId}`,
+        );
+      }
+      return;
+    }
     this.#productGapCardTable.push(record);
   }
 
   async appendProductGapCard(record: ProductGapCardRecord): Promise<void> {
     this.#assertAllowed(record.environmentOrigin, "Product gap comparison");
+    const existing = this.#productGapCardTable.find(
+      (candidate) =>
+        candidate.recordType === "gap_card" &&
+        candidate.gapCardId === record.gapCardId,
+    );
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) !== JSON.stringify(record)) {
+        throw new Error(`Gap Card identity conflict: ${record.gapCardId}`);
+      }
+      return;
+    }
     this.#productGapCardTable.push(record);
   }
 
@@ -184,8 +220,69 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       ...draft,
       url: `mock-feishu://documents/${draft.reportId}`,
     };
+    const existing = this.#reports.find(
+      (candidate) => candidate.reportId === report.reportId,
+    );
+    if (existing !== undefined) {
+      if (JSON.stringify(existing) !== JSON.stringify(report)) {
+        throw new Error(`Report identity conflict: ${report.reportId}`);
+      }
+      return structuredClone(existing);
+    }
     this.#reports.push(report);
     return structuredClone(report);
+  }
+
+  async loadComparisonReportSource(
+    jobId: string,
+  ): Promise<ComparisonReportSource> {
+    const job = this.#runRecordTable.find(
+      (record) =>
+        record.recordType === "bakeoff_job" && record.jobId === jobId,
+    );
+    if (job === undefined) {
+      throw new Error(`Bakeoff Job record not found: ${jobId}`);
+    }
+    const cloneRun = (record: RunRecord): RunRecord => ({
+      ...structuredClone(record),
+      environmentOrigin: record.environmentOrigin,
+    });
+    return {
+      job: cloneRun(job),
+      vendorRuns: this.#runRecordTable
+        .filter(
+          (record) =>
+            record.recordType === "vendor_run" && record.jobId === jobId,
+        )
+        .map(cloneRun),
+      artifactScores: this.#artifactScoreTable
+        .filter((record) => record.jobId === jobId)
+        .map((record) => ({
+          ...structuredClone(record),
+          environmentOrigin: record.environmentOrigin,
+        })),
+    };
+  }
+
+  artifactPageEvidenceUrl(
+    artifactId: string,
+    pageNumber: number,
+  ): string {
+    const captured = this.#capturedArtifactTable.find(
+      (record) => record.artifactId === artifactId,
+    );
+    if (
+      captured === undefined ||
+      pageNumber < 1 ||
+      pageNumber > captured.artifact.pageCount
+    ) {
+      throw new Error(
+        `Artifact page evidence not found: ${artifactId}#${pageNumber}`,
+      );
+    }
+    return `mock-feishu://artifacts/${encodeURIComponent(
+      artifactId,
+    )}/pages/${pageNumber}`;
   }
 
   snapshot(): FeishuProjectionSnapshot {

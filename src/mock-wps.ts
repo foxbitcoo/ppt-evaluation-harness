@@ -182,11 +182,14 @@ function storedZip(entries: readonly ZipEntry[]): Uint8Array {
   );
 }
 
-function mockPptx(): Uint8Array {
+function mockPptx(
+  slides: readonly MockSlideFixture[],
+  application: string,
+): Uint8Array {
   const entries: ZipEntry[] = [
     {
       name: "[Content_Types].xml",
-      content: textEncoder.encode(contentTypes(MOCK_WPS_VOLCANO_SLIDES.length)),
+      content: textEncoder.encode(contentTypes(slides.length)),
     },
     {
       name: "_rels/.rels",
@@ -199,21 +202,21 @@ function mockPptx(): Uint8Array {
     {
       name: "docProps/app.xml",
       content: textEncoder.encode(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>MOCK WPS AI PPT</Application><Slides>16</Slides></Properties>`),
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><Application>${escapeXml(application)}</Application><Slides>${slides.length}</Slides></Properties>`),
     },
     {
       name: "ppt/presentation.xml",
       content: textEncoder.encode(
-        presentationXml(MOCK_WPS_VOLCANO_SLIDES.length),
+        presentationXml(slides.length),
       ),
     },
     {
       name: "ppt/_rels/presentation.xml.rels",
       content: textEncoder.encode(
-        presentationRelationships(MOCK_WPS_VOLCANO_SLIDES.length),
+        presentationRelationships(slides.length),
       ),
     },
-    ...MOCK_WPS_VOLCANO_SLIDES.map((slide, index) => ({
+    ...slides.map((slide, index) => ({
       name: `ppt/slides/slide${index + 1}.xml`,
       content: textEncoder.encode(slideXml(slide, index + 1)),
     })),
@@ -328,8 +331,10 @@ function captureMockArtifact(
   runId: string,
   artifactId: string,
   filename: string,
+  slides: readonly MockSlideFixture[] = MOCK_WPS_VOLCANO_SLIDES,
+  application = "MOCK WPS AI PPT",
 ): Artifact {
-  const content = mockPptx();
+  const content = mockPptx(slides, application);
   return {
     artifactId,
     runId,
@@ -345,6 +350,56 @@ function captureMockArtifact(
     content,
   };
 }
+
+const MOCK_QWEN_VOLCANO_SLIDES = MOCK_WPS_VOLCANO_SLIDES.map(
+  (slide, index): MockSlideFixture => {
+    if (index === 7) {
+      return {
+        ...slide,
+        body:
+          "本页把形成条件、岩浆来源、上升通道、气体析出、压力积累、喷发物类型、风险区、监测信号、避险动作和知识迁移集中在一段长文本中，信息虽完整但静态自读时扫描负担明显增加，需要重新拆分层级与图文关系。",
+      };
+    }
+    if (index === 15) {
+      return {
+        title: "课后思考",
+        body: "用三句话说明岩浆、气体与喷发之间的关系。",
+      };
+    }
+    return slide;
+  },
+);
+
+const MOCK_DOUBAO_VOLCANO_SLIDES = MOCK_WPS_VOLCANO_SLIDES.map(
+  (slide, index): MockSlideFixture => {
+    if (index === 0) {
+      return {
+        title: "火山入门",
+        body: slide.body,
+      };
+    }
+    if (index === 1) {
+      return {
+        title: "学习路径",
+        body: slide.body,
+      };
+    }
+    if (index === 7) {
+      return {
+        ...slide,
+        body:
+          "这一页连续罗列火山类型、构造位置、岩浆性质、气体含量、喷发方式、灾害影响、监测手段、应急措施和课后问题，缺少适合静态自读的分组与视觉停顿，读者需要反复回看才能建立层级。",
+      };
+    }
+    if (index === 8) {
+      return {
+        title: "喷发前的变化",
+        body: "岩浆继续上升，气体逐渐析出并推动喷发过程。",
+      };
+    }
+    return slide;
+  },
+);
 
 export type MockAdapterScenario =
   | "success"
@@ -552,6 +607,8 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
         command.runId,
         MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].artifactId,
         MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].filename,
+        MOCK_QWEN_VOLCANO_SLIDES,
+        "MOCK Qwen PPT",
       ),
       command.attemptSeq,
     );
@@ -585,6 +642,8 @@ export class MockDoubaoProductAdapter implements ProductAdapterPort {
         command.runId,
         MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].artifactId,
         MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].filename,
+        MOCK_DOUBAO_VOLCANO_SLIDES,
+        "MOCK Doubao PPT",
       ),
       command.attemptSeq,
     );

@@ -12,6 +12,7 @@ import {
   VENDOR_GENERATION_TIMEOUT_MS,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
+  createComparisonReportService,
   type ArtifactScoreTableRecord,
   type AttemptDeadlinePort,
   type ComparisonRecord,
@@ -167,42 +168,44 @@ test("the Feishu projections preserve stable Case, Run, Artifact, score, and pro
       },
     ],
   );
+  const comparisonRecords = projection.productGapCardTable.filter(
+    (record): record is ComparisonRecord =>
+      record.recordType === "comparison",
+  );
+  const gapCardRecords = projection.productGapCardTable.filter(
+    (record): record is ProductGapCardRecord =>
+      record.recordType === "gap_card",
+  );
   assert.deepEqual(
-    projection.productGapCardTable.map((record) => ({
-      recordType: record.recordType,
-      recordId:
-        record.recordType === "comparison"
-          ? record.comparisonId
-          : record.gapCardId,
-      caseId: record.caseId,
-      jobId: record.jobId,
-    })),
+    comparisonRecords.map(
+      ({ comparisonId, caseId, jobId }) => ({
+        comparisonId,
+        caseId,
+        jobId,
+      }),
+    ),
     [
       {
-        recordType: "comparison",
-        recordId: "MOCK-comparison-wps-qwen-volcano-v1",
+        comparisonId: "MOCK-comparison-wps-qwen-volcano-v1",
         caseId: VOLCANO_CASE_ID,
         jobId: "MOCK-job-volcano-v1",
       },
       {
-        recordType: "gap_card",
-        recordId: "MOCK-gap-wps-qwen-volcano-v1",
-        caseId: VOLCANO_CASE_ID,
-        jobId: "MOCK-job-volcano-v1",
-      },
-      {
-        recordType: "comparison",
-        recordId: "MOCK-comparison-wps-doubao-volcano-v1",
-        caseId: VOLCANO_CASE_ID,
-        jobId: "MOCK-job-volcano-v1",
-      },
-      {
-        recordType: "gap_card",
-        recordId: "MOCK-gap-wps-doubao-volcano-v1",
+        comparisonId: "MOCK-comparison-wps-doubao-volcano-v1",
         caseId: VOLCANO_CASE_ID,
         jobId: "MOCK-job-volcano-v1",
       },
     ],
+  );
+  assert.equal(gapCardRecords.length, 3);
+  assert.ok(
+    gapCardRecords.every(
+      ({ gapCardId, caseId, jobId, causeAttribution }) =>
+        /^gap-[a-f0-9]{16}$/.test(gapCardId) &&
+        caseId === VOLCANO_CASE_ID &&
+        jobId === "MOCK-job-volcano-v1" &&
+        causeAttribution === "HYPOTHESIS",
+    ),
   );
 });
 
@@ -822,25 +825,21 @@ test("Comparison and Gap Card are separate neutral lineage records without a per
       },
     ],
   );
-  assert.deepEqual(
-    gapCards.map(({ gapCardId, comparisonId }) => ({
-      gapCardId,
-      comparisonId,
-    })),
-    [
-      {
-        gapCardId: "MOCK-gap-wps-qwen-volcano-v1",
-        comparisonId: "MOCK-comparison-wps-qwen-volcano-v1",
-      },
-      {
-        gapCardId: "MOCK-gap-wps-doubao-volcano-v1",
-        comparisonId: "MOCK-comparison-wps-doubao-volcano-v1",
-      },
-    ],
+  assert.equal(gapCards.length, 3);
+  assert.ok(
+    gapCards.every(
+      ({ comparisonId, causeAttribution, leftEvidence, rightEvidence }) =>
+        comparisons.some(
+          (comparison) => comparison.comparisonId === comparisonId,
+        ) &&
+        causeAttribution === "HYPOTHESIS" &&
+        leftEvidence.links.length > 0 &&
+        rightEvidence.links.length > 0,
+    ),
   );
 
   const competitorOnlyFeishu = new InMemoryFeishuProjection();
-  await createBakeoffHarness({
+  const competitorBakeoff = await createBakeoffHarness({
     feishu: competitorOnlyFeishu,
     productAdapters: [
       new MockQwenProductAdapter(),
@@ -850,12 +849,19 @@ test("Comparison and Gap Card are separate neutral lineage records without a per
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
-  const competitorComparison = competitorOnlyFeishu
-    .snapshot()
-    .productGapCardTable.find(
-      (record): record is ComparisonRecord =>
-        record.recordType === "comparison",
-    );
+  const [competitorComparison] = (
+    await createComparisonReportService({
+      feishu: competitorOnlyFeishu,
+    }).createReport({
+      jobId: competitorBakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    })
+  ).comparisons;
   assert.equal(competitorComparison?.leftRunId, "MOCK-run-qwen-volcano-v1");
   assert.equal(competitorComparison?.rightRunId, "MOCK-run-doubao-volcano-v1");
 });

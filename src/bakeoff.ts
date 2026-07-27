@@ -13,6 +13,7 @@ import type {
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
+import { createComparisonReportService } from "./comparison-report.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
@@ -820,52 +821,41 @@ export function createBakeoffHarness({
         }
       }
 
-      const leftResult = successful[0];
-      for (const rightResult of successful.slice(1)) {
-        if (leftResult === undefined) break;
-        const leftSlug = vendorSlug(leftResult.productPackage.packageId);
-        const rightSlug = vendorSlug(rightResult.productPackage.packageId);
-        const comparisonId = `MOCK-comparison-${leftSlug}-${rightSlug}-volcano-v1`;
-        await feishu.appendComparison({
-          recordType: "comparison",
-          comparisonId,
-          caseId: command.caseId,
-          jobId: MOCK_SCENARIO.jobId,
-          leftRunId: leftResult.runId,
-          rightRunId: rightResult.runId,
-          leftScorecardId: leftResult.scorecard.scorecardId,
-          rightScorecardId: rightResult.scorecard.scorecardId,
-          provenance: "MOCK",
-          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-        });
-        await feishu.appendProductGapCard({
-          recordType: "gap_card",
-          gapCardId: `MOCK-gap-${leftSlug}-${rightSlug}-volcano-v1`,
-          caseId: command.caseId,
-          jobId: MOCK_SCENARIO.jobId,
-          comparisonId,
-          provenance: "MOCK",
-          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-          workflowState: "draft",
-          causeAttribution: "HYPOTHESIS",
-        });
-      }
-      const report = await feishu.createReport(
-        createMockReportDraft(
-          MOCK_SCENARIO.jobId,
-          jobStatus,
-          results.map((result) => ({
-            product: result.productPackage.displayName,
-            runId: result.runId,
-            status: result.status,
-            stateReason: result.terminalReason,
-            artifact: result.artifact,
-            scorecard: result.scorecard,
-            judgeFailure: result.judgeFailure ?? null,
-          })),
-        ),
+      const successfulPackageIds = new Set(
+        successful.map(({ productPackage }) => productPackage.packageId),
       );
-      await feishu.linkReportToBakeoffJob(MOCK_SCENARIO.jobId, report.url);
+      const hasDefaultComparison =
+        successfulPackageIds.has("MOCK-wps-package-v1") &&
+        (successfulPackageIds.has("MOCK-qwen-package-v1") ||
+          successfulPackageIds.has("MOCK-doubao-package-v1"));
+      let report;
+      if (hasDefaultComparison) {
+        report = (
+          await createComparisonReportService({ feishu }).createReport({
+            jobId: MOCK_SCENARIO.jobId,
+          })
+        ).report;
+      } else {
+        report = await feishu.createReport(
+          createMockReportDraft(
+            MOCK_SCENARIO.jobId,
+            jobStatus,
+            results.map((result) => ({
+              product: result.productPackage.displayName,
+              runId: result.runId,
+              status: result.status,
+              stateReason: result.terminalReason,
+              artifact: result.artifact,
+              scorecard: result.scorecard,
+              judgeFailure: result.judgeFailure ?? null,
+            })),
+          ),
+        );
+        await feishu.linkReportToBakeoffJob(
+          MOCK_SCENARIO.jobId,
+          report.url,
+        );
+      }
 
       return {
         job: {

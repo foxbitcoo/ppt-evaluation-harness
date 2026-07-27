@@ -329,6 +329,56 @@ export interface ComparisonRecord {
   readonly environmentOrigin: EnvironmentOrigin;
 }
 
+export interface ComparisonDimensionResult {
+  readonly dimension: ScoreDimension;
+  readonly assessmentStatus: DimensionAssessmentStatus;
+  readonly leftValue: ScoreValue | null;
+  readonly rightValue: ScoreValue | null;
+  readonly difference: number | null;
+  readonly leftEvidencePages: readonly number[];
+  readonly rightEvidencePages: readonly number[];
+}
+
+export interface DynamicComparisonView extends ComparisonRecord {
+  readonly leftProduct: string;
+  readonly rightProduct: string;
+  readonly dimensions: readonly ComparisonDimensionResult[];
+}
+
+export interface ComparisonPairSelection {
+  readonly leftRunId: string;
+  readonly rightRunId: string;
+}
+
+export interface PageEvidenceLink {
+  readonly pageNumber: number;
+  readonly url: string;
+}
+
+export interface ProductGapEvidence {
+  readonly product: string;
+  readonly runId: string;
+  readonly artifactId: string;
+  readonly scorecardId: string;
+  readonly value: ScoreValue;
+  readonly rationale: string;
+  readonly links: readonly PageEvidenceLink[];
+}
+
+export type PipelineCauseHypothesis =
+  | "outline_or_content"
+  | "layout_selection"
+  | "layout_execution"
+  | "imagery"
+  | "charting"
+  | "rendering_or_export";
+
+export interface CauseHypothesis {
+  readonly label: "HYPOTHESIS";
+  readonly pipelineStage: PipelineCauseHypothesis;
+  readonly statement: string;
+}
+
 export interface ProductGapCardRecord {
   readonly recordType: "gap_card";
   readonly gapCardId: string;
@@ -339,6 +389,31 @@ export interface ProductGapCardRecord {
   readonly environmentOrigin: EnvironmentOrigin;
   readonly workflowState: "draft";
   readonly causeAttribution: "HYPOTHESIS";
+  readonly dimension: ScoreDimension;
+  readonly keyPages: {
+    readonly left: readonly number[];
+    readonly right: readonly number[];
+  };
+  readonly leftEvidence: ProductGapEvidence;
+  readonly rightEvidence: ProductGapEvidence;
+  readonly impact: string;
+  readonly causeHypothesis: CauseHypothesis;
+  readonly proposedExperiment: string;
+  readonly acceptanceMetric: string;
+}
+
+export interface VendorFinding {
+  readonly dimension: ScoreDimension;
+  readonly comparedWith: string;
+  readonly difference: number;
+  readonly evidenceLinks: readonly PageEvidenceLink[];
+}
+
+export interface VendorComparisonSummary {
+  readonly product: string;
+  readonly runId: string;
+  readonly majorStrengths: readonly VendorFinding[];
+  readonly majorIssues: readonly VendorFinding[];
 }
 
 export interface FeishuReportDraft {
@@ -356,6 +431,13 @@ export interface FeishuReportDraft {
 
 export interface FeishuReport extends FeishuReportDraft {
   readonly url: string;
+}
+
+export interface ComparisonReportOutcome {
+  readonly comparisons: readonly DynamicComparisonView[];
+  readonly gapCards: readonly ProductGapCardRecord[];
+  readonly vendorSummaries: readonly VendorComparisonSummary[];
+  readonly report: FeishuReport;
 }
 
 export interface BakeoffJobSummary {
