@@ -1,6 +1,5 @@
 import type {
   EnvironmentOrigin,
-  TestEnvironmentOrigin,
 } from "./environment-origin.ts";
 import type {
   ArtifactPackageManifest,
@@ -15,7 +14,11 @@ import type {
 export const MOCK_PROVENANCE = "MOCK" as const;
 
 export type MockProvenance = typeof MOCK_PROVENANCE;
-export type ProvenanceLabel = MockProvenance | "PRODUCTION";
+export type ProvenanceLabel =
+  | MockProvenance
+  | "PRODUCTION"
+  | "LIVE_PRODUCTION"
+  | "PRODUCTION_REPLAY";
 
 export type RunStatus =
   | "active"
@@ -33,6 +36,12 @@ export type TerminalReason =
   | "payment"
   | "quota"
   | "authentication"
+  | "captcha"
+  | "capacity"
+  | "ui_drift"
+  | "export_failure"
+  | "download_failure"
+  | "task_state_unknown"
   | "human_wait";
 
 export type BlockReason = "payment" | "quota" | "authentication";
@@ -60,6 +69,19 @@ export interface ObservableAttemptEvent {
   readonly observedAt: string;
   readonly writerId: string;
   readonly evidenceRef: string;
+  readonly sourceUrl?: string | null;
+  readonly submissionEvidenceAtCheckpoint?: SubmissionEvidence;
+  readonly vendorTaskId?: string | null;
+  readonly taskStateVersion?: string | null;
+  readonly adapterVersion?: string;
+  readonly artifactId?: string | null;
+  readonly reconciliationObservedState?:
+    | "unknown"
+    | "submitted"
+    | "artifact_ready"
+    | "failed";
+  readonly reconciliationTerminalReason?: TerminalReason;
+  readonly reconciliationArtifactReference?: string | null;
 }
 
 export interface CostEvidence {
@@ -70,7 +92,7 @@ export interface CostEvidence {
 
 export interface EvaluationCaseRecord {
   readonly recordId: string;
-  readonly provenance: ProvenanceLabel;
+  readonly provenance: MockProvenance | "PRODUCTION";
   readonly environmentOrigin: EnvironmentOrigin;
   readonly dataClassification: "public_or_synthetic" | "restricted";
   readonly sourceOwner: string;
@@ -147,9 +169,9 @@ export interface Artifact {
 export interface StaticSlideRender {
   readonly pageNumber: number;
   readonly filename: string;
-  readonly mimeType: "image/svg+xml";
+  readonly mimeType: "image/svg+xml" | "image/png";
   readonly contentHash: `sha256:${string}`;
-  readonly content: string;
+  readonly content: string | Uint8Array;
   readonly extractedText: string;
 }
 
@@ -163,9 +185,16 @@ export interface RenderPolicy {
 
 export interface ContactSheetRender {
   readonly filename: string;
-  readonly mimeType: "image/svg+xml";
+  readonly mimeType: "image/svg+xml" | "image/png";
   readonly contentHash: `sha256:${string}`;
-  readonly content: string;
+  readonly content: string | Uint8Array;
+}
+
+export type RenderOutcome = "faithful" | "degraded" | "failed";
+
+export interface RenderFidelity {
+  readonly status: "verified" | "degraded" | "unknown";
+  readonly notes: readonly string[];
 }
 
 export interface RenderManifest {
@@ -173,7 +202,10 @@ export interface RenderManifest {
   readonly artifactId: string;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
-  readonly renderer: "mock-static-svg@1";
+  readonly renderer: string;
+  readonly rendererAuthorizationDecisionId: string;
+  readonly renderOutcome: RenderOutcome;
+  readonly fidelity: RenderFidelity;
   readonly pageCount: number;
   readonly renderPolicy: RenderPolicy;
   readonly contactSheet: ContactSheetRender;
@@ -198,6 +230,7 @@ export type DimensionDeductionBasis =
   | "visible_requirement_or_coverage_gap"
   | "validated_reference_pack_errors"
   | "not_assessable_no_reference_pack"
+  | "not_assessable_degraded_render"
   | "visible_narrative_or_audience_gap"
   | "visible_visual_finish_gap"
   | "visible_layout_or_readability_gap"
@@ -298,7 +331,7 @@ export interface JudgeLineage {
 export interface EvaluationInputManifest {
   readonly artifactHash: `sha256:${string}`;
   readonly renderManifestHash: `sha256:${string}`;
-  readonly renderer: "mock-static-svg@1";
+  readonly renderer: string;
   readonly referencePackHash: `sha256:${string}` | null;
 }
 
@@ -651,8 +684,8 @@ export interface BakeoffJobSummary {
   readonly caseId: string;
   readonly environment: "test" | "production";
   readonly status: "active" | "completed" | "partial" | "failed";
-  readonly provenance: MockProvenance;
-  readonly environmentOrigin: TestEnvironmentOrigin;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
 }
 
 export interface BakeoffJobOutcome {

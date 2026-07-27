@@ -37,16 +37,20 @@ test("the Qwen production adapter is a pure-data descriptor for the frozen zero-
     "implementationPackage",
     "productPackage",
   ]);
-  assert.deepEqual(adapter.productPackage.declaredConfiguration, {
-    entryUrl: "https://www.qianwen.com/",
-    accountReference: "current_signed_in_account",
-    packageSelection: "best_available_zero_added_cost",
-    modelSelection: "best_available_zero_added_cost",
-    expertMode: "best_available_zero_added_cost",
+  assert.deepEqual(adapter.productPackage.experienceConfiguration, {
+    productUrl: "https://www.qianwen.com/",
+    accountScope: "current_authenticated_account",
+    accountObservationPolicy:
+      "observe_category_or_record_ui_unavailable",
+    commercialPlanObservationPolicy:
+      "observe_plan_name_or_record_ui_unavailable",
+    packageSelection: "best_available_zero_incremental_cost",
+    incrementalCost: 0,
+    mode: "professional",
     networking: "enabled",
     pageCount: 16,
   });
-  assert.equal(adapter.productPackage.provenance, "PRODUCTION");
+  assert.equal(adapter.productPackage.provenance, "LIVE_PRODUCTION");
   assert.equal(
     adapter.productPackage.environmentOrigin.environment,
     "production",
@@ -161,7 +165,10 @@ class SuccessfulQwenBrowserFake implements QwenBrowserDriverPort {
         filename: slide.filename,
         mimeType: slide.mimeType,
         contentHash: slide.contentHash,
-        content: new TextEncoder().encode(slide.content),
+        content:
+          typeof slide.content === "string"
+            ? new TextEncoder().encode(slide.content)
+            : Uint8Array.from(slide.content),
       })),
     };
   }
@@ -396,7 +403,7 @@ test("the harness-owned registry binds Qwen execution from frozen packages inste
         executionConfiguration,
         { qwenBrowserDriver: testDriver },
       ),
-    /PRODUCTION browser driver/i,
+    /LIVE_PRODUCTION or PRODUCTION_REPLAY browser driver/i,
   );
   assert.equal(callerCalls, 0);
 });
@@ -419,7 +426,7 @@ test("the registry rejects a Qwen production implementation package whose bytes 
         ),
         {
           qwenBrowserDriver: {
-            runtimeProvenance: "PRODUCTION",
+            runtimeProvenance: "LIVE_PRODUCTION",
             execute: async () => {
               throw new Error("must not execute");
             },

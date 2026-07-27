@@ -130,7 +130,10 @@ export type QwenBrowserExecution =
   | QwenBrowserTerminalExecution;
 
 export interface QwenBrowserDriverPort {
-  readonly runtimeProvenance: "TEST" | "PRODUCTION";
+  readonly runtimeProvenance:
+    | "TEST"
+    | "LIVE_PRODUCTION"
+    | "PRODUCTION_REPLAY";
   execute(
     command: QwenBrowserExecutionCommand,
   ): Promise<QwenBrowserExecution>;
@@ -156,7 +159,7 @@ export interface QwenProductAttemptResult
   readonly submissionEvidence: SubmissionEvidence;
   readonly observedConfiguration: QwenObservedConfiguration | null;
   readonly trace: readonly QwenTraceEvent[];
-  readonly manualActions: readonly QwenManualAction[];
+  readonly manualActions: readonly string[];
   readonly staticRenders: readonly QwenStaticRender[];
 }
 
@@ -485,7 +488,7 @@ function qwenExecutor(
         trace: createTerminalTrace(execution),
         manualActions: Object.freeze(
           execution.manualActions.map((action) =>
-            Object.freeze({ ...action }),
+            `${action.observedAt} ${action.action}`,
           ),
         ),
         staticRenders: Object.freeze([]),
@@ -520,7 +523,7 @@ function qwenExecutor(
       trace: createTrace(execution, observedConfiguration),
       manualActions: Object.freeze(
         execution.manualActions.map((action) =>
-          Object.freeze({ ...action }),
+          `${action.observedAt} ${action.action}`,
         ),
       ),
       staticRenders,
@@ -573,14 +576,17 @@ export function resolveQwenProductionAdapterExecutor(
       "Harness registry requires a production Qwen browser driver",
     );
   }
-  if (driver.runtimeProvenance !== "PRODUCTION") {
+  if (
+    driver.runtimeProvenance !== "LIVE_PRODUCTION" &&
+    driver.runtimeProvenance !== "PRODUCTION_REPLAY"
+  ) {
     throw new Error(
-      "Harness registry requires a PRODUCTION browser driver for Qwen",
+      "Harness registry requires a LIVE_PRODUCTION or PRODUCTION_REPLAY browser driver for Qwen",
     );
   }
   return qwenExecutor(
     driver,
-    "PRODUCTION",
+    driver.runtimeProvenance,
     PRODUCTION_ENVIRONMENT_ORIGIN,
   );
 }
@@ -615,7 +621,7 @@ const QWEN_PRODUCT_PACKAGE: ProductPackageSnapshot = Object.freeze({
   vendorId: "qwen",
   displayName: "千问网页 PPT",
   adapterVersion: "qwen-web@1",
-  provenance: "PRODUCTION",
+  provenance: "LIVE_PRODUCTION",
   environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
   egressDestination: Object.freeze({
     targetService: "qwen-web",
@@ -623,12 +629,16 @@ const QWEN_PRODUCT_PACKAGE: ProductPackageSnapshot = Object.freeze({
     targetRegion: "cn",
     subprocessors: [],
   }),
-  declaredConfiguration: Object.freeze({
-    entryUrl: QWEN_ENTRY_URL,
-    accountReference: "current_signed_in_account",
-    packageSelection: "best_available_zero_added_cost",
-    modelSelection: "best_available_zero_added_cost",
-    expertMode: "best_available_zero_added_cost",
+  experienceConfiguration: Object.freeze({
+    productUrl: QWEN_ENTRY_URL,
+    accountScope: "current_authenticated_account",
+    accountObservationPolicy:
+      "observe_category_or_record_ui_unavailable",
+    commercialPlanObservationPolicy:
+      "observe_plan_name_or_record_ui_unavailable",
+    packageSelection: "best_available_zero_incremental_cost",
+    incrementalCost: 0,
+    mode: "professional",
     networking: "enabled",
     pageCount: 16,
   }),

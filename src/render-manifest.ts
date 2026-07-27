@@ -28,6 +28,10 @@ function descriptor(
     provenance: manifest.provenance,
     environmentOrigin: manifest.environmentOrigin,
     renderer: manifest.renderer,
+    rendererAuthorizationDecisionId:
+      manifest.rendererAuthorizationDecisionId,
+    renderOutcome: manifest.renderOutcome,
+    fidelity: manifest.fidelity,
     pageCount: manifest.pageCount,
     renderPolicy: manifest.renderPolicy,
     slides: manifest.slides.map((slide) => ({

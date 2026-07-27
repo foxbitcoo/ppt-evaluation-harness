@@ -1,5 +1,36 @@
 export {
+  FileSystemImmutableBlobStore,
+} from "./file-system-blob-store.ts";
+export {
+  FileSystemAttemptCheckpointStore,
+} from "./file-system-checkpoint-store.ts";
+export {
+  FileSystemBrowserProfileLock,
+  InProcessBrowserProfileLock,
+  type BrowserProfileLockPort,
+} from "./browser-profile-lock.ts";
+export {
+  assertHarnessOwnedProductionCapabilities,
+  createHarnessOwnedProductionCapabilities,
+  type HarnessOwnedProductionCapabilities,
+  type HarnessOwnedProductionCapabilityEvidence,
+} from "./production-capabilities.ts";
+export {
+  BUILD_IDENTITY,
+  BUILD_IDENTITY_SOURCE,
+  BUILD_SPEC_COMMIT_SHA,
+} from "./build-identity.ts";
+export {
+  loadDurableRootRegistry,
+  registerDurableRoots,
+  resolveDurableRoot,
+  retainedRehearsalRoot,
+  type DurableRootRegistry,
+  type DurableRootRegistryEntry,
+} from "./durable-root-registry.ts";
+export {
   VENDOR_GENERATION_TIMEOUT_MS,
+  ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
   createBakeoffHarness,
   type AttemptDeadlinePort,
   type AttemptDeadlineResult,
@@ -134,6 +165,7 @@ export {
 export {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
+  PRODUCTION_VOLCANO_EVALUATION_CASE,
 } from "./fixtures/volcano-case.ts";
 export {
   MockDoubaoProductAdapter,
@@ -142,17 +174,50 @@ export {
   type MockAdapterOptions,
   type MockAdapterScenario,
 } from "./mock-wps.ts";
-export type { HarnessProductAdapterRuntime } from "./mock-wps.ts";
 export {
+  InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
+  type AttemptCheckpointPort,
   type ArtifactCandidate,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
   type ProductAttemptResult,
   type ProductAdapterPort,
+  type ProductExperienceConfiguration,
+  type AccountCategoryObservation,
+  type CommercialPlanObservation,
   type ProductPackageSnapshot,
   type ProductRunCommand,
+  type SafeRasterRendererPort,
 } from "./product-adapter.ts";
+export {
+  WPS_AIPPT_ADAPTER_VERSION,
+  WPS_AIPPT_EXPERIENCE_CONFIGURATION,
+  WPS_AIPPT_URL,
+  WpsAiPptProductAdapter,
+  WpsAiPptReplayAdapter,
+  resolveWpsAiPptProductAdapterExecutor,
+  type WpsAiPptBrowserArtifactCapture,
+  type WpsAiPptBrowserCommand,
+  type WpsAiPptBrowserEvent,
+  type WpsAiPptBrowserRenderCapture,
+  type WpsAiPptBrowserResult,
+  type WpsAiPptBrowserStaticSlide,
+  type WpsAiPptCapturedBrowserResult,
+  type WpsAiPptFailedBrowserResult,
+  type WpsAiPptObservedConfiguration,
+} from "./wps-aippt.ts";
+export {
+  WPS_AIPPT_BROWSER_DRIVER_VERSION,
+  WPS_AIPPT_BROWSER_PROFILE_DIGEST,
+  createWpsAiPptBrowserDriverPackage,
+  createWpsAiPptRealProviderReplayPackage,
+  registeredWpsAiPptBrowserDriverEvidence,
+  type WpsAiPptBrowserDriverEvidence,
+  type WpsAiPptBrowserDriverPort,
+  type WpsAiPptTaskReconciliationEvidence,
+  type WpsAiPptTaskReconciliationQuery,
+} from "./wps-aippt-driver.ts";
 export {
   QWEN_ENTRY_URL,
   QWEN_MAX_ATTEMPT_TIMEOUT_MS,
