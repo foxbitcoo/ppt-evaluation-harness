@@ -15,6 +15,13 @@ export type EgressTargetKind =
   | "renderer"
   | "storage";
 
+export interface EgressDestinationMetadata {
+  readonly targetService: string;
+  readonly targetAccount: string;
+  readonly targetRegion: string;
+  readonly subprocessors: readonly string[];
+}
+
 export interface EgressAuthorizationRequest {
   readonly requestId: string;
   readonly jobId: string;
@@ -29,9 +36,23 @@ export interface EgressAuthorizationRequest {
   readonly targetRegion: string;
   readonly subprocessors: readonly string[];
   readonly contentFields: readonly string[];
+  readonly payloadHash: `sha256:${string}`;
   readonly requiredRedactions: readonly string[];
   readonly requestedAt: string;
 }
+
+export type EgressAuthorizationRequestInput = Omit<
+  EgressAuthorizationRequest,
+  "requestedAt"
+>;
+
+export interface ClockPort {
+  now(): string;
+}
+
+export const SYSTEM_CLOCK: ClockPort = Object.freeze({
+  now: () => new Date().toISOString(),
+});
 
 export interface ApprovedEgressAuthorization {
   readonly status: "approved";
@@ -68,16 +89,37 @@ function nonEmpty(value: string, label: string): void {
   }
 }
 
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const entry of Object.values(value)) {
+      deepFreeze(entry);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
 export async function requireEgressAuthorization(
   port: EgressAuthorizationPort | undefined,
-  request: EgressAuthorizationRequest,
+  input: EgressAuthorizationRequestInput,
+  clock: ClockPort = SYSTEM_CLOCK,
 ): Promise<ApprovedEgressAuthorization> {
+  const request: EgressAuthorizationRequest = deepFreeze({
+    ...structuredClone(input),
+    requestedAt: clock.now(),
+  });
+  const requestBaseline = structuredClone(request);
   nonEmpty(request.requestId, "requestId");
   nonEmpty(request.jobId, "jobId");
   nonEmpty(request.sourceOwner, "sourceOwner");
   nonEmpty(request.targetService, "targetService");
   nonEmpty(request.targetAccount, "targetAccount");
   nonEmpty(request.targetRegion, "targetRegion");
+  if (!/^sha256:[a-f0-9]{64}$/.test(request.payloadHash)) {
+    throw new Error(
+      `${request.processingPurpose} egress authorization payload hash is invalid; call blocked`,
+    );
+  }
   if (
     request.contentFields.length === 0 ||
     request.contentFields.some((field) => field.trim().length === 0) ||
@@ -95,7 +137,8 @@ export async function requireEgressAuthorization(
   const decision = await port.authorize(Object.freeze(structuredClone(request)));
   if (
     decision.status !== "approved" ||
-    !isDeepStrictEqual(decision.request, request)
+    !isDeepStrictEqual(decision.request, requestBaseline) ||
+    !isDeepStrictEqual(request, requestBaseline)
   ) {
     throw new Error(
       `${request.processingPurpose} egress authorization denied or incompatible; call blocked`,
@@ -105,14 +148,16 @@ export async function requireEgressAuthorization(
   nonEmpty(decision.policyVersion, "policyVersion");
   nonEmpty(decision.legalSecurityBasis, "legalSecurityBasis");
   const requestedAt = Date.parse(request.requestedAt);
+  const evaluatedAt = Date.parse(clock.now());
   const approvedAt = Date.parse(decision.approvedAt);
   const expiresAt = Date.parse(decision.expiresAt);
   if (
     !Number.isFinite(requestedAt) ||
+    !Number.isFinite(evaluatedAt) ||
     !Number.isFinite(approvedAt) ||
     !Number.isFinite(expiresAt) ||
-    approvedAt > requestedAt ||
-    expiresAt <= requestedAt ||
+    approvedAt > evaluatedAt ||
+    expiresAt <= evaluatedAt ||
     decision.request.requiredRedactions.length > 0
   ) {
     throw new Error(

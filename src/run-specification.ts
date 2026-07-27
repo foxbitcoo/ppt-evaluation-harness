@@ -12,6 +12,7 @@ import type {
   RetentionPayloadLocation,
 } from "./artifact-vault.ts";
 import type { ProductPackageSnapshot } from "./product-adapter.ts";
+import type { PayloadInventoryPort } from "./retention.ts";
 
 export interface RunSpecificationVersionReferences {
   readonly caseVersion: string;
@@ -20,6 +21,16 @@ export interface RunSpecificationVersionReferences {
   readonly adapterVersion: string;
   readonly schemaVersion: "evaluation-framework-v0.8";
   readonly rubricVersion: "query-six-dimension-v1";
+  readonly caseContentHash: `sha256:${string}`;
+  readonly productPackageContentHash: `sha256:${string}`;
+  readonly protocolSnapshotContentHash: `sha256:${string}`;
+  readonly adapterSpecificationHash: `sha256:${string}`;
+  readonly schemaSnapshotHash: `sha256:${string}`;
+  readonly rubricSnapshotHash: `sha256:${string}`;
+  readonly estimatorSnapshotHash: `sha256:${string}`;
+  readonly runnerCodeDigest: `sha256:${string}`;
+  readonly runnerImageDigest: `sha256:${string}`;
+  readonly environmentEvidenceHash: `sha256:${string}`;
 }
 
 export interface RunSpecificationBundle {
@@ -30,6 +41,41 @@ export interface RunSpecificationBundle {
   readonly evaluationCase: EvaluationCaseRecord;
   readonly productPackage: ProductPackageSnapshot;
   readonly protocolSnapshot: BakeoffProtocolSnapshot;
+  readonly adapterSpecification: {
+    readonly packageId: string;
+    readonly adapterVersion: string;
+    readonly vendorId: string;
+    readonly egressDestination: ProductPackageSnapshot["egressDestination"];
+  };
+  readonly schemaSnapshot: {
+    readonly schemaVersion: "evaluation-framework-v0.8";
+    readonly requiredLineage: readonly string[];
+  };
+  readonly rubricSnapshot: {
+    readonly rubricVersion: "query-six-dimension-v1";
+    readonly dimensions: readonly string[];
+  };
+  readonly estimatorSnapshot: {
+    readonly estimatorVersion: "delivery-quality-gate-v1";
+    readonly deliveryGate: "automatic_non_scoring_gate";
+    readonly scoringScale: "six_dimensions_1_to_5";
+  };
+  readonly runnerCodeEvidence: {
+    readonly specCommitSha: string;
+    readonly entrypoint: "src/bakeoff.ts";
+  };
+  readonly runnerImageEvidence: {
+    readonly runtimeFamily: "node";
+    readonly runtimeVersion: string;
+    readonly imageReference: "local-test-runtime";
+  };
+  readonly environmentEvidence: {
+    readonly environmentOriginId: string;
+    readonly targetEnvironment: string;
+    readonly platform: string;
+    readonly architecture: string;
+    readonly nodeVersion: string;
+  };
   readonly versionReferences: RunSpecificationVersionReferences;
 }
 
@@ -51,7 +97,6 @@ export interface CaptureRunSpecificationCommand {
   readonly evaluationCase: EvaluationCaseRecord;
   readonly productPackage: ProductPackageSnapshot;
   readonly protocolSnapshot: BakeoffProtocolSnapshot;
-  readonly requestedAt: string;
 }
 
 export interface RunSpecificationVault {
@@ -67,6 +112,7 @@ export interface RunSpecificationVault {
 export interface RunSpecificationVaultDependencies {
   readonly store: ImmutableBlobStorePort;
   readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly payloadInventory: PayloadInventoryPort;
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -108,24 +154,44 @@ function parseBundle(bytes: Uint8Array): RunSpecificationBundle {
   return parsed as RunSpecificationBundle;
 }
 
+function snapshotHash(value: unknown): `sha256:${string}` {
+  return sha256Bytes(canonicalJsonBytes(value));
+}
+
+function expectedVersionReferences(
+  bundle: Omit<RunSpecificationBundle, "versionReferences">,
+): RunSpecificationVersionReferences {
+  return Object.freeze({
+    caseVersion: String(bundle.evaluationCase.caseVersion),
+    productPackageVersion: bundle.productPackage.packageId,
+    runPolicyVersion: bundle.protocolSnapshot.protocolId,
+    adapterVersion: bundle.productPackage.adapterVersion,
+    schemaVersion: "evaluation-framework-v0.8",
+    rubricVersion: "query-six-dimension-v1",
+    caseContentHash: snapshotHash(bundle.evaluationCase),
+    productPackageContentHash: snapshotHash(bundle.productPackage),
+    protocolSnapshotContentHash: snapshotHash(bundle.protocolSnapshot),
+    adapterSpecificationHash: snapshotHash(bundle.adapterSpecification),
+    schemaSnapshotHash: snapshotHash(bundle.schemaSnapshot),
+    rubricSnapshotHash: snapshotHash(bundle.rubricSnapshot),
+    estimatorSnapshotHash: snapshotHash(bundle.estimatorSnapshot),
+    runnerCodeDigest: snapshotHash(bundle.runnerCodeEvidence),
+    runnerImageDigest: snapshotHash(bundle.runnerImageEvidence),
+    environmentEvidenceHash: snapshotHash(bundle.environmentEvidence),
+  });
+}
+
 export function createRunSpecificationVault({
   store,
   egressAuthorization,
+  payloadInventory,
 }: RunSpecificationVaultDependencies): RunSpecificationVault {
   return {
     async capture(command) {
       if (!/^[a-f0-9]{40}$/.test(command.specCommitSha)) {
         throw new Error("Run specification requires an exact spec commit SHA");
       }
-      const versionReferences = Object.freeze({
-        caseVersion: String(command.evaluationCase.caseVersion),
-        productPackageVersion: command.productPackage.packageId,
-        runPolicyVersion: command.protocolSnapshot.protocolId,
-        adapterVersion: command.productPackage.adapterVersion,
-        schemaVersion: "evaluation-framework-v0.8" as const,
-        rubricVersion: "query-six-dimension-v1" as const,
-      });
-      const bundle = Object.freeze<RunSpecificationBundle>({
+      const bundleWithoutReferences = Object.freeze({
         schemaVersion: "run-specification-bundle-v1",
         jobId: command.jobId,
         runId: command.runId,
@@ -139,6 +205,65 @@ export function createRunSpecificationVault({
         protocolSnapshot: Object.freeze(
           structuredClone(command.protocolSnapshot),
         ),
+        adapterSpecification: Object.freeze({
+          packageId: command.productPackage.packageId,
+          adapterVersion: command.productPackage.adapterVersion,
+          vendorId: command.productPackage.vendorId,
+          egressDestination: Object.freeze(
+            structuredClone(command.productPackage.egressDestination),
+          ),
+        }),
+        schemaSnapshot: Object.freeze({
+          schemaVersion: "evaluation-framework-v0.8" as const,
+          requiredLineage: Object.freeze([
+            "case",
+            "run",
+            "attempt",
+            "artifact",
+            "render_manifest",
+            "scorecard",
+          ]),
+        }),
+        rubricSnapshot: Object.freeze({
+          rubricVersion: "query-six-dimension-v1" as const,
+          dimensions: Object.freeze([
+            "requirement_understanding_and_content_coverage",
+            "factual_accuracy_and_content_quality",
+            "narrative_and_audience_fit",
+            "visual_aesthetics_and_professional_finish",
+            "layout_hierarchy_and_readability",
+            "imagery_chart_and_information_expression",
+          ]),
+        }),
+        estimatorSnapshot: Object.freeze({
+          estimatorVersion: "delivery-quality-gate-v1" as const,
+          deliveryGate: "automatic_non_scoring_gate" as const,
+          scoringScale: "six_dimensions_1_to_5" as const,
+        }),
+        runnerCodeEvidence: Object.freeze({
+          specCommitSha: command.specCommitSha,
+          entrypoint: "src/bakeoff.ts" as const,
+        }),
+        runnerImageEvidence: Object.freeze({
+          runtimeFamily: "node" as const,
+          runtimeVersion: process.version,
+          imageReference: "local-test-runtime" as const,
+        }),
+        environmentEvidence: Object.freeze({
+          environmentOriginId:
+            command.productPackage.environmentOrigin.originId,
+          targetEnvironment:
+            command.productPackage.environmentOrigin.environment,
+          platform: process.platform,
+          architecture: process.arch,
+          nodeVersion: process.version,
+        }),
+      }) satisfies Omit<RunSpecificationBundle, "versionReferences">;
+      const versionReferences = expectedVersionReferences(
+        bundleWithoutReferences,
+      );
+      const bundle = Object.freeze<RunSpecificationBundle>({
+        ...bundleWithoutReferences,
         versionReferences,
       });
       const content = canonicalJsonBytes(bundle);
@@ -149,19 +274,30 @@ export function createRunSpecificationVault({
         jobId: command.jobId,
         runId: command.runId,
         attemptId: null,
-        dataClassification: "public_or_synthetic",
-        sourceOwner: "ppt-evaluation-harness",
+        dataClassification: command.evaluationCase.dataClassification,
+        sourceOwner: command.evaluationCase.sourceOwner,
         processingPurpose: "run_specification_storage",
         targetKind: "storage",
-        targetService: store.storeId,
-        targetAccount: "controlled-recovery-store",
-        targetRegion: command.productPackage.environmentOrigin.environment,
-        subprocessors: [],
+        targetService: store.egressDestination.targetService,
+        targetAccount: store.egressDestination.targetAccount,
+        targetRegion: store.egressDestination.targetRegion,
+        subprocessors: store.egressDestination.subprocessors,
         contentFields: ["run_specification_bundle"],
+        payloadHash: contentHash,
         requiredRedactions: [],
-        requestedAt: command.requestedAt,
       });
-      await store.putImmutable(key, content);
+      await payloadInventory.register(command.jobId, [
+        {
+          storeId: store.storeId,
+          key,
+          contentHash,
+          copyRole: "run_specification",
+        },
+      ]);
+      await store.putImmutable(key, content, {
+        jobId: command.jobId,
+        contentHash,
+      });
       const readback = await store.read(key);
       if (readback === null || sha256Bytes(readback) !== contentHash) {
         throw new Error("Run specification upload readback hash mismatch");
@@ -199,6 +335,25 @@ export function createRunSpecificationVault({
         !isDeepStrictEqual(
           bundle.versionReferences,
           reference.versionReferences,
+        ) ||
+        !isDeepStrictEqual(
+          bundle.versionReferences,
+          expectedVersionReferences({
+            schemaVersion: bundle.schemaVersion,
+            jobId: bundle.jobId,
+            runId: bundle.runId,
+            specCommitSha: bundle.specCommitSha,
+            evaluationCase: bundle.evaluationCase,
+            productPackage: bundle.productPackage,
+            protocolSnapshot: bundle.protocolSnapshot,
+            adapterSpecification: bundle.adapterSpecification,
+            schemaSnapshot: bundle.schemaSnapshot,
+            rubricSnapshot: bundle.rubricSnapshot,
+            estimatorSnapshot: bundle.estimatorSnapshot,
+            runnerCodeEvidence: bundle.runnerCodeEvidence,
+            runnerImageEvidence: bundle.runnerImageEvidence,
+            environmentEvidence: bundle.environmentEvidence,
+          }),
         )
       ) {
         throw new Error(

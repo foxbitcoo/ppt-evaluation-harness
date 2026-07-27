@@ -20,6 +20,7 @@ import {
   assertEnvironmentOriginAllowed,
   type EnvironmentOrigin,
 } from "./environment-origin.ts";
+import type { EgressDestinationMetadata } from "./egress-authorization.ts";
 
 function stableRunReplayPayload(record: RunRecord): unknown {
   const {
@@ -143,6 +144,7 @@ export interface FeishuProjectionPort
     ReportDocumentPort,
     ComparisonReportSourcePort {
   readonly targetEnvironment: "test" | "production";
+  readonly egressDestination: EgressDestinationMetadata;
 }
 
 export interface FeishuProjectionSnapshot {
@@ -164,6 +166,7 @@ export interface FeishuProjectionSnapshot {
 
 export interface InMemoryFeishuProjectionOptions {
   readonly targetEnvironment?: "test" | "production";
+  readonly egressDestination?: EgressDestinationMetadata;
 }
 
 export class InMemoryFeishuProjection implements FeishuProjectionPort {
@@ -182,9 +185,20 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     [];
   readonly #reports: FeishuReport[] = [];
   readonly targetEnvironment: "test" | "production";
+  readonly egressDestination: EgressDestinationMetadata;
 
   constructor(options: InMemoryFeishuProjectionOptions = {}) {
     this.targetEnvironment = options.targetEnvironment ?? "test";
+    this.egressDestination = Object.freeze(
+      structuredClone(
+        options.egressDestination ?? {
+          targetService: "in-memory-feishu-operational-ledger",
+          targetAccount: "in-memory-feishu-test-project",
+          targetRegion: this.targetEnvironment,
+          subprocessors: [],
+        },
+      ),
+    );
   }
 
   #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {

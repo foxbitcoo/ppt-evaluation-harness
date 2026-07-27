@@ -39,6 +39,54 @@ export interface TombstoneLedgerPort {
   list(): Promise<readonly RetentionTombstone[]>;
 }
 
+export interface PayloadInventoryPort {
+  register(
+    jobId: string,
+    locations: readonly RetentionPayloadLocation[],
+  ): Promise<void>;
+  list(jobId: string): Promise<readonly RetentionPayloadLocation[]>;
+}
+
+export class InMemoryPayloadInventory implements PayloadInventoryPort {
+  readonly #locationsByJob = new Map<string, RetentionPayloadLocation[]>();
+
+  constructor(
+    private readonly tombstones: Pick<TombstoneLedgerPort, "findByJobId">,
+  ) {}
+
+  async register(
+    jobId: string,
+    locations: readonly RetentionPayloadLocation[],
+  ): Promise<void> {
+    if ((await this.tombstones.findByJobId(jobId)) !== null) {
+      throw new Error(
+        `Payload inventory rejected registration for tombstoned Job: ${jobId}`,
+      );
+    }
+    const registered = this.#locationsByJob.get(jobId) ?? [];
+    for (const location of locations) {
+      const existing = registered.find(
+        ({ storeId, key }) =>
+          storeId === location.storeId && key === location.key,
+      );
+      if (existing !== undefined) {
+        if (!isDeepStrictEqual(existing, location)) {
+          throw new Error(
+            `Payload inventory identity conflict: ${location.storeId}/${location.key}`,
+          );
+        }
+        continue;
+      }
+      registered.push(structuredClone(location));
+    }
+    this.#locationsByJob.set(jobId, registered);
+  }
+
+  async list(jobId: string): Promise<readonly RetentionPayloadLocation[]> {
+    return structuredClone(this.#locationsByJob.get(jobId) ?? []);
+  }
+}
+
 export class InMemoryTombstoneLedger implements TombstoneLedgerPort {
   readonly #tombstones: RetentionTombstone[] = [];
   readonly #deletionEvidence: RetentionDeletionEvidence[] = [];
@@ -118,7 +166,6 @@ export interface ExpireRetentionCommand {
   readonly jobId: string;
   readonly subjectIds: readonly string[];
   readonly expiredAt: string;
-  readonly payloadLocations: readonly RetentionPayloadLocation[];
 }
 
 export interface RetentionExpiryResult {
@@ -133,11 +180,13 @@ export interface RetentionService {
 export interface RetentionServiceDependencies {
   readonly stores: readonly ImmutableBlobStorePort[];
   readonly tombstones: TombstoneLedgerPort;
+  readonly payloadInventory: PayloadInventoryPort;
 }
 
 export function createRetentionService({
   stores,
   tombstones,
+  payloadInventory,
 }: RetentionServiceDependencies): RetentionService {
   const storesById = new Map(stores.map((store) => [store.storeId, store]));
   if (storesById.size !== stores.length) {
@@ -145,20 +194,21 @@ export function createRetentionService({
   }
   return {
     async expire(command) {
+      const payloadLocations = await payloadInventory.list(command.jobId);
       if (
         command.subjectIds.length === 0 ||
-        command.payloadLocations.length === 0 ||
+        payloadLocations.length === 0 ||
         !Number.isFinite(Date.parse(command.expiredAt))
       ) {
         throw new Error("Retention expiry command is incomplete");
       }
-      const locationIdentities = command.payloadLocations.map(
+      const locationIdentities = payloadLocations.map(
         ({ storeId, key }) => `${storeId}\u0000${key}`,
       );
       if (new Set(locationIdentities).size !== locationIdentities.length) {
         throw new Error("Retention expiry contains duplicate payload locations");
       }
-      for (const location of command.payloadLocations) {
+      for (const location of payloadLocations) {
         if (!storesById.has(location.storeId)) {
           throw new Error(
             `Retention store is unavailable: ${location.storeId}`,
@@ -171,22 +221,15 @@ export function createRetentionService({
         jobId: command.jobId,
         subjectIds: [...command.subjectIds],
         expiredAt: command.expiredAt,
-        payloadLocations: command.payloadLocations.map((location) => ({
+        payloadLocations: payloadLocations.map((location) => ({
           ...location,
         })),
       };
       await tombstones.append(tombstone);
 
-      const priorEvidence = await tombstones.listDeletionEvidence(
-        tombstone.tombstoneId,
-      );
-      const evidenceById = new Map(
-        priorEvidence.map((evidence) => [evidence.evidenceId, evidence]),
-      );
       const failures: string[] = [];
-      for (const [index, location] of command.payloadLocations.entries()) {
+      for (const [index, location] of payloadLocations.entries()) {
         const evidenceId = `deletion:${command.tombstoneId}:${index + 1}`;
-        if (evidenceById.has(evidenceId)) continue;
         const store = storesById.get(location.storeId);
         if (store === undefined) continue;
         const before = await store.read(location.key);
@@ -218,7 +261,6 @@ export function createRetentionService({
           deletedAt: command.expiredAt,
         };
         await tombstones.appendDeletionEvidence(evidence);
-        evidenceById.set(evidenceId, evidence);
       }
       if (failures.length > 0) {
         throw new Error(
@@ -228,7 +270,7 @@ export function createRetentionService({
       const deletionEvidence = await tombstones.listDeletionEvidence(
         tombstone.tombstoneId,
       );
-      if (deletionEvidence.length !== command.payloadLocations.length) {
+      if (deletionEvidence.length !== payloadLocations.length) {
         throw new Error("Retention deletion evidence is incomplete");
       }
       return { tombstone, deletionEvidence };

@@ -6,26 +6,40 @@ export {
 } from "./bakeoff.ts";
 export {
   InMemoryImmutableBlobStore,
+  InMemoryArtifactCaptureJournal,
   createArtifactVault,
   type ArtifactDerivativeLineage,
+  type ArtifactCaptureJournalEvent,
+  type ArtifactCaptureJournalPort,
   type ArtifactMetadata,
   type ArtifactPackageManifest,
   type ArtifactVault,
   type ArtifactVaultDependencies,
   type CaptureArtifactPackageCommand,
   type ImmutableBlobStorePort,
+  type ImmutableBlobWriteContext,
+  type JobTombstoneLookupPort,
   type RecoveredArtifactPackage,
   type RetentionPayloadLocation,
 } from "./artifact-vault.ts";
 export {
+  calculateRenderManifestHash,
+  renderManifestBytes,
+  type RenderManifestHashInput,
+} from "./render-manifest.ts";
+export {
   requireEgressAuthorization,
+  SYSTEM_CLOCK,
   type ApprovedEgressAuthorization,
   type DeniedEgressAuthorization,
   type EgressAuthorizationDecision,
   type EgressAuthorizationPort,
   type EgressAuthorizationRequest,
+  type EgressAuthorizationRequestInput,
+  type ClockPort,
   type EgressProcessingPurpose,
   type EgressTargetKind,
+  type EgressDestinationMetadata,
 } from "./egress-authorization.ts";
 export {
   canonicalJsonBytes,
@@ -52,6 +66,7 @@ export {
 } from "./ledger-recovery.ts";
 export {
   createRetentionService,
+  InMemoryPayloadInventory,
   InMemoryTombstoneLedger,
   type ExpireRetentionCommand,
   type RetentionDeletionEvidence,
@@ -59,6 +74,7 @@ export {
   type RetentionService,
   type RetentionServiceDependencies,
   type RetentionTombstone,
+  type PayloadInventoryPort,
   type TombstoneLedgerPort,
 } from "./retention.ts";
 export {
@@ -171,6 +187,8 @@ export type {
   DynamicComparisonView,
   ObservableAttemptEvent,
   RenderManifest,
+  RenderPolicy,
+  ContactSheetRender,
   ReviewEventRecord,
   RunRecord,
   RunStatus,

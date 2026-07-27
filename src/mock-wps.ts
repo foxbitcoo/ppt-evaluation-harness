@@ -17,6 +17,7 @@ import type {
   ProductPackageSnapshot,
   ProductRunCommand,
 } from "./product-adapter.ts";
+import { calculateRenderManifestHash } from "./render-manifest.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -562,23 +563,43 @@ export function renderStaticArtifact(
   const slides = presentation.slides.map((slide, index) =>
     renderSlide(slide, index + 1, presentation.application),
   );
-  const manifestPayload = JSON.stringify({
-    artifactHash: artifact.contentHash,
-    renderer: "mock-static-svg@1",
-    slideHashes: slides.map(({ pageNumber, contentHash }) => ({
-      pageNumber,
-      contentHash,
-    })),
-  });
-  return {
+  const contactSheetContent = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><metadata>${slides
+    .map(({ pageNumber, contentHash }) => `${pageNumber}:${contentHash}`)
+    .join("|")}</metadata></svg>`;
+  const manifest = {
     renderManifestId,
     artifactId: artifact.artifactId,
-    provenance: "MOCK",
+    provenance: "MOCK" as const,
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-    renderer: "mock-static-svg@1",
+    egressDestination: {
+      targetService: "mock-qwen-vendor",
+      targetAccount: "mock-qwen-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
+    renderer: "mock-static-svg@1" as const,
     pageCount: slides.length,
-    contentHash: sha256(manifestPayload),
+    renderPolicy: {
+      fontPack: "mock-font-pack@1",
+      resolution: "1280x720",
+      colorProfile: "sRGB",
+      animationPolicy: "first_frame" as const,
+      externalAssetPolicy: "network_disabled" as const,
+    },
+    contactSheet: {
+      filename: "contact-sheet.svg",
+      mimeType: "image/svg+xml" as const,
+      contentHash: sha256(contactSheetContent),
+      content: contactSheetContent,
+    },
     slides,
+  };
+  return {
+    ...manifest,
+    contentHash: calculateRenderManifestHash(
+      artifact.contentHash,
+      manifest,
+    ),
   };
 }
 
@@ -590,6 +611,12 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
     adapterVersion: "mock-wps@1",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "mock-wps-vendor",
+      targetAccount: "mock-wps-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
   });
 
   async execute(command: ProductRunCommand): Promise<Artifact> {
@@ -614,6 +641,12 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
     adapterVersion: "mock-qwen@1",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "mock-qwen-vendor",
+      targetAccount: "mock-qwen-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
   });
 
   constructor(options: MockAdapterOptions = {}) {
@@ -648,6 +681,12 @@ export class MockDoubaoProductAdapter implements ProductAdapterPort {
     adapterVersion: "mock-doubao@1",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "mock-doubao-vendor",
+      targetAccount: "mock-doubao-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
   });
 
   constructor(options: MockAdapterOptions = {}) {

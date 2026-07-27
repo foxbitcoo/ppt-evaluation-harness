@@ -5,6 +5,7 @@ import type {
   TerminalReason,
 } from "./domain.ts";
 import type { EnvironmentOrigin } from "./environment-origin.ts";
+import type { EgressDestinationMetadata } from "./egress-authorization.ts";
 
 export interface ProductPackageSnapshot {
   readonly packageId: string;
@@ -13,6 +14,7 @@ export interface ProductPackageSnapshot {
   readonly adapterVersion: string;
   readonly provenance: "MOCK" | "PRODUCTION";
   readonly environmentOrigin: EnvironmentOrigin;
+  readonly egressDestination: EgressDestinationMetadata;
 }
 
 export interface ProductRunCommand {

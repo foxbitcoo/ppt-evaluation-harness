@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import type {
   AdjudicationEventRecord,
   ArtifactScorecard,
@@ -32,7 +34,10 @@ import {
   canonicalJsonBytes,
   sha256Bytes,
 } from "./run-specification.ts";
-import type { TombstoneLedgerPort } from "./retention.ts";
+import type {
+  PayloadInventoryPort,
+  TombstoneLedgerPort,
+} from "./retention.ts";
 
 export interface CapturedArtifactRecoveryManifest {
   readonly recordId: string;
@@ -162,6 +167,7 @@ export interface OperationalLedgerRecoveryServiceDependencies {
   readonly runSpecificationVault: RunSpecificationVault;
   readonly tombstones: TombstoneLedgerPort;
   readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly payloadInventory: PayloadInventoryPort;
 }
 
 function uniqueStableIds(ids: readonly string[], label: string): void {
@@ -201,6 +207,20 @@ function createExport(
           `Artifact recovery manifest is missing: ${record.artifactId}`,
         );
       }
+      if (
+        record.renderManifest.renderManifestId !==
+          packageManifest.renderManifestId ||
+        record.renderManifest.contentHash !==
+          packageManifest.renderManifestHash ||
+        record.renderManifest.artifactId !==
+          packageManifest.artifact.artifactId ||
+        record.renderManifest.pageCount !==
+          packageManifest.artifact.pageCount
+      ) {
+        throw new Error(
+          `Artifact recovery render manifest lineage is inconsistent: ${record.artifactId}`,
+        );
+      }
       return {
         recordId: record.recordId,
         caseId: record.caseId,
@@ -237,19 +257,32 @@ function createExport(
   const scorecardIds = new Set(
     scorecards.map(({ scorecard }) => scorecard.scorecardId),
   );
-  const adjudicationEvents =
-    command.snapshot.adjudicationEventTable.filter(
-      ({ jobId, scorecardId, artifactId }) =>
-        jobId === command.jobId &&
-        scorecardIds.has(scorecardId) &&
-        artifactIds.has(artifactId),
-    );
-  const reviewEvents = command.snapshot.reviewEventTable.filter(
-    ({ jobId, scorecardId, artifactId }) =>
-      jobId === command.jobId &&
-      scorecardIds.has(scorecardId) &&
-      artifactIds.has(artifactId),
+  const adjudicationEvents = command.snapshot.adjudicationEventTable.filter(
+    ({ jobId }) => jobId === command.jobId,
   );
+  if (
+    adjudicationEvents.some(
+      ({ scorecardId, artifactId }) =>
+        !scorecardIds.has(scorecardId) || !artifactIds.has(artifactId),
+    )
+  ) {
+    throw new Error(
+      `Operational ledger contains dangling adjudication history for Job: ${command.jobId}`,
+    );
+  }
+  const reviewEvents = command.snapshot.reviewEventTable.filter(
+    ({ jobId }) => jobId === command.jobId,
+  );
+  if (
+    reviewEvents.some(
+      ({ scorecardId, artifactId }) =>
+        !scorecardIds.has(scorecardId) || !artifactIds.has(artifactId),
+    )
+  ) {
+    throw new Error(
+      `Operational ledger contains dangling review history for Job: ${command.jobId}`,
+    );
+  }
   const gapCardWorkflowEvents =
     command.snapshot.gapCardWorkflowEventTable.filter((event) =>
       command.snapshot.productGapCardTable.some(
@@ -332,15 +365,6 @@ function createExport(
   };
 }
 
-function exportTargetRegion(
-  ledger: OperationalLedgerRecoveryExport,
-): string {
-  const job = ledger.runRecords.find(
-    ({ recordType }) => recordType === "bakeoff_job",
-  );
-  return job?.environmentOrigin.environment ?? "unknown";
-}
-
 function parseExport(content: Uint8Array): OperationalLedgerRecoveryExport {
   const parsed = JSON.parse(new TextDecoder().decode(content)) as unknown;
   if (
@@ -360,6 +384,7 @@ export function createOperationalLedgerRecoveryService({
   runSpecificationVault,
   tombstones,
   egressAuthorization,
+  payloadInventory,
 }: OperationalLedgerRecoveryServiceDependencies): OperationalLedgerRecoveryService {
   return {
     async exportLedger(command) {
@@ -431,19 +456,27 @@ export function createOperationalLedgerRecoveryService({
       const content = canonicalJsonBytes(ledger);
       const contentHash = sha256Bytes(content);
       const key = `ledger-exports/${command.jobId}/${command.exportId}`;
+      const evaluationCase = ledger.cases.find(
+        ({ caseId }) => caseId === job.caseId,
+      );
+      if (evaluationCase === undefined) {
+        throw new Error(
+          `Operational ledger export is missing Job Case: ${job.caseId}`,
+        );
+      }
       await requireEgressAuthorization(egressAuthorization, {
         requestId: `operational-ledger-export:${command.exportId}:${contentHash}`,
         jobId: command.jobId,
         runId: null,
         attemptId: null,
-        dataClassification: "public_or_synthetic",
-        sourceOwner: "ppt-evaluation-harness",
+        dataClassification: evaluationCase.dataClassification,
+        sourceOwner: evaluationCase.sourceOwner,
         processingPurpose: "operational_ledger_recovery_export",
         targetKind: "storage",
-        targetService: recoveryStore.storeId,
-        targetAccount: "controlled-recovery-store",
-        targetRegion: exportTargetRegion(ledger),
-        subprocessors: [],
+        targetService: recoveryStore.egressDestination.targetService,
+        targetAccount: recoveryStore.egressDestination.targetAccount,
+        targetRegion: recoveryStore.egressDestination.targetRegion,
+        subprocessors: recoveryStore.egressDestination.subprocessors,
         contentFields: [
           "stable_ids",
           "events",
@@ -451,10 +484,21 @@ export function createOperationalLedgerRecoveryService({
           "scorecards",
           "adjudication_history",
         ],
+        payloadHash: contentHash,
         requiredRedactions: [],
-        requestedAt: command.createdAt,
       });
-      await recoveryStore.putImmutable(key, content);
+      await payloadInventory.register(command.jobId, [
+        {
+          storeId: recoveryStore.storeId,
+          key,
+          contentHash,
+          copyRole: "recovery_export",
+        },
+      ]);
+      await recoveryStore.putImmutable(key, content, {
+        jobId: command.jobId,
+        contentHash,
+      });
       const readback = await recoveryStore.read(key);
       if (readback === null || sha256Bytes(readback) !== contentHash) {
         throw new Error(
@@ -601,6 +645,11 @@ export function createOperationalLedgerRecoveryService({
           ({ scorecardId, artifactId }) =>
             !scorecardIds.has(scorecardId) ||
             !artifactIds.has(artifactId),
+        ) ||
+        ledger.reviewEvents.some(
+          ({ scorecardId, artifactId }) =>
+            !scorecardIds.has(scorecardId) ||
+            !artifactIds.has(artifactId),
         )
       ) {
         throw new Error(
@@ -625,6 +674,32 @@ export function createOperationalLedgerRecoveryService({
         const specification = await runSpecificationVault.read(
           run.specificationReference,
         );
+        const specificationCase = ledger.cases.find(
+          ({ caseId }) => caseId === run.caseId,
+        );
+        if (
+          specification.jobId !== ledger.jobId ||
+          specification.runId !== run.recordId ||
+          specificationCase === undefined ||
+          !isDeepStrictEqual(
+            specification.evaluationCase,
+            specificationCase,
+          ) ||
+          specification.productPackage.packageId !==
+            run.productPackageId ||
+          specification.productPackage.vendorId !== run.productVendorId ||
+          specification.productPackage.adapterVersion !==
+            run.adapterVersion ||
+          job.protocolSnapshot === null ||
+          !isDeepStrictEqual(
+            specification.protocolSnapshot,
+            job.protocolSnapshot,
+          )
+        ) {
+          throw new Error(
+            `Run specification lineage does not match recovered Job, Run, Case, or Product Package: ${run.recordId}`,
+          );
+        }
         runSpecifications.push(specification);
         verifiedHashes.push(run.specificationReference.contentHash);
         if (run.artifactId !== null) {
@@ -644,6 +719,7 @@ export function createOperationalLedgerRecoveryService({
           artifacts.push(recovered);
           verifiedHashes.push(
             recovered.manifest.manifestHash,
+            recovered.manifest.renderManifestHash,
             recovered.manifest.artifact.contentHash,
             ...recovered.manifest.derivatives.map(
               ({ contentHash }) => contentHash,

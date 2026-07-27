@@ -56,6 +56,8 @@ test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK paren
       originId: "test:mock-bakeoff-v1",
       environment: "test",
     },
+    dataClassification: "public_or_synthetic",
+    sourceOwner: "ppt-evaluation-harness",
     caseId: VOLCANO_CASE_ID,
     caseVersion: 1,
     track: "query_generation",
@@ -155,7 +157,7 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
   assert.equal(firstOutcome.renderManifest.pageCount, 16);
   assert.equal(
     firstOutcome.renderManifest.contentHash,
-    "sha256:d5905033ed901384ae1605cf439686e63c60afb440498a459bfc8b5929835dee",
+    "sha256:26513dea4952c94370de4c2bea6a89c93a365ba2b76c3c5129a58e7fdfdbc2a3",
   );
   assert.deepEqual(
     firstOutcome.renderManifest.slides.map((slide) => slide.pageNumber),

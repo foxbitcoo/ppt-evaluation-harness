@@ -3,30 +3,133 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { Artifact, RenderManifest } from "./domain.ts";
 import {
+  calculateRenderManifestHash,
+  renderManifestBytes,
+} from "./render-manifest.ts";
+import {
   requireEgressAuthorization,
   type ApprovedEgressAuthorization,
+  type EgressDestinationMetadata,
   type EgressAuthorizationPort,
 } from "./egress-authorization.ts";
+import type { PayloadInventoryPort } from "./retention.ts";
+
+export interface ImmutableBlobWriteContext {
+  readonly jobId: string;
+  readonly contentHash: `sha256:${string}`;
+}
+
+export interface JobTombstoneLookupPort {
+  findByJobId(jobId: string): Promise<unknown | null>;
+}
 
 export interface ImmutableBlobStorePort {
   readonly storeId: string;
-  putImmutable(key: string, content: Uint8Array): Promise<void>;
+  readonly egressDestination: EgressDestinationMetadata;
+  putImmutable(
+    key: string,
+    content: Uint8Array,
+    context: ImmutableBlobWriteContext,
+  ): Promise<void>;
   read(key: string): Promise<Uint8Array | null>;
   delete(key: string): Promise<void>;
 }
 
+export interface ArtifactCaptureJournalEvent {
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly artifactId: string;
+  readonly eventType:
+    | "started"
+    | "write_verified"
+    | "completed"
+    | "failed"
+    | "cleanup_verified";
+  readonly storeId: string | null;
+  readonly key: string | null;
+  readonly detail: string;
+}
+
+export interface ArtifactCaptureJournalPort {
+  append(event: ArtifactCaptureJournalEvent): Promise<void>;
+}
+
+export class InMemoryArtifactCaptureJournal
+  implements ArtifactCaptureJournalPort
+{
+  readonly #events: ArtifactCaptureJournalEvent[] = [];
+
+  async append(event: ArtifactCaptureJournalEvent): Promise<void> {
+    const existing = this.#events.find(
+      ({ eventId }) => eventId === event.eventId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, event)) {
+        throw new Error(`Artifact capture journal conflict: ${event.eventId}`);
+      }
+      return;
+    }
+    this.#events.push(structuredClone(event));
+  }
+
+  list(
+    jobId?: string,
+    artifactId?: string,
+  ): readonly ArtifactCaptureJournalEvent[] {
+    return structuredClone(
+      this.#events.filter(
+        (event) =>
+          (jobId === undefined || event.jobId === jobId) &&
+          (artifactId === undefined || event.artifactId === artifactId),
+      ),
+    );
+  }
+}
+
 export class InMemoryImmutableBlobStore implements ImmutableBlobStorePort {
   readonly storeId: string;
+  readonly egressDestination: EgressDestinationMetadata;
   readonly #blobs = new Map<string, Uint8Array>();
 
-  constructor(storeId: string) {
+  constructor(
+    storeId: string,
+    private readonly tombstones?: JobTombstoneLookupPort,
+    egressDestination?: EgressDestinationMetadata,
+  ) {
     if (storeId.trim().length === 0) {
       throw new Error("Immutable blob store requires a stable storeId");
     }
     this.storeId = storeId;
+    this.egressDestination = Object.freeze(
+      structuredClone(
+        egressDestination ?? {
+          targetService: storeId,
+          targetAccount: `in-memory:${storeId}`,
+          targetRegion: "test",
+          subprocessors: [],
+        },
+      ),
+    );
   }
 
-  async putImmutable(key: string, content: Uint8Array): Promise<void> {
+  async putImmutable(
+    key: string,
+    content: Uint8Array,
+    context: ImmutableBlobWriteContext,
+  ): Promise<void> {
+    if (sha256(content) !== context.contentHash) {
+      throw new Error(
+        `Immutable blob write context hash mismatch: ${this.storeId}/${key}`,
+      );
+    }
+    if (
+      this.tombstones !== undefined &&
+      (await this.tombstones.findByJobId(context.jobId)) !== null
+    ) {
+      throw new Error(
+        `Tombstoned Job ${context.jobId} blocked immutable blob write`,
+      );
+    }
     const existing = this.#blobs.get(key);
     if (existing !== undefined) {
       if (!isDeepStrictEqual(existing, content)) {
@@ -65,8 +168,11 @@ export interface ArtifactMetadata {
 export interface ArtifactDerivativeLineage {
   readonly derivativeId: string;
   readonly sourceArtifactId: string;
-  readonly derivativeType: "static_slide";
-  readonly pageNumber: number;
+  readonly derivativeType:
+    | "static_slide"
+    | "extracted_text"
+    | "contact_sheet";
+  readonly pageNumber: number | null;
   readonly filename: string;
   readonly mimeType: string;
   readonly byteSize: number;
@@ -100,12 +206,15 @@ export interface ArtifactPackageManifest {
 
 export interface CaptureArtifactPackageCommand {
   readonly jobId: string;
+  readonly dataClassification: "public_or_synthetic" | "restricted";
+  readonly sourceOwner: string;
   readonly artifact: Artifact;
   readonly renderManifest: RenderManifest;
 }
 
 export interface RecoveredArtifactPackage {
   readonly manifest: ArtifactPackageManifest;
+  readonly renderManifest: Uint8Array;
   readonly original: Uint8Array;
   readonly derivatives: readonly {
     readonly lineage: ArtifactDerivativeLineage;
@@ -124,6 +233,8 @@ export interface ArtifactVaultDependencies {
   readonly primary: ImmutableBlobStorePort;
   readonly secondary: ImmutableBlobStorePort;
   readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly captureJournal?: ArtifactCaptureJournalPort;
+  readonly payloadInventory: PayloadInventoryPort;
 }
 
 function sha256(content: Uint8Array): `sha256:${string}` {
@@ -177,73 +288,57 @@ function assertSha256(
   }
 }
 
+function derivativeKey(
+  artifactId: string,
+  lineage: ArtifactDerivativeLineage,
+): string {
+  switch (lineage.derivativeType) {
+    case "static_slide":
+      return `artifacts/${artifactId}/derivatives/static-slide-${lineage.pageNumber}`;
+    case "extracted_text":
+      return `artifacts/${artifactId}/derivatives/extracted-text-${lineage.pageNumber}`;
+    case "contact_sheet":
+      return `artifacts/${artifactId}/derivatives/contact-sheet`;
+  }
+}
+
 function storageRequest(input: {
   readonly jobId: string;
   readonly runId: string;
   readonly artifactId: string;
+  readonly dataClassification: "public_or_synthetic" | "restricted";
+  readonly sourceOwner: string;
   readonly storeId: string;
   readonly key: string;
-  readonly requestedAt: string;
-  readonly targetRegion: string;
+  readonly contentHash: `sha256:${string}`;
+  readonly contentField: string;
+  readonly destination: EgressDestinationMetadata;
 }) {
   return Object.freeze({
     requestId: `artifact-storage:${input.artifactId}:${input.storeId}:${input.key}`,
     jobId: input.jobId,
     runId: input.runId,
     attemptId: null,
-    dataClassification: "public_or_synthetic" as const,
-    sourceOwner: "ppt-evaluation-harness",
+    dataClassification: input.dataClassification,
+    sourceOwner: input.sourceOwner,
     processingPurpose: "artifact_storage" as const,
     targetKind: "storage" as const,
-    targetService: input.storeId,
-    targetAccount: "controlled-artifact-store",
-    targetRegion: input.targetRegion,
-    subprocessors: Object.freeze([]),
-    contentFields: Object.freeze(["artifact_binary"]),
+    targetService: input.destination.targetService,
+    targetAccount: input.destination.targetAccount,
+    targetRegion: input.destination.targetRegion,
+    subprocessors: Object.freeze([...input.destination.subprocessors]),
+    contentFields: Object.freeze([input.contentField]),
+    payloadHash: input.contentHash,
     requiredRedactions: Object.freeze([]),
-    requestedAt: input.requestedAt,
   });
-}
-
-async function writeAndVerify(input: {
-  readonly store: ImmutableBlobStorePort;
-  readonly key: string;
-  readonly content: Uint8Array;
-  readonly expectedHash: `sha256:${string}`;
-  readonly copyRole: "primary" | "secondary";
-  readonly jobId: string;
-  readonly runId: string;
-  readonly artifactId: string;
-  readonly requestedAt: string;
-  readonly targetRegion: string;
-  readonly egressAuthorization: EgressAuthorizationPort | undefined;
-}): Promise<ApprovedEgressAuthorization> {
-  const authorization = await requireEgressAuthorization(
-    input.egressAuthorization,
-    storageRequest({
-      jobId: input.jobId,
-      runId: input.runId,
-      artifactId: input.artifactId,
-      storeId: input.store.storeId,
-      key: input.key,
-      requestedAt: input.requestedAt,
-      targetRegion: input.targetRegion,
-    }),
-  );
-  await input.store.putImmutable(input.key, input.content);
-  const readback = await input.store.read(input.key);
-  if (readback === null || sha256(readback) !== input.expectedHash) {
-    throw new Error(
-      `${input.copyRole} upload readback hash mismatch for ${input.key}`,
-    );
-  }
-  return authorization;
 }
 
 export function createArtifactVault({
   primary,
   secondary,
   egressAuthorization,
+  captureJournal = new InMemoryArtifactCaptureJournal(),
+  payloadInventory,
 }: ArtifactVaultDependencies): ArtifactVault {
   if (primary.storeId === secondary.storeId) {
     throw new Error("ArtifactVault requires two distinct controlled stores");
@@ -267,28 +362,78 @@ export function createArtifactVault({
       }
       assertSha256(artifact.content, artifact.contentHash, "Artifact");
 
-      const derivatives = renderManifest.slides.map((slide) => {
+      const expectedRenderManifestHash = calculateRenderManifestHash(
+        artifact.contentHash,
+        renderManifest,
+      );
+      if (expectedRenderManifestHash !== renderManifest.contentHash) {
+        throw new Error("Render manifest content hash mismatch");
+      }
+      const frozenRenderManifest = renderManifestBytes(
+        artifact.contentHash,
+        renderManifest,
+      );
+
+      const slideDerivatives = renderManifest.slides.flatMap((slide) => {
         const content = contentBytes(slide.content);
         assertSha256(content, slide.contentHash, `Slide ${slide.pageNumber}`);
-        return Object.freeze<ArtifactDerivativeLineage>({
-          derivativeId: `${artifact.artifactId}:static-slide:${slide.pageNumber}`,
-          sourceArtifactId: artifact.artifactId,
-          derivativeType: "static_slide",
-          pageNumber: slide.pageNumber,
-          filename: slide.filename,
-          mimeType: slide.mimeType,
-          byteSize: content.byteLength,
-          contentHash: slide.contentHash,
-          pipelineVersion: renderManifest.renderer,
-        });
+        const extractedText = contentBytes(slide.extractedText);
+        return [
+          Object.freeze<ArtifactDerivativeLineage>({
+            derivativeId: `${artifact.artifactId}:static-slide:${slide.pageNumber}`,
+            sourceArtifactId: artifact.artifactId,
+            derivativeType: "static_slide",
+            pageNumber: slide.pageNumber,
+            filename: slide.filename,
+            mimeType: slide.mimeType,
+            byteSize: content.byteLength,
+            contentHash: slide.contentHash,
+            pipelineVersion: renderManifest.renderer,
+          }),
+          Object.freeze<ArtifactDerivativeLineage>({
+            derivativeId: `${artifact.artifactId}:extracted-text:${slide.pageNumber}`,
+            sourceArtifactId: artifact.artifactId,
+            derivativeType: "extracted_text",
+            pageNumber: slide.pageNumber,
+            filename: `slide-${slide.pageNumber}.txt`,
+            mimeType: "text/plain; charset=utf-8",
+            byteSize: extractedText.byteLength,
+            contentHash: sha256(extractedText),
+            pipelineVersion: renderManifest.renderer,
+          }),
+        ];
       });
-      const pageNumbers = derivatives.map(({ pageNumber }) => pageNumber);
+      const pageNumbers = slideDerivatives
+        .filter(({ derivativeType }) => derivativeType === "static_slide")
+        .map(({ pageNumber }) => pageNumber);
       if (
         new Set(pageNumbers).size !== pageNumbers.length ||
         pageNumbers.some((pageNumber, index) => pageNumber !== index + 1)
       ) {
         throw new Error("Artifact derivative page lineage is incomplete");
       }
+      const contactSheetContent = contentBytes(
+        renderManifest.contactSheet.content,
+      );
+      assertSha256(
+        contactSheetContent,
+        renderManifest.contactSheet.contentHash,
+        "Contact sheet",
+      );
+      const derivatives = [
+        ...slideDerivatives,
+        Object.freeze<ArtifactDerivativeLineage>({
+          derivativeId: `${artifact.artifactId}:contact-sheet`,
+          sourceArtifactId: artifact.artifactId,
+          derivativeType: "contact_sheet",
+          pageNumber: null,
+          filename: renderManifest.contactSheet.filename,
+          mimeType: renderManifest.contactSheet.mimeType,
+          byteSize: contactSheetContent.byteLength,
+          contentHash: renderManifest.contactSheet.contentHash,
+          pipelineVersion: renderManifest.renderer,
+        }),
+      ];
       const artifactMetadata = Object.freeze<ArtifactMetadata>({
         artifactId: artifact.artifactId,
         runId: artifact.runId,
@@ -314,47 +459,175 @@ export function createArtifactVault({
           key: `artifacts/${artifact.artifactId}/manifest`,
           content: frozenIdentity,
           contentHash: manifestHash,
+          contentField: "artifact_package_identity_manifest",
         },
         {
           key: `artifacts/${artifact.artifactId}/original`,
           content: artifact.content,
           contentHash: artifact.contentHash,
+          contentField: "original_artifact_binary",
         },
-        ...derivatives.map((lineage, index) => ({
-          key: `artifacts/${artifact.artifactId}/derivatives/static-slide-${lineage.pageNumber}`,
-          content: contentBytes(renderManifest.slides[index]?.content ?? ""),
-          contentHash: lineage.contentHash,
-        })),
+        {
+          key: `artifacts/${artifact.artifactId}/render-manifest`,
+          content: frozenRenderManifest,
+          contentHash: renderManifest.contentHash,
+          contentField: "full_render_manifest",
+        },
+        ...derivatives.map((lineage) => {
+          const slide =
+            lineage.pageNumber === null
+              ? null
+              : renderManifest.slides[lineage.pageNumber - 1];
+          const content =
+            lineage.derivativeType === "static_slide"
+              ? contentBytes(slide?.content ?? "")
+              : lineage.derivativeType === "extracted_text"
+                ? contentBytes(slide?.extractedText ?? "")
+                : contactSheetContent;
+          return {
+            key: derivativeKey(artifact.artifactId, lineage),
+            content,
+            contentHash: lineage.contentHash,
+            contentField: lineage.derivativeType,
+          };
+        }),
       ];
       const authorizations: ApprovedEgressAuthorization[] = [];
       const payloadLocations: RetentionPayloadLocation[] = [];
-      for (const payload of payloads) {
-        for (const [store, copyRole] of [
+      const writePlan = payloads.flatMap((payload) =>
+        ([
           [primary, "primary"],
           [secondary, "secondary"],
-        ] as const) {
-          authorizations.push(
-            await writeAndVerify({
-              store,
-              key: payload.key,
-              content: payload.content,
-              expectedHash: payload.contentHash,
-              copyRole,
+        ] as const).map(([store, copyRole]) => ({
+          ...payload,
+          store,
+          copyRole,
+        })),
+      );
+      for (const planned of writePlan) {
+        authorizations.push(
+          await requireEgressAuthorization(
+            egressAuthorization,
+            storageRequest({
               jobId: command.jobId,
               runId: artifact.runId,
               artifactId: artifact.artifactId,
-              requestedAt: artifact.capturedAt,
-              targetRegion: artifact.environmentOrigin.environment,
-              egressAuthorization,
+              dataClassification: command.dataClassification,
+              sourceOwner: command.sourceOwner,
+              storeId: planned.store.storeId,
+              key: planned.key,
+              contentHash: planned.contentHash,
+              contentField: planned.contentField,
+              destination: planned.store.egressDestination,
             }),
-          );
-          payloadLocations.push({
-            storeId: store.storeId,
-            key: payload.key,
-            contentHash: payload.contentHash,
-            copyRole,
+          ),
+        );
+        payloadLocations.push({
+          storeId: planned.store.storeId,
+          key: planned.key,
+          contentHash: planned.contentHash,
+          copyRole: planned.copyRole,
+        });
+      }
+      await captureJournal.append({
+        eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:started`,
+        jobId: command.jobId,
+        artifactId: artifact.artifactId,
+        eventType: "started",
+        storeId: null,
+        key: null,
+        detail: `planned:${writePlan.length}`,
+      });
+      await payloadInventory.register(command.jobId, payloadLocations);
+      let verifiedWrites = 0;
+      const createdLocations = new Set<string>();
+      try {
+        for (const planned of writePlan) {
+          const locationIdentity =
+            `${planned.store.storeId}\u0000${planned.key}`;
+          const before = await planned.store.read(planned.key);
+          if (before === null) {
+            await planned.store.putImmutable(planned.key, planned.content, {
+              jobId: command.jobId,
+              contentHash: planned.contentHash,
+            });
+            createdLocations.add(locationIdentity);
+          } else if (sha256(before) !== planned.contentHash) {
+            throw new Error(
+              `Immutable blob conflict: ${planned.store.storeId}/${planned.key}`,
+            );
+          }
+          const readback = await planned.store.read(planned.key);
+          if (
+            readback === null ||
+            sha256(readback) !== planned.contentHash
+          ) {
+            throw new Error(
+              `${planned.copyRole} upload readback hash mismatch for ${planned.key}`,
+            );
+          }
+          verifiedWrites += 1;
+          await captureJournal.append({
+            eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:write:${verifiedWrites}`,
+            jobId: command.jobId,
+            artifactId: artifact.artifactId,
+            eventType: "write_verified",
+            storeId: planned.store.storeId,
+            key: planned.key,
+            detail: planned.contentHash,
           });
         }
+        await captureJournal.append({
+          eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:completed`,
+          jobId: command.jobId,
+          artifactId: artifact.artifactId,
+          eventType: "completed",
+          storeId: null,
+          key: null,
+          detail: `verified:${verifiedWrites}`,
+        });
+      } catch (error) {
+        await captureJournal.append({
+          eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:failed`,
+          jobId: command.jobId,
+          artifactId: artifact.artifactId,
+          eventType: "failed",
+          storeId: null,
+          key: null,
+          detail: error instanceof Error ? error.message : String(error),
+        });
+        const cleanupFailures: string[] = [];
+        for (const planned of writePlan) {
+          const locationIdentity =
+            `${planned.store.storeId}\u0000${planned.key}`;
+          if (!createdLocations.has(locationIdentity)) continue;
+          try {
+            await planned.store.delete(planned.key);
+            if ((await planned.store.read(planned.key)) !== null) {
+              cleanupFailures.push(
+                `${planned.store.storeId}/${planned.key}`,
+              );
+            }
+          } catch {
+            cleanupFailures.push(`${planned.store.storeId}/${planned.key}`);
+          }
+        }
+        if (cleanupFailures.length > 0) {
+          throw new Error(
+            `Artifact capture failed and cleanup was incomplete: ${cleanupFailures.join(", ")}`,
+            { cause: error },
+          );
+        }
+        await captureJournal.append({
+          eventId: `artifact-capture:${command.jobId}:${artifact.artifactId}:cleanup`,
+          jobId: command.jobId,
+          artifactId: artifact.artifactId,
+          eventType: "cleanup_verified",
+          storeId: null,
+          key: null,
+          detail: `absent:${writePlan.length}`,
+        });
+        throw error;
       }
 
       return Object.freeze({
@@ -411,9 +684,28 @@ export function createArtifactVault({
       ) {
         throw new Error("Artifact secondary original hash mismatch");
       }
+      const renderManifestLocation = manifest.payloadLocations.find(
+        ({ copyRole, key, contentHash }) =>
+          copyRole === "secondary" &&
+          key.endsWith("/render-manifest") &&
+          contentHash === manifest.renderManifestHash,
+      );
+      if (renderManifestLocation === undefined) {
+        throw new Error("Artifact secondary render manifest location is missing");
+      }
+      const renderManifest = await secondary.read(renderManifestLocation.key);
+      if (
+        renderManifest === null ||
+        sha256(renderManifest) !== manifest.renderManifestHash
+      ) {
+        throw new Error("Artifact secondary render manifest hash mismatch");
+      }
       const recoveredDerivatives = [];
       for (const lineage of manifest.derivatives) {
-        const expectedKey = `artifacts/${manifest.artifact.artifactId}/derivatives/static-slide-${lineage.pageNumber}`;
+        const expectedKey = derivativeKey(
+          manifest.artifact.artifactId,
+          lineage,
+        );
         const location = manifest.payloadLocations.find(
           ({ copyRole, contentHash, key }) =>
             copyRole === "secondary" &&
@@ -435,6 +727,7 @@ export function createArtifactVault({
       }
       return {
         manifest,
+        renderManifest,
         original,
         derivatives: recoveredDerivatives,
       };

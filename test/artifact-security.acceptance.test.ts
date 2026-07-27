@@ -3,6 +3,8 @@ import { test } from "node:test";
 
 import {
   InMemoryImmutableBlobStore,
+  InMemoryArtifactCaptureJournal,
+  InMemoryPayloadInventory,
   InMemoryFeishuProjection,
   MockWpsProductAdapter,
   VOLCANO_CASE_ID,
@@ -13,11 +15,17 @@ import {
   createRunSpecificationVault,
   createScoreAdjudicationService,
   InMemoryTombstoneLedger,
+  calculateRenderManifestHash,
+  canonicalJsonBytes,
+  requireEgressAuthorization,
+  sha256Bytes,
   type Artifact,
+  type ClockPort,
   type EgressAuthorizationPort,
   type ImmutableBlobStorePort,
   type ProductAdapterPort,
   type RenderManifest,
+  type RunSpecificationVault,
 } from "../src/index.ts";
 import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "../src/environment-origin.ts";
 
@@ -42,6 +50,78 @@ const APPROVED_EGRESS: EgressAuthorizationPort = {
   },
 };
 
+test("egress authorization evaluates expiry against an injected call-boundary clock and binds the exact payload hash", async () => {
+  const observedRequests: unknown[] = [];
+  const clockValues = [
+    "2026-07-27T00:00:00.000Z",
+    "2026-07-27T00:00:02.000Z",
+  ];
+  const clock: ClockPort = {
+    now() {
+      return clockValues.shift() ?? "2026-07-27T00:00:02.000Z";
+    },
+  };
+  const authorization: EgressAuthorizationPort = {
+    async authorize(request) {
+      observedRequests.push(request);
+      return {
+        status: "approved",
+        decisionId: "decision:expires-between-checks",
+        policyVersion: "test-egress-policy-v1",
+        request,
+        legalSecurityBasis: "synthetic test fixture",
+        approvedAt: "2026-07-27T00:00:00.000Z",
+        expiresAt: "2026-07-27T00:00:01.000Z",
+      };
+    },
+  };
+
+  await assert.rejects(
+    requireEgressAuthorization(
+      authorization,
+      {
+        requestId: "egress-clock-001",
+        jobId: "job-stable-001",
+        runId: "run-stable-001",
+        attemptId: null,
+        dataClassification: "public_or_synthetic",
+        sourceOwner: "evaluation-owner",
+        processingPurpose: "artifact_rendering",
+        targetKind: "renderer",
+        targetService: "renderer-service",
+        targetAccount: "renderer-account",
+        targetRegion: "cn",
+        subprocessors: ["renderer-subprocessor"],
+        contentFields: ["artifact_binary"],
+        payloadHash: ARTIFACT_HASH,
+        requiredRedactions: [],
+      },
+      clock,
+    ),
+    /expired.*artifact_rendering.*blocked/i,
+  );
+  assert.deepEqual(observedRequests, [
+    {
+      requestId: "egress-clock-001",
+      jobId: "job-stable-001",
+      runId: "run-stable-001",
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
+      processingPurpose: "artifact_rendering",
+      targetKind: "renderer",
+      targetService: "renderer-service",
+      targetAccount: "renderer-account",
+      targetRegion: "cn",
+      subprocessors: ["renderer-subprocessor"],
+      contentFields: ["artifact_binary"],
+      payloadHash: ARTIFACT_HASH,
+      requiredRedactions: [],
+      requestedAt: "2026-07-27T00:00:00.000Z",
+    },
+  ]);
+});
+
 function fixtureArtifact(): Artifact {
   return {
     artifactId: "artifact-stable-001",
@@ -60,15 +140,27 @@ function fixtureArtifact(): Artifact {
 }
 
 function fixtureRenderManifest(): RenderManifest {
-  return {
+  const manifest: Omit<RenderManifest, "contentHash"> = {
     renderManifestId: "render-stable-001",
     artifactId: "artifact-stable-001",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     renderer: "mock-static-svg@1",
     pageCount: 2,
-    contentHash:
-      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    renderPolicy: {
+      fontPack: "mock-font-pack@1",
+      resolution: "1280x720",
+      colorProfile: "sRGB",
+      animationPolicy: "first_frame",
+      externalAssetPolicy: "network_disabled",
+    },
+    contactSheet: {
+      filename: "contact-sheet.svg",
+      mimeType: "image/svg+xml" as const,
+      contentHash:
+        "sha256:bbe093b485d07f5c26c9407252fa7fa9a17fad3828b6b7ef9211173ce313d1f1" as const,
+      content: "<svg>contact-sheet</svg>",
+    },
     slides: [
       {
         pageNumber: 1,
@@ -88,19 +180,32 @@ function fixtureRenderManifest(): RenderManifest {
       },
     ],
   };
+  return {
+    ...manifest,
+    contentHash: calculateRenderManifestHash(
+      ARTIFACT_HASH,
+      manifest,
+    ),
+  };
 }
 
 test("ArtifactVault stores immutable original and derivative lineage in two controlled copies and verifies both readbacks", async () => {
   const primary = new InMemoryImmutableBlobStore("primary");
   const secondary = new InMemoryImmutableBlobStore("secondary");
+  const payloadInventory = new InMemoryPayloadInventory(
+    new InMemoryTombstoneLedger(),
+  );
   const vault = createArtifactVault({
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory,
   });
 
   const manifest = await vault.capture({
     jobId: "job-stable-001",
+    dataClassification: "public_or_synthetic",
+    sourceOwner: "evaluation-owner",
     artifact: fixtureArtifact(),
     renderManifest: fixtureRenderManifest(),
   });
@@ -113,14 +218,26 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
       byteSize: manifest.artifact.byteSize,
       pageCount: manifest.artifact.pageCount,
       capturedAt: manifest.artifact.capturedAt,
-      derivatives: manifest.derivatives.map((lineage) => ({
-        derivativeId: lineage.derivativeId,
-        sourceArtifactId: lineage.sourceArtifactId,
-        pageNumber: lineage.pageNumber,
-        contentHash: lineage.contentHash,
-      })),
-      primaryKeys: primary.listKeys(),
-      secondaryKeys: secondary.listKeys(),
+      derivatives: manifest.derivatives
+        .filter(({ derivativeType }) => derivativeType === "static_slide")
+        .map((lineage) => ({
+          derivativeId: lineage.derivativeId,
+          sourceArtifactId: lineage.sourceArtifactId,
+          pageNumber: lineage.pageNumber,
+          contentHash: lineage.contentHash,
+        })),
+      derivativeTypes: manifest.derivatives.reduce<Record<string, number>>(
+        (counts, { derivativeType }) => {
+          counts[derivativeType] = (counts[derivativeType] ?? 0) + 1;
+          return counts;
+        },
+        {},
+      ),
+      primaryKeyCount: primary.listKeys().length,
+      secondaryKeyCount: secondary.listKeys().length,
+      hasRenderManifest: primary
+        .listKeys()
+        .includes("artifacts/artifact-stable-001/render-manifest"),
     },
     {
       artifactId: "artifact-stable-001",
@@ -144,18 +261,14 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
           contentHash: SLIDE_TWO_HASH,
         },
       ],
-      primaryKeys: [
-        "artifacts/artifact-stable-001/derivatives/static-slide-1",
-        "artifacts/artifact-stable-001/derivatives/static-slide-2",
-        "artifacts/artifact-stable-001/manifest",
-        "artifacts/artifact-stable-001/original",
-      ],
-      secondaryKeys: [
-        "artifacts/artifact-stable-001/derivatives/static-slide-1",
-        "artifacts/artifact-stable-001/derivatives/static-slide-2",
-        "artifacts/artifact-stable-001/manifest",
-        "artifacts/artifact-stable-001/original",
-      ],
+      derivativeTypes: {
+        static_slide: 2,
+        extracted_text: 2,
+        contact_sheet: 1,
+      },
+      primaryKeyCount: 8,
+      secondaryKeyCount: 8,
+      hasRenderManifest: true,
     },
   );
 
@@ -168,6 +281,8 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
   await assert.rejects(
     vault.capture({
       jobId: "job-stable-001",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
       artifact: conflictingArtifact,
       renderManifest: fixtureRenderManifest(),
     }),
@@ -178,10 +293,15 @@ test("ArtifactVault stores immutable original and derivative lineage in two cont
 test("ArtifactVault rejects a storage copy whose upload readback no longer matches the captured hash", async () => {
   const primary = new InMemoryImmutableBlobStore("primary");
   const secondaryDelegate = new InMemoryImmutableBlobStore("secondary");
+  const captureJournal = new InMemoryArtifactCaptureJournal();
+  const payloadInventory = new InMemoryPayloadInventory(
+    new InMemoryTombstoneLedger(),
+  );
   const corruptSecondary: ImmutableBlobStorePort = {
     storeId: secondaryDelegate.storeId,
-    putImmutable: (key, content) =>
-      secondaryDelegate.putImmutable(key, content),
+    egressDestination: secondaryDelegate.egressDestination,
+    putImmutable: (key, content, context) =>
+      secondaryDelegate.putImmutable(key, content, context),
     async read(key) {
       const stored = await secondaryDelegate.read(key);
       return stored === null
@@ -196,12 +316,24 @@ test("ArtifactVault rejects a storage copy whose upload readback no longer match
       primary,
       secondary: corruptSecondary,
       egressAuthorization: APPROVED_EGRESS,
+      captureJournal,
+      payloadInventory,
     }).capture({
       jobId: "job-stable-001",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
       artifact: fixtureArtifact(),
       renderManifest: fixtureRenderManifest(),
     }),
     /secondary.*readback.*hash mismatch/i,
+  );
+  assert.deepEqual(primary.listKeys(), []);
+  assert.deepEqual(secondaryDelegate.listKeys(), []);
+  assert.deepEqual(
+    captureJournal
+      .list("job-stable-001", "artifact-stable-001")
+      .map(({ eventType }) => eventType),
+    ["started", "write_verified", "failed", "cleanup_verified"],
   );
 });
 
@@ -215,6 +347,12 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
       adapterVersion: "denied-vendor-adapter@1",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      egressDestination: {
+        targetService: "denied-vendor-service",
+        targetAccount: "denied-vendor-test-account",
+        targetRegion: "test",
+        subprocessors: [],
+      },
     },
     async execute() {
       vendorCalls += 1;
@@ -267,6 +405,9 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
   const primary = new InMemoryImmutableBlobStore("primary");
   const secondary = new InMemoryImmutableBlobStore("secondary");
   const recovery = new InMemoryImmutableBlobStore("recovery");
+  const payloadInventory = new InMemoryPayloadInventory(
+    new InMemoryTombstoneLedger(),
+  );
   const purposes: string[] = [];
   const authorization: EgressAuthorizationPort = {
     async authorize(request) {
@@ -275,6 +416,11 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
     },
   };
   const feishu = new InMemoryFeishuProjection();
+  const runSpecificationVault = createRunSpecificationVault({
+    store: recovery,
+    egressAuthorization: authorization,
+    payloadInventory,
+  });
 
   await createBakeoffHarness({
     feishu,
@@ -284,11 +430,9 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
       primary,
       secondary,
       egressAuthorization: authorization,
+      payloadInventory,
     }),
-    runSpecificationVault: createRunSpecificationVault({
-      store: recovery,
-      egressAuthorization: authorization,
-    }),
+    runSpecificationVault,
     specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
   }).startBakeoffJob({
     environment: "test",
@@ -321,14 +465,8 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         storeId: "recovery",
         key: vendorRun.specificationReference?.key,
         specCommitSha: "9e68de5801bc14f00c187336000c83ce8cc37efa",
-        versionReferences: {
-          caseVersion: "1",
-          productPackageVersion: "MOCK-wps-package-v1",
-          runPolicyVersion: "MOCK-query-default-cost-v1",
-          adapterVersion: "mock-wps@1",
-          schemaVersion: "evaluation-framework-v0.8",
-          rubricVersion: "query-six-dimension-v1",
-        },
+        versionReferences:
+          vendorRun.specificationReference?.versionReferences,
       },
       artifact: {
         artifactId: "MOCK-artifact-wps-volcano-v1",
@@ -341,7 +479,7 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
         capturedAt: "2026-01-01T00:00:00.000Z",
         filename: "MOCK-wps-volcano-16.pptx",
       },
-      derivativeCount: 16,
+      derivativeCount: 33,
       purposes: [
         "artifact_rendering",
         "artifact_storage",
@@ -365,6 +503,56 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
       "sha256:".length,
     )}`,
   );
+  const specification = await runSpecificationVault.read(
+    vendorRun.specificationReference,
+  );
+  const hashes = vendorRun.specificationReference.versionReferences;
+  assert.deepEqual(
+    {
+      case: hashes.caseContentHash,
+      productPackage: hashes.productPackageContentHash,
+      protocol: hashes.protocolSnapshotContentHash,
+      adapter: hashes.adapterSpecificationHash,
+      schema: hashes.schemaSnapshotHash,
+      rubric: hashes.rubricSnapshotHash,
+      estimator: hashes.estimatorSnapshotHash,
+      runnerCode: hashes.runnerCodeDigest,
+      runnerImage: hashes.runnerImageDigest,
+      environment: hashes.environmentEvidenceHash,
+    },
+    {
+      case: sha256Bytes(
+        canonicalJsonBytes(specification.evaluationCase),
+      ),
+      productPackage: sha256Bytes(
+        canonicalJsonBytes(specification.productPackage),
+      ),
+      protocol: sha256Bytes(
+        canonicalJsonBytes(specification.protocolSnapshot),
+      ),
+      adapter: sha256Bytes(
+        canonicalJsonBytes(specification.adapterSpecification),
+      ),
+      schema: sha256Bytes(
+        canonicalJsonBytes(specification.schemaSnapshot),
+      ),
+      rubric: sha256Bytes(
+        canonicalJsonBytes(specification.rubricSnapshot),
+      ),
+      estimator: sha256Bytes(
+        canonicalJsonBytes(specification.estimatorSnapshot),
+      ),
+      runnerCode: sha256Bytes(
+        canonicalJsonBytes(specification.runnerCodeEvidence),
+      ),
+      runnerImage: sha256Bytes(
+        canonicalJsonBytes(specification.runnerImageEvidence),
+      ),
+      environment: sha256Bytes(
+        canonicalJsonBytes(specification.environmentEvidence),
+      ),
+    },
+  );
 });
 
 test("a recovery rehearsal rebuilds a complete hash-validated Job from the external ledger export, Run specs, and secondary Artifact copy only", async () => {
@@ -372,14 +560,17 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
   const secondary = new InMemoryImmutableBlobStore("secondary");
   const recovery = new InMemoryImmutableBlobStore("recovery");
   const tombstones = new InMemoryTombstoneLedger();
+  const payloadInventory = new InMemoryPayloadInventory(tombstones);
   const artifactVault = createArtifactVault({
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory,
   });
   const runSpecificationVault = createRunSpecificationVault({
     store: recovery,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory,
   });
   const feishu = new InMemoryFeishuProjection();
   await createBakeoffHarness({
@@ -411,16 +602,70 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
     runSpecificationVault,
     tombstones,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory,
   });
+  const snapshot = feishu.snapshot();
+  const adjudication = snapshot.adjudicationEventTable[0];
+  assert.ok(adjudication);
+  await assert.rejects(
+    recoveryService.exportLedger({
+      exportId: "ledger-export-dangling-history",
+      jobId: "MOCK-job-volcano-v1",
+      checkpoint: "run-record-seq:3",
+      snapshot: {
+        ...snapshot,
+        adjudicationEventTable: [
+          ...snapshot.adjudicationEventTable,
+          {
+            ...adjudication,
+            adjudicationEventId: "adjudication-dangling-001",
+            scorecardId: "scorecard-missing-from-job",
+          },
+        ],
+      },
+      createdAt: "2026-01-01T00:14:00.000Z",
+      encryption: "test-managed-key-v1",
+      retentionExpiresAt: "2026-02-01T00:00:00.000Z",
+    }),
+    /dangling.*adjudication.*history/i,
+  );
   const exported = await recoveryService.exportLedger({
     exportId: "ledger-export-001",
     jobId: "MOCK-job-volcano-v1",
     checkpoint: "run-record-seq:3",
-    snapshot: feishu.snapshot(),
+    snapshot,
     createdAt: "2026-01-01T00:15:00.000Z",
     encryption: "test-managed-key-v1",
     retentionExpiresAt: "2026-02-01T00:00:00.000Z",
   });
+
+  const mismatchedSpecificationVault: RunSpecificationVault = {
+    ...runSpecificationVault,
+    async read(reference) {
+      const specification = await runSpecificationVault.read(reference);
+      return {
+        ...specification,
+        evaluationCase: {
+          ...specification.evaluationCase,
+          caseId: "different-case",
+        },
+      };
+    },
+  };
+  await assert.rejects(
+    createOperationalLedgerRecoveryService({
+      recoveryStore: recovery,
+      artifactVault,
+      runSpecificationVault: mismatchedSpecificationVault,
+      tombstones,
+      egressAuthorization: APPROVED_EGRESS,
+      payloadInventory,
+    }).rehearse({
+      exportReference: exported,
+      rehearsedAt: "2026-01-01T00:19:00.000Z",
+    }),
+    /run specification.*lineage.*case/i,
+  );
 
   const rehearsal = await recoveryService.rehearse({
     exportReference: exported,
@@ -456,7 +701,7 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
       artifactIds: ["MOCK-artifact-wps-volcano-v1"],
       specificationRunIds: ["MOCK-run-wps-volcano-v1"],
       adjudicationIds: ["adjudication-recovery-001"],
-      verifiedHashCount: 20,
+      verifiedHashCount: 38,
       usedSources: [
         "versioned_recovery_export",
         "run_specification_recovery_store",
@@ -467,19 +712,25 @@ test("a recovery rehearsal rebuilds a complete hash-validated Job from the exter
 });
 
 test("retention expiry tombstones and deletes every controlled payload class while recovery refuses resurrection", async () => {
-  const primary = new InMemoryImmutableBlobStore("primary");
-  const secondary = new InMemoryImmutableBlobStore("secondary");
-  const recovery = new InMemoryImmutableBlobStore("recovery");
-  const quarantine = new InMemoryImmutableBlobStore("quarantine");
   const tombstones = new InMemoryTombstoneLedger();
+  const inventory = new InMemoryPayloadInventory(tombstones);
+  const primary = new InMemoryImmutableBlobStore("primary", tombstones);
+  const secondary = new InMemoryImmutableBlobStore("secondary", tombstones);
+  const recovery = new InMemoryImmutableBlobStore("recovery", tombstones);
+  const quarantine = new InMemoryImmutableBlobStore(
+    "quarantine",
+    tombstones,
+  );
   const artifactVault = createArtifactVault({
     primary,
     secondary,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory: inventory,
   });
   const runSpecificationVault = createRunSpecificationVault({
     store: recovery,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory: inventory,
   });
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
@@ -499,6 +750,7 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     runSpecificationVault,
     tombstones,
     egressAuthorization: APPROVED_EGRESS,
+    payloadInventory: inventory,
   });
   const exported = await recoveryService.exportLedger({
     exportId: "ledger-export-retention-001",
@@ -520,24 +772,24 @@ test("retention expiry tombstones and deletes every controlled payload class whi
   await quarantine.putImmutable(
     "quarantine/MOCK-job-volcano-v1/redaction-failure-001",
     quarantineContent,
+    {
+      jobId: "MOCK-job-volcano-v1",
+      contentHash: quarantineHash,
+    },
   );
-  const payloadLocations = [
-    ...vendorRun.artifactPackageManifest.payloadLocations,
-    runSpecificationVault.retentionLocation(
-      vendorRun.specificationReference,
-    ),
-    recoveryService.retentionLocation(exported),
+  await inventory.register("MOCK-job-volcano-v1", [
     {
       storeId: "quarantine",
       key: "quarantine/MOCK-job-volcano-v1/redaction-failure-001",
       contentHash: quarantineHash,
       copyRole: "quarantine" as const,
     },
-  ];
+  ]);
 
   const expiry = await createRetentionService({
     stores: [primary, secondary, recovery, quarantine],
     tombstones,
+    payloadInventory: inventory,
   }).expire({
     tombstoneId: "tombstone-MOCK-job-volcano-v1",
     jobId: "MOCK-job-volcano-v1",
@@ -547,7 +799,6 @@ test("retention expiry tombstones and deletes every controlled payload class whi
       "ledger-export-retention-001",
     ],
     expiredAt: "2026-02-01T00:00:00.000Z",
-    payloadLocations,
   });
 
   assert.deepEqual(
@@ -566,13 +817,13 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     },
     {
       tombstoneId: "tombstone-MOCK-job-volcano-v1",
-      deletedPayloads: 39,
+      deletedPayloads: 75,
       primaryKeys: [],
       secondaryKeys: [],
       recoveryKeys: [],
       quarantineKeys: [],
       retainedTombstones: 1,
-      deletionEvidence: 39,
+      deletionEvidence: 75,
     },
   );
 
@@ -583,9 +834,16 @@ test("retention expiry tombstones and deletes every controlled payload class whi
     );
   assert.ok(originalLocation);
   assert.ok(bakeoff.artifact);
-  await secondary.putImmutable(
-    originalLocation.key,
-    bakeoff.artifact.content,
+  await assert.rejects(
+    secondary.putImmutable(
+      originalLocation.key,
+      bakeoff.artifact.content,
+      {
+        jobId: "MOCK-job-volcano-v1",
+        contentHash: originalLocation.contentHash,
+      },
+    ),
+    /tombstoned.*write/i,
   );
   await assert.rejects(
     recoveryService.rehearse({
