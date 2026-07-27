@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { inflateRawSync } from "node:zlib";
 
 import type {
@@ -36,6 +37,27 @@ export const WPS_AIPPT_URL = "https://aippt.wps.cn/aippt/" as const;
 export const WPS_AIPPT_ADAPTER_VERSION = "wps-aippt-browser@1" as const;
 
 const textEncoder = new TextEncoder();
+interface StructuredXmlAttribute {
+  readonly uri: string;
+  readonly local: string;
+  readonly value: string;
+}
+interface StructuredXmlTag {
+  readonly uri: string;
+  readonly local: string;
+  readonly attributes: Record<string, StructuredXmlAttribute>;
+}
+interface StructuredXmlParser {
+  on(event: "opentag", listener: (tag: StructuredXmlTag) => void): void;
+  on(event: "closetag", listener: () => void): void;
+  write(xml: string): StructuredXmlParser;
+  close(): StructuredXmlParser;
+}
+const { SaxesParser } = createRequire(import.meta.url)("saxes") as {
+  readonly SaxesParser: new (options: {
+    readonly xmlns: true;
+  }) => StructuredXmlParser;
+};
 const adapterModuleContent = readFileSync(new URL(import.meta.url));
 const PPTX_MIME_TYPE =
   "application/vnd.openxmlformats-officedocument.presentationml.presentation";
@@ -620,6 +642,62 @@ function parseRelationships(xml: string): readonly ParsedRelationship[] {
   return Object.freeze(relationships);
 }
 
+function parsePresentationSlideIds(
+  xml: string,
+): readonly { readonly id: string; readonly relationshipId: string }[] {
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) {
+    throw new Error("WPS Artifact OPC XML declarations are unsafe");
+  }
+  const presentationNamespace =
+    "http://schemas.openxmlformats.org/presentationml/2006/main";
+  const relationshipNamespace =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const stack: Array<{ readonly uri: string; readonly local: string }> = [];
+  const slideIds: Array<{
+    readonly id: string;
+    readonly relationshipId: string;
+  }> = [];
+  const parser = new SaxesParser({ xmlns: true });
+  parser.on("opentag", (tag) => {
+    stack.push({ uri: tag.uri, local: tag.local });
+    if (
+      stack.length !== 3 ||
+      stack[0]?.uri !== presentationNamespace ||
+      stack[0]?.local !== "presentation" ||
+      stack[1]?.uri !== presentationNamespace ||
+      stack[1]?.local !== "sldIdLst" ||
+      stack[2]?.uri !== presentationNamespace ||
+      stack[2]?.local !== "sldId"
+    ) {
+      return;
+    }
+    const attributes = Object.values(tag.attributes);
+    const id = attributes.find(
+      (attribute) => attribute.uri === "" && attribute.local === "id",
+    )?.value;
+    const relationshipId = attributes.find(
+      (attribute) =>
+        attribute.uri === relationshipNamespace &&
+        attribute.local === "id",
+    )?.value;
+    if (
+      id === undefined ||
+      relationshipId === undefined ||
+      !/^\d+$/.test(id)
+    ) {
+      throw new Error(
+        "WPS Artifact OPC presentation slide IDs are malformed",
+      );
+    }
+    slideIds.push({ id, relationshipId });
+  });
+  parser.on("closetag", () => {
+    stack.pop();
+  });
+  parser.write(xml).close();
+  return Object.freeze(slideIds);
+}
+
 function validatedOpcSlideNames(
   content: Uint8Array,
 ): readonly string[] {
@@ -678,26 +756,9 @@ function validatedOpcSlideNames(
       relationship,
     ]),
   );
-  const presentationXml = decodeXmlEntities(
+  const presentationSlideIds = parsePresentationSlideIds(
     decoder.decode(byName.get("ppt/presentation.xml")),
   );
-  const presentationSlideIds = [
-    ...presentationXml.matchAll(/<p:sldId\b([^>]*)\/?>/gi),
-  ].map((match) => {
-    const attributes = parsedAttributes(match[1]!);
-    const id = attributes.get("id");
-    const relationshipId = attributes.get("r:id");
-    if (
-      id === undefined ||
-      relationshipId === undefined ||
-      !/^\d+$/.test(id)
-    ) {
-      throw new Error(
-        "WPS Artifact OPC presentation slide IDs are malformed",
-      );
-    }
-    return { id, relationshipId };
-  });
   if (
     presentationSlideIds.length !== 16 ||
     new Set(presentationSlideIds.map(({ id }) => id)).size !== 16 ||
@@ -862,6 +923,118 @@ export function resolveWpsAiPptProductAdapterExecutor(
       );
     }
     const persistedEvents: ObservableAttemptEvent[] = [];
+    const recoveredEvents =
+      (await checkpointStore?.readAttempt?.(command.attemptId)) ?? [];
+    const stateVersionByTask = new Map<string, number>();
+    for (const event of recoveredEvents) {
+      if (
+        event.jobId !== command.jobId ||
+        event.runId !== command.runId ||
+        event.attemptId !== command.attemptId ||
+        event.attemptSeq !== command.attemptSeq ||
+        event.caseId !== command.evaluationCase.caseId ||
+        event.adapterVersion !== WPS_AIPPT_ADAPTER_VERSION
+      ) {
+        throw new Error(
+          "Recovered WPS checkpoint lineage does not match the Attempt",
+        );
+      }
+      if (
+        event.vendorTaskId !== null &&
+        event.vendorTaskId !== undefined &&
+        event.taskStateVersion !== null &&
+        event.taskStateVersion !== undefined
+      ) {
+        const match = /@(\d+)$/.exec(event.taskStateVersion);
+        if (match === null) {
+          throw new Error(
+            "Recovered WPS checkpoint stateVersion is not ordered",
+          );
+        }
+        const version = Number(match[1]);
+        const prior = stateVersionByTask.get(event.vendorTaskId) ?? -1;
+        if (version < prior) {
+          throw new Error(
+            "Recovered WPS checkpoint stateVersion regressed",
+          );
+        }
+        stateVersionByTask.set(event.vendorTaskId, version);
+      }
+      persistedEvents.push(
+        Object.freeze(structuredClone(event)),
+      );
+    }
+    if (persistedEvents.length > 0) {
+      const alreadyReconciled = persistedEvents.some(
+        ({ eventType }) =>
+          eventType === "task_reconciliation_result",
+      );
+      const latestTaskCheckpoint = [...persistedEvents].reverse().find(
+        (event) =>
+          event.vendorTaskId !== null &&
+          event.vendorTaskId !== undefined &&
+          event.taskStateVersion !== null &&
+          event.taskStateVersion !== undefined,
+      );
+      if (latestTaskCheckpoint !== undefined && !alreadyReconciled) {
+        const reconciliation =
+          await reconcileRegisteredWpsAiPptTask(browserDriver, {
+            vendorTaskId:
+              latestTaskCheckpoint.vendorTaskId as `task_${string}`,
+            taskStateVersion:
+              latestTaskCheckpoint.taskStateVersion as string,
+            eventHistoryHash: sha256(
+              textEncoder.encode(JSON.stringify(persistedEvents)),
+            ),
+            artifactContentHash: null,
+          });
+        persistedEvents.push(
+          await observableEvent(
+            command,
+            {
+              eventType: "task_reconciliation_result",
+              sourceAt: reconciliation.observedAt,
+              observedAt: reconciliation.observedAt,
+              evidenceId: reconciliation.evidenceId,
+              sourceUrl: null,
+              submissionEvidenceAtCheckpoint:
+                persistedEvents.some(
+                  (event) =>
+                    event.submissionEvidenceAtCheckpoint ===
+                    "submitted",
+                )
+                  ? "submitted"
+                  : "unknown",
+              vendorTaskId: reconciliation.query.vendorTaskId,
+              taskStateVersion:
+                reconciliation.query.taskStateVersion,
+              adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
+              artifactId: null,
+            },
+            persistedEvents.length,
+            checkpointStore,
+          ),
+        );
+      }
+      if (
+        latestTaskCheckpoint !== undefined ||
+        alreadyReconciled
+      ) {
+        const submitted = persistedEvents.some(
+          (event) =>
+            event.submissionEvidenceAtCheckpoint === "submitted",
+        );
+        return {
+          terminalReason: "task_state_unknown",
+          blockReason: null,
+          submissionEvidence: submitted ? "submitted" : "unknown",
+          elapsedMs: 0,
+          artifactCandidates: [],
+          observableEvents: Object.freeze([...persistedEvents]),
+          manualActions: Object.freeze([]),
+        };
+      }
+    }
     const runBrowser = resolveRegisteredWpsAiPptBrowserDriver(
       browserDriver,
       async (event) => {
@@ -875,28 +1048,96 @@ export function resolveWpsAiPptProductAdapterExecutor(
         );
       },
     );
-    const result = await runBrowser({
-      jobId: command.jobId,
-      runId: command.runId,
-      attemptId: command.attemptId,
-      attemptSeq: command.attemptSeq,
-      timeoutMs: command.timeoutMs,
-      signal: command.signal,
-      evaluationProvenance: command.evaluationCase.provenance,
-      url: WPS_AIPPT_URL,
-      prompt: command.evaluationCase.vendorPrompt,
-      accountScope: "current_authenticated_account",
-      packageSelection: "best_available_zero_incremental_cost",
-      mode: "professional",
-      networking: "enabled",
-      pageCount: 16,
-    });
+    let result: WpsAiPptBrowserResult;
+    try {
+      result = await runBrowser({
+        jobId: command.jobId,
+        runId: command.runId,
+        attemptId: command.attemptId,
+        attemptSeq: command.attemptSeq,
+        timeoutMs: command.timeoutMs,
+        signal: command.signal,
+        evaluationProvenance: command.evaluationCase.provenance,
+        url: WPS_AIPPT_URL,
+        prompt: command.evaluationCase.vendorPrompt,
+        accountScope: "current_authenticated_account",
+        packageSelection: "best_available_zero_incremental_cost",
+        mode: "professional",
+        networking: "enabled",
+        pageCount: 16,
+      });
+    } catch (error) {
+      const latestTaskCheckpoint = [...persistedEvents].reverse().find(
+        (event) =>
+          event.vendorTaskId !== null &&
+          event.vendorTaskId !== undefined &&
+          event.taskStateVersion !== null &&
+          event.taskStateVersion !== undefined,
+      );
+      const submitted = persistedEvents.some(
+        (event) =>
+          event.submissionEvidenceAtCheckpoint === "submitted",
+      );
+      if (!submitted || latestTaskCheckpoint === undefined) {
+        throw error;
+      }
+      const reconciliation =
+        await reconcileRegisteredWpsAiPptTask(browserDriver, {
+          vendorTaskId:
+            latestTaskCheckpoint.vendorTaskId as `task_${string}`,
+          taskStateVersion:
+            latestTaskCheckpoint.taskStateVersion as string,
+          eventHistoryHash: sha256(
+            textEncoder.encode(JSON.stringify(persistedEvents)),
+          ),
+          artifactContentHash: null,
+        });
+      persistedEvents.push(
+        await observableEvent(
+          command,
+          {
+            eventType: "task_reconciliation_result",
+            sourceAt: reconciliation.observedAt,
+            observedAt: reconciliation.observedAt,
+            evidenceId: reconciliation.evidenceId,
+            sourceUrl: null,
+            submissionEvidenceAtCheckpoint: "submitted",
+            vendorTaskId: reconciliation.query.vendorTaskId,
+            taskStateVersion:
+              reconciliation.query.taskStateVersion,
+            adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
+            artifactId: null,
+          },
+          persistedEvents.length,
+          checkpointStore,
+        ),
+      );
+      return {
+        terminalReason:
+          reconciliation.observedState === "artifact_ready"
+            ? "download_failure"
+            : reconciliation.observedState === "failed"
+              ? "technical_failure"
+              : "task_state_unknown",
+        blockReason: null,
+        submissionEvidence: "submitted",
+        elapsedMs: 0,
+        artifactCandidates: [],
+        observableEvents: Object.freeze([...persistedEvents]),
+        manualActions: Object.freeze([]),
+      };
+    }
     const events = Object.freeze([...persistedEvents]);
     if (events.length !== result.events.length) {
       throw new Error(
         "WPS browser driver did not stream every observable event",
       );
     }
+    let reconciledTerminalReason:
+      | "task_state_unknown"
+      | "download_failure"
+      | "technical_failure"
+      | null = null;
     if (result.outcome === "task_state_unknown") {
       const latest = result.events.at(-1);
       if (
@@ -918,14 +1159,17 @@ export function resolveWpsAiPptProductAdapterExecutor(
           eventHistoryHash,
           artifactContentHash: null,
         });
-      if (
-        reconciliation.observedState !== "unknown" ||
-        !Number.isFinite(Date.parse(reconciliation.observedAt))
-      ) {
+      if (!Number.isFinite(Date.parse(reconciliation.observedAt))) {
         throw new Error(
           "WPS reconciliation API returned inconsistent task state",
         );
       }
+      reconciledTerminalReason =
+        reconciliation.observedState === "artifact_ready"
+          ? "download_failure"
+          : reconciliation.observedState === "failed"
+            ? "technical_failure"
+            : "task_state_unknown";
       persistedEvents.push(
         await observableEvent(
           command,
@@ -935,7 +1179,8 @@ export function resolveWpsAiPptProductAdapterExecutor(
             observedAt: reconciliation.observedAt,
             evidenceId: reconciliation.evidenceId,
             sourceUrl: null,
-            submissionEvidenceAtCheckpoint: "unknown",
+            submissionEvidenceAtCheckpoint:
+              result.submissionEvidence,
             vendorTaskId: latest.vendorTaskId,
             taskStateVersion: latest.taskStateVersion,
             adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
@@ -949,7 +1194,8 @@ export function resolveWpsAiPptProductAdapterExecutor(
     const manualActions = checkedManualActions(result.manualActions);
     if (result.outcome !== "captured") {
       return {
-        terminalReason: result.outcome,
+        terminalReason:
+          reconciledTerminalReason ?? result.outcome,
         blockReason:
           result.outcome === "payment" ||
           result.outcome === "quota" ||

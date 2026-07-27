@@ -1,16 +1,24 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import {
   MockWpsProductAdapter,
+  BUILD_IDENTITY,
   BUILD_SPEC_COMMIT_SHA,
+  FileSystemAttemptCheckpointStore,
   FileSystemBrowserProfileLock,
   InMemoryAttemptCheckpointStore,
+  InMemoryEgressAuthorizationAudit,
   InMemoryFeishuProjection,
+  InMemoryPayloadInventory,
+  InMemoryTombstoneLedger,
   ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   VOLCANO_EVALUATION_CASE,
@@ -19,6 +27,7 @@ import {
   WpsAiPptProductAdapter,
   createWpsAiPptBrowserDriverPackage,
   createBakeoffHarness,
+  createHarnessOwnedProductionCapabilities,
   parseAdapterExecutionConfiguration,
   type ProductAttemptResult,
   type ProductAdapterPort,
@@ -32,7 +41,12 @@ import {
   type WpsAiPptCapturedBrowserResult,
 } from "../src/index.ts";
 import { resolveHarnessProductAdapterExecutor } from "../src/mock-wps.ts";
-import { reconcileHarnessOwnedWpsAiPptTask } from "../src/wps-aippt-external-runtime.ts";
+import {
+  reconcileHarnessOwnedWpsAiPptTask,
+  runHarnessOwnedWpsAiPptBrowser,
+} from "../src/wps-aippt-external-runtime.ts";
+
+const execFileAsync = promisify(execFile);
 
 test("the WPS AI PPT production adapter is a pure-data descriptor for the frozen package", () => {
   const adapter: ProductAdapterPort = new WpsAiPptProductAdapter();
@@ -365,7 +379,7 @@ test("production rejects default in-memory recovery dependencies before driver e
   );
 });
 
-test("production requires a build-injected spec revision rather than a caller value", async () => {
+test("production rejects caller objects that merely self-report durable and isolated capabilities", async () => {
   const artifactVault = {
     storageProfile: {
       durability: "durable",
@@ -441,7 +455,106 @@ test("production requires a build-injected spec revision rather than a caller va
         environment: "production",
         caseId: VOLCANO_EVALUATION_CASE.caseId,
       }),
-    /production.*build-injected spec commit SHA/i,
+    /production.*harness-owned attested capabilities/i,
+  );
+});
+
+test("harness-owned production capabilities require distinct configured Artifact failure domains", () => {
+  const tombstones = new InMemoryTombstoneLedger(
+    "capability-failure-domain-test",
+  );
+  const payloadInventory = new InMemoryPayloadInventory(tombstones);
+  assert.throws(
+    () =>
+      createHarnessOwnedProductionCapabilities({
+        artifactPrimary: {
+          failureDomainId: "same-domain",
+          rootPath: "/tmp/capability-primary-domain/store",
+          rootReference: "root:capability-primary",
+          storeId: "capability-primary-store",
+        },
+        artifactRecovery: {
+          failureDomainId: "same-domain",
+          rootPath: "/tmp/capability-recovery-domain/store",
+          rootReference: "root:capability-recovery",
+          storeId: "capability-recovery-store",
+        },
+        runSpecification: {
+          failureDomainId: "run-spec-domain",
+          rootPath: "/tmp/capability-run-spec-domain/store",
+          rootReference: "root:capability-run-spec",
+          storeId: "capability-run-spec-store",
+        },
+        checkpoint: {
+          rootPath: "/tmp/capability-checkpoint-domain/store",
+          rootReference: "root:capability-checkpoint",
+          storeId: "capability-checkpoint-store",
+        },
+        profileLock: {
+          rootPath: "/tmp/capability-lock-domain/store",
+          rootReference: "root:capability-lock",
+          lockId: "capability-profile-lock",
+        },
+        renderer: {
+          rendererId: "capability-renderer",
+          slidesDirectory: "/tmp/unused-renderer-slides",
+          extractedTextPrefix: "page",
+          fontPack: "test",
+          resolution: "1x1",
+          colorProfile: "sRGB",
+          fidelityNotes: ["test"],
+        },
+        tombstones,
+        payloadInventory,
+        egressAuthorization: {
+          async authorize() {
+            throw new Error("must not authorize during construction");
+          },
+        },
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }),
+    /distinct failure domains and roots/i,
+  );
+});
+
+test("a runtime source-revision override cannot replace the embedded verified build manifest", async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "--eval",
+        "await import('./src/build-identity.ts')",
+      ],
+      {
+        cwd: new URL("..", import.meta.url).pathname,
+        env: {
+          ...process.env,
+          PPT_EVALUATION_BUILD_SPEC_COMMIT_SHA:
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+      },
+    ),
+    /runtime source revision does not match embedded build manifest/i,
+  );
+});
+
+test("the embedded build manifest verifies the exact executable source archive", () => {
+  assert.deepEqual(
+    {
+      source: BUILD_IDENTITY.source,
+      sourceArchiveDigest: BUILD_IDENTITY.sourceArchiveDigest,
+      sourceArchiveEntryCount:
+        BUILD_IDENTITY.sourceArchiveEntryCount,
+    },
+    {
+      source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+      sourceArchiveDigest:
+        "sha256:c3562301401205c7b6dbc4d9da801bf42048ad9a2acd93612b6f5e688ee73ac6",
+      sourceArchiveEntryCount: 34,
+    },
   );
 });
 
@@ -901,6 +1014,80 @@ test("the WPS adapter requires every presentation slide ID to resolve through it
   );
 });
 
+test("presentation page counting ignores sldId markup inside XML comments", async () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const original =
+    '<p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/><p:sldId id="259" r:id="rId4"/>';
+  const commented =
+    '<!--<p:sldId id="1" r:id="rId1"/><p:sldId id="2" r:id="rId2"/><p:sldId id="3" r:id="rId3"/><p:sldId id="4" r:id="rId4"/>--> ';
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "ppt/presentation.xml",
+    original,
+    commented,
+  );
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-commented-slide-ids",
+      runId: "run-wps-commented-slide-ids",
+      attemptId: "attempt-wps-commented-slide-ids-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /presentation slide IDs.*relationships/i,
+  );
+});
+
+test("presentation page counting ignores sldId markup inside CDATA", async () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const original =
+    '<p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/><p:sldId id="258" r:id="rId3"/><p:sldId id="259" r:id="rId4"/><p:sldId id="260" r:id="rId5"/><p:sldId id="261" r:id="rId6"/>';
+  const cdata =
+    '<![CDATA[<p:sldId id="1" r:id="rId1"/><p:sldId id="2" r:id="rId2"/><p:sldId id="3" r:id="rId3"/><p:sldId id="4" r:id="rId4"/><p:sldId id="5" r:id="rId5"/><p:sldId id="6" r:id="rId6"/>]]>';
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "ppt/presentation.xml",
+    original,
+    cdata,
+  );
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-cdata-slide-ids",
+      runId: "run-wps-cdata-slide-ids",
+      attemptId: "attempt-wps-cdata-slide-ids-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /presentation slide IDs.*relationships/i,
+  );
+});
+
 test("the harness persists WPS observable Trace and the driver-provided 16-page static render", async () => {
   const productionAdapter = new WpsAiPptProductAdapter();
   const pptx = await knownGoodPptxBytes();
@@ -975,6 +1162,8 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
     observableEvents: Array<{ eventType: string }>;
     render: {
       contactSheetHash: string;
+      contactSheetDimensions: string;
+      contactSheetComposition: string;
       fidelityStatus: string;
       outcome: string;
       pageCount: number;
@@ -983,11 +1172,14 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
     };
     durableRecoveryRehearsal: {
       artifactStorage: {
+        primaryFailureDomainId: string;
+        recoveryFailureDomainId: string;
         recoveryStoreId: string;
         originalRecoveryKey: string;
         originalRecoveryHash: string;
       };
       runSpecificationStorage: {
+        caseProvenance: string;
         storeId: string;
         key: string;
         contentHash: string;
@@ -1002,8 +1194,11 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
         recoveryReferencePrefix: string;
         attemptReference: string;
         recoveredCheckpointCount: number;
-        evidenceKind: string;
+        replayAvailable: boolean;
       };
+      publicProductionHarness: boolean;
+      executionEvidencePresent: boolean;
+      recoveryCommand: string;
       status: string;
     };
     productPackage: {
@@ -1027,6 +1222,11 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
   assert.equal(fixture.render.visualAssessment, "NOT_ASSESSABLE");
   assert.equal(fixture.render.staticSlideHashes.length, 16);
   assert.match(fixture.render.contactSheetHash, /^sha256:[a-f0-9]{64}$/);
+  assert.equal(fixture.render.contactSheetDimensions, "1280x720");
+  assert.equal(
+    fixture.render.contactSheetComposition,
+    "4x4 stitched thumbnails from all 16 pages",
+  );
   assert.deepEqual(
     {
       status: fixture.durableRecoveryRehearsal.status,
@@ -1039,10 +1239,10 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
           .recoveryStoreId,
     },
     {
-      status: "recovered_and_hash_verified",
+      status: "public_production_replay_recovered",
       derivativeCount: 33,
       recoveredDerivativeCount: 33,
-      recoveryStoreId: "wps-smoke-artifact-recovery-v1",
+      recoveryStoreId: "wps-smoke-artifact-recovery-v2",
     },
   );
   assert.match(
@@ -1051,19 +1251,43 @@ test("the public WPS real-smoke fixture records one safe 16-page capture without
   );
   assert.equal(
     fixture.durableRecoveryRehearsal.buildIdentitySource,
-    "BUILD_INJECTED_SOURCE_REVISION",
+    "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+  );
+  assert.equal(
+    fixture.durableRecoveryRehearsal.publicProductionHarness,
+    true,
+  );
+  assert.equal(
+    fixture.durableRecoveryRehearsal.executionEvidencePresent,
+    true,
   );
   assert.deepEqual(
     fixture.durableRecoveryRehearsal.checkpointStorage,
     {
-      checkpointStoreId: "wps-smoke-checkpoints-v1",
+      rootReference: "root:checkpoint-domain-v1",
+      checkpointStoreId: "wps-smoke-checkpoints-v2",
       recoveryReferencePrefix:
-        "checkpoint-store:wps-smoke-checkpoints-v1:attempt",
+        "checkpoint-store:wps-smoke-checkpoints-v2:attempt",
       attemptReference:
-        "checkpoint-store:wps-smoke-checkpoints-v1:attempt:production-attempt-wps-recovery-v1",
-      recoveredCheckpointCount: 1,
-      evidenceKind: "historical_capture_recovery_marker",
+        "checkpoint-store:wps-smoke-checkpoints-v2:attempt:production-run-wps-aippt-best-zero-incremental--d8babfee598dcd9b77e665f723e0cea6-volcano-v1-attempt-1",
+      recoveredCheckpointCount: 2,
+      replayAvailable: true,
     },
+  );
+  assert.notEqual(
+    fixture.durableRecoveryRehearsal.artifactStorage
+      .primaryFailureDomainId,
+    fixture.durableRecoveryRehearsal.artifactStorage
+      .recoveryFailureDomainId,
+  );
+  assert.equal(
+    fixture.durableRecoveryRehearsal.runSpecificationStorage
+      .caseProvenance,
+    "PRODUCTION",
+  );
+  assert.match(
+    fixture.durableRecoveryRehearsal.recoveryCommand,
+    /^node --import tsx scripts\/recover-wps-production-run\.ts /,
   );
   assert.equal(
     fixture.durableRecoveryRehearsal.recoveredOriginalHash,
@@ -1236,6 +1460,56 @@ test("filesystem profile locks serialize the same WPS profile across lock instan
   }
 });
 
+test("durable checkpoint replay is idempotent across store instances and rejects only conflicting content", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "wps-checkpoint-idempotency-"),
+  );
+  const first = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "checkpoint-idempotency",
+    rootPath: root,
+  });
+  const second = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "checkpoint-idempotency",
+    rootPath: root,
+  });
+  const checkpoint = {
+    eventId: "attempt-replay-wps-event-1",
+    jobId: "job-replay",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+    runId: "run-replay",
+    attemptId: "attempt-replay",
+    attemptSeq: 1,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-27T06:00:00.000Z",
+    observedAt: "2026-07-27T06:00:01.000Z",
+    writerId: "wps-aippt-browser@1",
+    evidenceRef: "ev_0000000000000001",
+    sourceUrl: WPS_AIPPT_URL,
+    submissionEvidenceAtCheckpoint: "submitted" as const,
+    vendorTaskId: "task_wps_replay_20260727",
+    taskStateVersion: "submitted@2",
+    adapterVersion: "wps-aippt-browser@1",
+    artifactId: null,
+  };
+  try {
+    await first.append(checkpoint);
+    await second.append(structuredClone(checkpoint));
+    assert.equal(
+      (await second.readAttempt(checkpoint.attemptId)).length,
+      1,
+    );
+    await assert.rejects(
+      second.append({
+        ...checkpoint,
+        eventType: "different_event",
+      }),
+      /checkpoint identity conflict/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("CAPTCHA, capacity, UI drift, export, and download failures are distinct and never auto-retried", async () => {
   const pptx = await knownGoodPptxBytes();
   const failures = [
@@ -1385,7 +1659,83 @@ test("an unknown WPS task state requires and persists an explicit reconciliation
   );
 });
 
-test("the harness-owned reconciliation API binds the exact task, state, history, and Artifact hash query", async () => {
+test("a submitted unknown WPS result preserves submission and accepts artifact-ready reconciliation", async () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "submitted-unknown-task-reconciliation",
+  );
+  const event = {
+    eventType: "task_reconciliation_checked",
+    sourceAt: "2026-07-27T06:00:00.000Z",
+    observedAt: "2026-07-27T06:00:01.000Z",
+    evidenceId: "ev_0000000000000199",
+    sourceUrl: "https://aippt.wps.cn/aippt/?task=private#state",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_wps_submitted_unknown_20260727",
+    taskStateVersion: "submitted@4",
+    adapterVersion: "wps-aippt-browser@1",
+    artifactId: null,
+  } as const;
+  const eventHistoryHash =
+    `sha256:${createHash("sha256")
+      .update(JSON.stringify([event]))
+      .digest("hex")}` as const;
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: createWpsAiPptBrowserDriverPackage({
+        provenance: "TEST_FAKE",
+        sessions: [
+          {
+            outcome: "task_state_unknown",
+            submissionEvidence: "submitted",
+            elapsedMs: 1,
+            events: [event],
+            manualActions: [],
+          },
+        ],
+        reconciliations: [
+          {
+            query: {
+              vendorTaskId:
+                "task_wps_submitted_unknown_20260727",
+              taskStateVersion: "submitted@4",
+              eventHistoryHash,
+              artifactContentHash: null,
+            },
+            observedState: "artifact_ready",
+            observedAt: "2026-07-27T06:00:02.000Z",
+            evidenceId: "ev_0000000000000200",
+          },
+        ],
+      }),
+      attemptCheckpointStore: checkpoints,
+    },
+  );
+
+  const result = (await execute({
+    jobId: "job-wps-submitted-unknown",
+    runId: "run-wps-submitted-unknown",
+    attemptId: "attempt-wps-submitted-unknown-1",
+    attemptSeq: 1,
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  })) as ProductAttemptResult;
+
+  assert.equal(result.terminalReason, "download_failure");
+  assert.equal(result.submissionEvidence, "submitted");
+  assert.equal(
+    checkpoints.snapshot().at(-1)
+      ?.submissionEvidenceAtCheckpoint,
+    "submitted",
+  );
+});
+
+test("the harness-owned reconciliation API uses the fixed controlled endpoint and correlates the exact query", async () => {
   const previousUrl =
     process.env.PPT_EVALUATION_WPS_BROWSER_BRIDGE_URL;
   const previousFetch = globalThis.fetch;
@@ -1397,7 +1747,7 @@ test("the harness-owned reconciliation API binds the exact task, state, history,
     artifactContentHash: null,
   };
   process.env.PPT_EVALUATION_WPS_BROWSER_BRIDGE_URL =
-    "http://127.0.0.1:47821/v1/wps-aippt/run";
+    "http://127.0.0.1:59999/arbitrary-runtime";
   globalThis.fetch = async (input, init) => {
     assert.equal(
       String(input),
@@ -1406,14 +1756,22 @@ test("the harness-owned reconciliation API binds the exact task, state, history,
     assert.equal(init?.method, "POST");
     const body = JSON.parse(String(init?.body)) as {
       readonly query: unknown;
+      readonly requestId: string;
+      readonly queryHash: string;
     };
     assert.deepEqual(body.query, query);
+    assert.match(body.requestId, /^wps-request-[a-f0-9-]{36}$/);
+    assert.match(body.queryHash, /^sha256:[a-f0-9]{64}$/);
     return new Response(
       JSON.stringify({
-        query,
-        observedState: "unknown",
-        observedAt: "2026-07-27T06:00:02.000Z",
-        evidenceId: "ev_0000000000000100",
+        requestId: body.requestId,
+        queryHash: body.queryHash,
+        evidence: {
+          query,
+          observedState: "unknown",
+          observedAt: "2026-07-27T06:00:02.000Z",
+          evidenceId: "ev_0000000000000100",
+        },
       }),
       {
         status: 200,
@@ -1435,6 +1793,265 @@ test("the harness-owned reconciliation API binds the exact task, state, history,
       process.env.PPT_EVALUATION_WPS_BROWSER_BRIDGE_URL =
         previousUrl;
     }
+  }
+});
+
+test("the controlled production bridge rejects an uncorrelated terminal outcome", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      `${JSON.stringify({
+        type: "result",
+        requestId: "wps-request-00000000-0000-0000-0000-000000000000",
+        commandHash:
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        result: {
+          outcome: "technical_failure",
+          submissionEvidence: "not_submitted",
+          elapsedMs: 1,
+          events: [],
+          manualActions: [],
+        },
+      })}\n`,
+      {
+        status: 200,
+        headers: { "content-type": "application/x-ndjson" },
+      },
+    );
+  try {
+    await assert.rejects(
+      runHarnessOwnedWpsAiPptBrowser(
+        {
+          jobId: "job-wps-correlation",
+          runId: "run-wps-correlation",
+          attemptId: "attempt-wps-correlation-1",
+          attemptSeq: 1,
+          timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+          signal: new AbortController().signal,
+          evaluationProvenance: "PRODUCTION",
+          url: WPS_AIPPT_URL,
+          prompt: VOLCANO_EVALUATION_CASE.vendorPrompt,
+          accountScope: "current_authenticated_account",
+          packageSelection:
+            "best_available_zero_incremental_cost",
+          mode: "professional",
+          networking: "enabled",
+          pageCount: 16,
+        },
+        async () => {},
+      ),
+      /bridge response correlation failed/i,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("a submitted checkpoint is durably reconciled when the production bridge ends before a result", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "wps-submitted-reconcile-"),
+  );
+  const checkpoints = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "submitted-reconcile",
+    rootPath: root,
+  });
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const body = JSON.parse(String(init?.body)) as {
+      readonly requestId: string;
+      readonly commandHash?: string;
+      readonly queryHash?: string;
+      readonly query?: unknown;
+    };
+    if (String(input).endsWith("/run")) {
+      return new Response(
+        `${JSON.stringify({
+          type: "checkpoint",
+          requestId: body.requestId,
+          commandHash: body.commandHash,
+          event: {
+            eventType: "query_submitted",
+            sourceAt: "2026-07-27T06:00:00.000Z",
+            observedAt: "2026-07-27T06:00:01.000Z",
+            evidenceId: "ev_0000000000000111",
+            sourceUrl: WPS_AIPPT_URL,
+            submissionEvidenceAtCheckpoint: "submitted",
+            vendorTaskId: "task_wps_interrupted_20260727",
+            taskStateVersion: "submitted@2",
+            adapterVersion: "wps-aippt-browser@1",
+            artifactId: null,
+          },
+        })}\n`,
+        {
+          status: 200,
+          headers: { "content-type": "application/x-ndjson" },
+        },
+      );
+    }
+    assert.ok(String(input).endsWith("/reconcile"));
+    return new Response(
+      JSON.stringify({
+        requestId: body.requestId,
+        queryHash: body.queryHash,
+        evidence: {
+          query: body.query,
+          observedState: "unknown",
+          observedAt: "2026-07-27T06:00:02.000Z",
+          evidenceId: "ev_0000000000000112",
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+  try {
+    const adapter = new WpsAiPptProductAdapter();
+    const execute = resolveHarnessProductAdapterExecutor(
+      adapter.implementationPackage,
+      parseAdapterExecutionConfiguration(
+        adapter.executionConfigurationPackage,
+      ),
+      { attemptCheckpointStore: checkpoints },
+    );
+    const result = (await execute({
+      jobId: "job-wps-interrupted",
+      runId: "run-wps-interrupted",
+      attemptId: "attempt-wps-interrupted-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: {
+        ...VOLCANO_EVALUATION_CASE,
+        provenance: "PRODUCTION",
+      },
+    })) as ProductAttemptResult;
+    assert.equal(result.terminalReason, "task_state_unknown");
+    assert.deepEqual(
+      (await checkpoints.readAttempt(
+        "attempt-wps-interrupted-1",
+      )).map(({ eventType }) => eventType),
+      ["query_submitted", "task_reconciliation_result"],
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a restarted production Attempt reads durable stateVersion checkpoints and reconciles before another browser call", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "wps-restart-reconcile-"),
+  );
+  const checkpoints = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "restart-reconcile",
+    rootPath: root,
+  });
+  await checkpoints.append({
+    eventId: "attempt-wps-restart-1-wps-event-1",
+    jobId: "job-wps-restart",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+    runId: "run-wps-restart",
+    attemptId: "attempt-wps-restart-1",
+    attemptSeq: 1,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-27T06:00:00.000Z",
+    observedAt: "2026-07-27T06:00:01.000Z",
+    writerId: "wps-aippt-browser@1",
+    evidenceRef: "ev_0000000000000121",
+    sourceUrl: WPS_AIPPT_URL,
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_wps_restart_20260727",
+    taskStateVersion: "submitted@2",
+    adapterVersion: "wps-aippt-browser@1",
+    artifactId: null,
+  });
+  const previousFetch = globalThis.fetch;
+  let browserRunCalls = 0;
+  let reconciliationCalls = 0;
+  globalThis.fetch = async (input, init) => {
+    if (String(input).endsWith("/run")) {
+      browserRunCalls += 1;
+      throw new Error("browser must not rerun before restart reconciliation");
+    }
+    reconciliationCalls += 1;
+    const body = JSON.parse(String(init?.body)) as {
+      readonly requestId: string;
+      readonly queryHash: string;
+      readonly query: unknown;
+    };
+    return new Response(
+      JSON.stringify({
+        requestId: body.requestId,
+        queryHash: body.queryHash,
+        evidence: {
+          query: body.query,
+          observedState: "unknown",
+          observedAt: "2026-07-27T06:00:02.000Z",
+          evidenceId: "ev_0000000000000122",
+        },
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+  try {
+    const adapter = new WpsAiPptProductAdapter();
+    const execute = resolveHarnessProductAdapterExecutor(
+      adapter.implementationPackage,
+      parseAdapterExecutionConfiguration(
+        adapter.executionConfigurationPackage,
+      ),
+      { attemptCheckpointStore: checkpoints },
+    );
+    const result = (await execute({
+      jobId: "job-wps-restart",
+      runId: "run-wps-restart",
+      attemptId: "attempt-wps-restart-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: {
+        ...VOLCANO_EVALUATION_CASE,
+        provenance: "PRODUCTION",
+      },
+    })) as ProductAttemptResult;
+    assert.equal(browserRunCalls, 0);
+    assert.equal(reconciliationCalls, 1);
+    assert.equal(result.terminalReason, "task_state_unknown");
+    assert.deepEqual(
+      (await checkpoints.readAttempt(
+        "attempt-wps-restart-1",
+      )).map(({ taskStateVersion }) => taskStateVersion),
+      ["submitted@2", "submitted@2"],
+    );
+    const replayed = (await execute({
+      jobId: "job-wps-restart",
+      runId: "run-wps-restart",
+      attemptId: "attempt-wps-restart-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: {
+        ...VOLCANO_EVALUATION_CASE,
+        provenance: "PRODUCTION",
+      },
+    })) as ProductAttemptResult;
+    assert.equal(replayed.terminalReason, "task_state_unknown");
+    assert.equal(browserRunCalls, 0);
+    assert.equal(reconciliationCalls, 1);
+    assert.equal(
+      (await checkpoints.readAttempt(
+        "attempt-wps-restart-1",
+      )).length,
+      2,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    await rm(root, { recursive: true, force: true });
   }
 });
 

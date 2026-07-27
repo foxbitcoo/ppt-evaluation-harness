@@ -140,6 +140,9 @@ export interface AttemptCheckpointPort {
   readonly durability?: "ephemeral" | "durable";
   readonly recoveryReferencePrefix?: string;
   append(event: ObservableAttemptEvent): Promise<void>;
+  readAttempt?(
+    attemptId: string,
+  ): Promise<readonly ObservableAttemptEvent[]>;
 }
 
 export class InMemoryAttemptCheckpointStore
@@ -157,12 +160,27 @@ export class InMemoryAttemptCheckpointStore
   }
 
   async append(event: ObservableAttemptEvent): Promise<void> {
+    const existing = this.#events.find(
+      ({ eventId }) => eventId === event.eventId,
+    );
     if (
-      this.#events.some(({ eventId }) => eventId === event.eventId)
+      existing !== undefined &&
+      JSON.stringify(existing) !== JSON.stringify(event)
     ) {
       throw new Error(`Attempt checkpoint identity conflict: ${event.eventId}`);
     }
+    if (existing !== undefined) return;
     this.#events.push(Object.freeze(structuredClone(event)));
+  }
+
+  async readAttempt(
+    attemptId: string,
+  ): Promise<readonly ObservableAttemptEvent[]> {
+    return Object.freeze(
+      this.#events
+        .filter((event) => event.attemptId === attemptId)
+        .map((event) => Object.freeze(structuredClone(event))),
+    );
   }
 
   snapshot(): readonly ObservableAttemptEvent[] {

@@ -10,6 +10,12 @@ export {
   type BrowserProfileLockPort,
 } from "./browser-profile-lock.ts";
 export {
+  assertHarnessOwnedProductionCapabilities,
+  createHarnessOwnedProductionCapabilities,
+  type HarnessOwnedProductionCapabilities,
+  type HarnessOwnedProductionCapabilityEvidence,
+} from "./production-capabilities.ts";
+export {
   BUILD_IDENTITY,
   BUILD_IDENTITY_SOURCE,
   BUILD_SPEC_COMMIT_SHA,

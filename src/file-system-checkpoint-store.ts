@@ -55,16 +55,18 @@ export class FileSystemAttemptCheckpointStore
         throw error;
       }
     }
-    if (
-      existing
-        .split("\n")
-        .filter(Boolean)
-        .some((line) => {
-          const parsed = JSON.parse(line) as ObservableAttemptEvent;
-          return parsed.eventId === event.eventId;
-        })
-    ) {
-      throw new Error(`Attempt checkpoint identity conflict: ${event.eventId}`);
+    const prior = existing
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as ObservableAttemptEvent)
+      .find(({ eventId }) => eventId === event.eventId);
+    if (prior !== undefined) {
+      if (JSON.stringify(prior) !== JSON.stringify(event)) {
+        throw new Error(
+          `Attempt checkpoint identity conflict: ${event.eventId}`,
+        );
+      }
+      return;
     }
     const handle = await open(path, "a", 0o600);
     try {

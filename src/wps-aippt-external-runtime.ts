@@ -1,3 +1,5 @@
+import { createHash, randomUUID } from "node:crypto";
+
 import type {
   WpsAiPptBrowserCommand,
   WpsAiPptBrowserEvent,
@@ -10,35 +12,31 @@ import type {
 
 const MAX_BRIDGE_RESPONSE_BYTES = 96 * 1024 * 1024;
 const MAX_BRIDGE_LINE_BYTES = 72 * 1024 * 1024;
+export const CONTROLLED_WPS_AIPPT_BRIDGE_ORIGIN =
+  "http://127.0.0.1:47821" as const;
 
 function configuredBridgeUrl(
   operation: "run" | "reconcile",
 ): URL {
-  const configured =
-    process.env.PPT_EVALUATION_WPS_BROWSER_BRIDGE_URL;
-  if (configured === undefined) {
-    throw new Error(
-      "Harness-owned WPS production driver requires the build-configured browser bridge",
-    );
-  }
-  const parsed = new URL(configured);
-  if (
-    parsed.protocol !== "http:" ||
-    (parsed.hostname !== "127.0.0.1" &&
-      parsed.hostname !== "::1" &&
-      parsed.hostname !== "localhost") ||
-    parsed.username !== "" ||
-    parsed.password !== "" ||
-    parsed.search !== "" ||
-    parsed.hash !== "" ||
-    parsed.pathname !== "/v1/wps-aippt/run"
-  ) {
-    throw new Error(
-      "Harness-owned WPS browser bridge must be the allowlisted loopback endpoint",
-    );
-  }
-  parsed.pathname = `/v1/wps-aippt/${operation}`;
-  return parsed;
+  return new URL(
+    `/v1/wps-aippt/${operation}`,
+    CONTROLLED_WPS_AIPPT_BRIDGE_ORIGIN,
+  );
+}
+
+function sha256Json(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(value))
+    .digest("hex")}`;
+}
+
+export function wpsDriverSessionIdForRequest(
+  requestId: string,
+): `session_${string}` {
+  return `session_${createHash("sha256")
+    .update(requestId)
+    .digest("hex")
+    .slice(0, 32)}`;
 }
 
 async function boundedJsonResponse(response: Response): Promise<unknown> {
@@ -61,11 +59,23 @@ async function boundedJsonResponse(response: Response): Promise<unknown> {
 function decodedReconciliationEvidence(
   value: unknown,
   query: WpsAiPptTaskReconciliationQuery,
+  requestId: string,
+  queryHash: `sha256:${string}`,
 ): WpsAiPptTaskReconciliationEvidence {
   if (value === null || Array.isArray(value) || typeof value !== "object") {
     throw new Error("WPS reconciliation response is malformed");
   }
-  const record = value as Record<string, unknown>;
+  const envelope = value as Record<string, unknown>;
+  if (
+    envelope.requestId !== requestId ||
+    envelope.queryHash !== queryHash ||
+    envelope.evidence === null ||
+    Array.isArray(envelope.evidence) ||
+    typeof envelope.evidence !== "object"
+  ) {
+    throw new Error("WPS reconciliation response correlation failed");
+  }
+  const record = envelope.evidence as Record<string, unknown>;
   if (
     JSON.stringify(record.query) !== JSON.stringify(query) ||
     !["unknown", "submitted", "artifact_ready", "failed"].includes(
@@ -93,6 +103,8 @@ function decodedReconciliationEvidence(
 export async function reconcileHarnessOwnedWpsAiPptTask(
   query: WpsAiPptTaskReconciliationQuery,
 ): Promise<WpsAiPptTaskReconciliationEvidence> {
+  const requestId = `wps-request-${randomUUID()}`;
+  const queryHash = sha256Json(query);
   const response = await fetch(configuredBridgeUrl("reconcile"), {
     method: "POST",
     headers: {
@@ -101,18 +113,23 @@ export async function reconcileHarnessOwnedWpsAiPptTask(
     },
     body: JSON.stringify({
       schemaVersion: "wps-aippt-task-reconciliation-query-v1",
+      requestId,
+      queryHash,
       query,
     }),
   });
   return decodedReconciliationEvidence(
     await boundedJsonResponse(response),
     query,
+    requestId,
+    queryHash,
   );
 }
 
 function decodedResult(
   value: unknown,
   streamedEvents: readonly WpsAiPptBrowserEvent[],
+  requestId: string,
 ): WpsAiPptBrowserResult {
   if (value === null || Array.isArray(value) || typeof value !== "object") {
     throw new Error("WPS browser bridge result is malformed");
@@ -123,6 +140,19 @@ function decodedResult(
     record.artifact !== null &&
     typeof record.artifact === "object"
   ) {
+    const executionEvidence =
+      record.productionExecutionEvidence;
+    if (
+      executionEvidence === null ||
+      Array.isArray(executionEvidence) ||
+      typeof executionEvidence !== "object" ||
+      (executionEvidence as Record<string, unknown>)
+        .driverSessionId !== wpsDriverSessionIdForRequest(requestId)
+    ) {
+      throw new Error(
+        "WPS captured outcome is not correlated to its one-time request",
+      );
+    }
     const artifact = record.artifact as Record<string, unknown>;
     const contentBase64 = artifact.contentBase64;
     if (
@@ -165,6 +195,23 @@ export async function runHarnessOwnedWpsAiPptBrowser(
   command: WpsAiPptBrowserCommand,
   checkpointSink: (event: WpsAiPptBrowserEvent) => Promise<void>,
 ): Promise<WpsAiPptBrowserResult> {
+  const requestId = `wps-request-${randomUUID()}`;
+  const commandPayload = {
+    jobId: command.jobId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    attemptSeq: command.attemptSeq,
+    timeoutMs: command.timeoutMs,
+    evaluationProvenance: command.evaluationProvenance,
+    url: command.url,
+    prompt: command.prompt,
+    accountScope: command.accountScope,
+    packageSelection: command.packageSelection,
+    mode: command.mode,
+    networking: command.networking,
+    pageCount: command.pageCount,
+  };
+  const commandHash = sha256Json(commandPayload);
   const response = await fetch(configuredBridgeUrl("run"), {
     method: "POST",
     headers: {
@@ -173,21 +220,9 @@ export async function runHarnessOwnedWpsAiPptBrowser(
     },
     body: JSON.stringify({
       schemaVersion: "wps-aippt-browser-command-v1",
-      command: {
-        jobId: command.jobId,
-        runId: command.runId,
-        attemptId: command.attemptId,
-        attemptSeq: command.attemptSeq,
-        timeoutMs: command.timeoutMs,
-        evaluationProvenance: command.evaluationProvenance,
-        url: command.url,
-        prompt: command.prompt,
-        accountScope: command.accountScope,
-        packageSelection: command.packageSelection,
-        mode: command.mode,
-        networking: command.networking,
-        pageCount: command.pageCount,
-      },
+      requestId,
+      commandHash,
+      command: commandPayload,
     }),
     signal: command.signal,
   });
@@ -225,9 +260,17 @@ export async function runHarnessOwnedWpsAiPptBrowser(
       }
       const envelope = JSON.parse(line) as {
         readonly type?: unknown;
+        readonly requestId?: unknown;
+        readonly commandHash?: unknown;
         readonly event?: unknown;
         readonly result?: unknown;
       };
+      if (
+        envelope.requestId !== requestId ||
+        envelope.commandHash !== commandHash
+      ) {
+        throw new Error("WPS browser bridge response correlation failed");
+      }
       if (envelope.type === "checkpoint") {
         const event = envelope.event as WpsAiPptBrowserEvent;
         await checkpointSink(event);
@@ -236,7 +279,11 @@ export async function runHarnessOwnedWpsAiPptBrowser(
         if (terminalResult !== null) {
           throw new Error("WPS browser bridge emitted duplicate results");
         }
-        terminalResult = decodedResult(envelope.result, events);
+        terminalResult = decodedResult(
+          envelope.result,
+          events,
+          requestId,
+        );
       } else {
         throw new Error("WPS browser bridge envelope is not allowlisted");
       }

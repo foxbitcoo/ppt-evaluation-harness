@@ -79,6 +79,7 @@ import {
   type ProductPackageSnapshot,
   type SafeRasterRendererPort,
 } from "./product-adapter.ts";
+import { assertHarnessOwnedProductionCapabilities } from "./production-capabilities.ts";
 import {
   InMemoryReferencePackStore,
   ReviewedReferencePackGenerator,
@@ -2346,14 +2347,21 @@ export function createBakeoffHarness({
         }
         if (
           BUILD_IDENTITY_SOURCE !==
-          "BUILD_INJECTED_SOURCE_REVISION"
+          "EMBEDDED_VERIFIED_BUILD_MANIFEST"
         ) {
           return Promise.reject(
             new Error(
-              "Production Bakeoff requires a build-injected spec commit SHA",
+              "Production Bakeoff requires an embedded verified build manifest",
             ),
           );
         }
+        assertHarnessOwnedProductionCapabilities({
+          artifactVault,
+          runSpecificationVault,
+          attemptCheckpointStore,
+          browserProfileLock,
+          safeRasterRenderer,
+        });
       }
       const context = executionContext(
         commandSnapshot.environment,
