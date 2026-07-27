@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   InMemoryFeishuProjection,
+  InMemoryReferencePackStore,
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   MockDoubaoProductAdapter,
@@ -1293,11 +1294,13 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
     },
   ];
   const feishu = new InMemoryFeishuProjection();
+  const referencePackStore = new InMemoryReferencePackStore();
 
   await assert.rejects(
     createBakeoffHarness({
       feishu,
       productAdapters: duplicateArtifactAdapters,
+      referencePackStore,
     }).startBakeoffJob({
       environment: "test",
       caseId: VOLCANO_CASE_ID,
@@ -1305,4 +1308,6 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
     /duplicate Artifact IDs/i,
   );
   assert.equal(feishu.snapshot().runRecordTable.length, 0);
+  assert.equal(referencePackStore.snapshot().temporary.length, 0);
+  assert.equal(referencePackStore.snapshot().used.length, 1);
 });

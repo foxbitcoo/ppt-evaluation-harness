@@ -33,8 +33,10 @@ import type {
 } from "./product-adapter.ts";
 import {
   InMemoryReferencePackStore,
+  ReviewedReferencePackGenerator,
   resolveReferencePackForCase,
   type ReferencePack,
+  type ReferencePackGeneratorPort,
   type ReferencePackStorePort,
 } from "./reference-pack.ts";
 
@@ -104,6 +106,7 @@ export interface BakeoffHarnessDependencies {
   readonly productAdapters?: readonly ProductAdapterPort[];
   readonly attemptDeadline?: AttemptDeadlinePort;
   readonly referencePackStore?: ReferencePackStorePort;
+  readonly referencePackGenerator?: ReferencePackGeneratorPort;
   readonly judge?: OpenAiJudgePort;
 }
 
@@ -288,6 +291,7 @@ async function executeVendor(
   jobDeadlineAtEpochMs: number,
   referencePack: ReferencePack | null,
   judge: OpenAiJudgePort | undefined,
+  onReferencePackUse: (scorecardId: string) => void,
 ): Promise<CapturedVendorResult> {
   const { adapter, productPackage, runId } = selection;
   const scenario = KNOWN_VENDOR_SCENARIOS.get(
@@ -445,6 +449,9 @@ async function executeVendor(
   const scorecardId =
     scenario?.scorecardId ??
     runId.replace(/^MOCK-run-/, "MOCK-scorecard-");
+  if (referencePack !== null) {
+    onReferencePackUse(scorecardId);
+  }
   const scorecard =
     judge === undefined
       ? scoreRenderedArtifact(artifact, renderManifest, {
@@ -515,6 +522,7 @@ export function createBakeoffHarness({
   referencePackStore = new InMemoryReferencePackStore(
     () => MOCK_SCENARIO.fixedTime,
   ),
+  referencePackGenerator = new ReviewedReferencePackGenerator(),
   judge,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const selectedProductAdapters = Object.freeze([
@@ -570,33 +578,52 @@ export function createBakeoffHarness({
         ...(command.referencePackMode === undefined
           ? {}
           : { mode: command.referencePackMode }),
+        generator: referencePackGenerator,
       });
       const stagedReferencePack =
         referencePackSelection.pack === null
           ? null
-          : referencePackStore.stage(referencePackSelection.pack);
+          : referencePackStore.stage(referencePackSelection.pack, {
+              jobId: MOCK_SCENARIO.jobId,
+            });
       const jobDeadlineAtEpochMs =
         Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
-      let results: readonly CapturedVendorResult[];
-      try {
-        results = await Promise.all(
-          selections.map((selection) =>
-            executeVendor(
-              selection,
-              command.caseId,
-              attemptDeadline,
-              jobDeadlineAtEpochMs,
-              referencePackSelection.pack,
-              judge,
-            ),
+      const scorecardIdsThatUsedPack = new Set<string>();
+      const settledResults = await Promise.allSettled(
+        selections.map((selection) =>
+          executeVendor(
+            selection,
+            command.caseId,
+            attemptDeadline,
+            jobDeadlineAtEpochMs,
+            referencePackSelection.pack,
+            judge,
+            (scorecardId) => {
+              scorecardIdsThatUsedPack.add(scorecardId);
+            },
           ),
-        );
-      } catch (error) {
-        if (stagedReferencePack !== null) {
+        ),
+      );
+      const completedResults = settledResults.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      if (stagedReferencePack !== null) {
+        if (scorecardIdsThatUsedPack.size === 0) {
           referencePackStore.deleteUnused(stagedReferencePack.stagingId);
+        } else {
+          referencePackStore.retainUsed(stagedReferencePack.stagingId, {
+            jobId: MOCK_SCENARIO.jobId,
+            scorecardIds: [...scorecardIdsThatUsedPack],
+          });
         }
-        throw error;
       }
+      const rejectedResult = settledResults.find(
+        (result) => result.status === "rejected",
+      );
+      if (rejectedResult?.status === "rejected") {
+        throw rejectedResult.reason;
+      }
+      const results = completedResults;
       const artifactIds = results.flatMap(({ artifact }) =>
         artifact === null ? [] : [artifact.artifactId],
       );
@@ -625,19 +652,6 @@ export function createBakeoffHarness({
             ? "failed"
             : "partial";
       const firstSuccessful = successful[0];
-      if (stagedReferencePack !== null) {
-        if (successful.length === 0) {
-          referencePackStore.deleteUnused(stagedReferencePack.stagingId);
-        } else {
-          referencePackStore.retainUsed(stagedReferencePack.stagingId, {
-            jobId: MOCK_SCENARIO.jobId,
-            scorecardIds: successful.map(
-              ({ scorecard }) => scorecard.scorecardId,
-            ),
-          });
-        }
-      }
-
       await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
       await feishu.appendRunRecord({
         recordId: MOCK_SCENARIO.jobId,

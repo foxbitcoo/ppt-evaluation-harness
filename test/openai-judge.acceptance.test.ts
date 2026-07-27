@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -11,6 +12,7 @@ import {
   VOLCANO_EVALUATION_CASE,
   createBakeoffHarness,
   resolveReferencePackForCase,
+  type OpenAiResponsesJudgeAdapterOptions,
 } from "../src/index.ts";
 
 const SIX_DIMENSIONS = [
@@ -21,6 +23,44 @@ const SIX_DIMENSIONS = [
   "layout_hierarchy_and_readability",
   "imagery_chart_and_information_expression",
 ] as const;
+
+const VALID_ONE_PIXEL_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
+function testPng(...markers: number[]): Uint8Array {
+  return Uint8Array.from([...VALID_ONE_PIXEL_PNG, ...markers]);
+}
+
+function createTestJudge(
+  options: OpenAiResponsesJudgeAdapterOptions,
+): OpenAiResponsesJudgeAdapter {
+  return new OpenAiResponsesJudgeAdapter({
+    egressAuthorization: {
+      async authorize(request) {
+        return {
+          decisionId: "test-egress-decision-v1",
+          decision: "approved",
+          policyVersion: "test-public-synthetic-egress-v1",
+          dataClassification: request.dataClassification,
+          sourceOwner: request.sourceOwner,
+          processingPurpose: request.processingPurpose,
+          targetService: request.targetService,
+          targetAccount: "test-openai-project",
+          targetRegion: "us",
+          subprocessors: [],
+          allowedContentFields: request.contentFields,
+          requiredRedactions: [],
+          legalSecurityBasis: "synthetic test data policy",
+          approvedAt: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        };
+      },
+    },
+    ...options,
+  });
+}
 
 function validJudgePayload() {
   return {
@@ -102,7 +142,7 @@ test("OpenAiJudgePort makes one content-addressed Responses call with pinned mul
   const referencePack = resolveReferencePackForCase({
     evaluationCase: VOLCANO_EVALUATION_CASE,
   }).pack;
-  const judge = new OpenAiResponsesJudgeAdapter({ transport });
+  const judge = createTestJudge({ transport });
   const command = {
     jobId: "MOCK-job-volcano-v1",
     runId: artifact.runId,
@@ -159,10 +199,81 @@ test("OpenAiJudgePort makes one content-addressed Responses call with pinned mul
   assert.equal(first.judgeLineage?.requestedModel, "gpt-5.6-sol");
   assert.equal(first.judgeLineage?.responseModel, "gpt-5.6-sol");
   assert.equal(first.judgeLineage?.responseId, "resp_test_volcano");
+  assert.equal(
+    first.judgeLineage?.egressAuthorization.policyVersion,
+    "test-public-synthetic-egress-v1",
+  );
+  assert.equal(
+    first.judgeLineage?.egressAuthorization.targetAccount,
+    "test-openai-project",
+  );
+  assert.match(
+    first.judgeLineage?.egressAuthorizationHash ?? "",
+    /^sha256:[a-f0-9]{64}$/,
+  );
+  assert.equal(
+    first.judgeLineage?.payloadHash,
+    `sha256:${createHash("sha256")
+      .update(JSON.stringify(requests[0]?.request))
+      .digest("hex")}`,
+  );
+});
+
+test("OpenAiJudgePort blocks transport when egress authorization is missing or denied", async () => {
+  let transportCalls = 0;
+  const transport = {
+    async create() {
+      transportCalls += 1;
+      throw new Error("transport must not be reached");
+    },
+  };
+  const missing = new OpenAiResponsesJudgeAdapter({ transport });
+  const denied = createTestJudge({
+    transport,
+    egressAuthorization: {
+      async authorize(request) {
+        return {
+          decisionId: "test-denied-egress",
+          decision: "denied",
+          policyVersion: "test-public-synthetic-egress-v1",
+          dataClassification: request.dataClassification,
+          sourceOwner: request.sourceOwner,
+          processingPurpose: request.processingPurpose,
+          targetService: request.targetService,
+          targetAccount: "test-openai-project",
+          targetRegion: "us",
+          subprocessors: [],
+          allowedContentFields: request.contentFields,
+          requiredRedactions: [],
+          legalSecurityBasis: "synthetic test data policy",
+          approvedAt: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    missing.score(
+      await volcanoJudgeCommand(
+        "MOCK-openai-missing-egress-scorecard-wps-volcano-v1",
+      ),
+    ),
+    /egress authorization.*missing|submission blocked/i,
+  );
+  await assert.rejects(
+    denied.score(
+      await volcanoJudgeCommand(
+        "MOCK-openai-denied-egress-scorecard-wps-volcano-v1",
+      ),
+    ),
+    /egress authorization.*denied|incompatible/i,
+  );
+  assert.equal(transportCalls, 0);
 });
 
 test("OpenAiJudgePort fails closed when a message remains incomplete", async () => {
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     transport: {
       async create() {
         return {
@@ -198,7 +309,7 @@ test("OpenAiJudgePort fails closed when a message remains incomplete", async () 
 });
 
 test("OpenAiJudgePort rejects structured output that violates the strict schema", async () => {
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     transport: {
       async create() {
         return {
@@ -242,7 +353,7 @@ test("OpenAiJudgePort enforces knowledge-error string bounds in its offline stri
     ...payload.knowledgeErrors[0]!,
     claim: "错".repeat(241),
   };
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     transport: {
       async create() {
         return {
@@ -278,7 +389,7 @@ test("OpenAiJudgePort enforces knowledge-error string bounds in its offline stri
 });
 
 test("OpenAiJudgePort fails closed on an explicit refusal", async () => {
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     transport: {
       async create() {
         return {
@@ -323,7 +434,7 @@ test("OpenAiJudgePort rejects knowledge-error deductions outside the frozen pack
     ...payload.knowledgeErrors[0]!,
     factId: "uncovered-fact",
   };
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     transport: {
       async create() {
         return {
@@ -358,6 +469,80 @@ test("OpenAiJudgePort rejects knowledge-error deductions outside the frozen pack
   );
 });
 
+test("OpenAiJudgePort rejects a factual score containing hidden deductions not backed by cited pack errors", async () => {
+  const payload = validJudgePayload();
+  payload.knowledgeErrors = [];
+  payload.dimensions[1] = {
+    ...payload.dimensions[1]!,
+    value: 1,
+    rationale: "因知识包未覆盖的隐含事实问题而扣分。",
+  };
+  const judge = createTestJudge({
+    transport: {
+      async create() {
+        return {
+          id: "resp_hidden_deduction",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          incomplete_details: null,
+          output: [
+            {
+              type: "message",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(payload),
+                },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    judge.score(
+      await volcanoJudgeCommand(
+        "MOCK-openai-hidden-deduction-scorecard-wps-volcano-v1",
+      ),
+    ),
+    /hidden|factual|knowledge error/i,
+  );
+});
+
+test("OpenAiJudgePort rejects claimed PNG input that lacks valid PNG bytes before transport", async () => {
+  let transportCalls = 0;
+  const judge = createTestJudge({
+    rasterizer: {
+      version: "invalid-rasterizer@1",
+      async rasterize() {
+        return {
+          mimeType: "image/png",
+          content: Uint8Array.from([1, 2, 3]),
+        };
+      },
+    },
+    transport: {
+      async create() {
+        transportCalls += 1;
+        throw new Error("transport must not be reached");
+      },
+    },
+  });
+
+  await assert.rejects(
+    judge.score(
+      await volcanoJudgeCommand(
+        "MOCK-openai-invalid-png-scorecard-wps-volcano-v1",
+      ),
+    ),
+    /PNG/i,
+  );
+  assert.equal(transportCalls, 0);
+});
+
 test("OpenAiJudgePort hashes the exact rasterized PNG inputs and rasterizer version into lineage", async () => {
   const command = await volcanoJudgeCommand(
     "MOCK-openai-raster-lineage-scorecard-wps-volcano-v1",
@@ -381,20 +566,13 @@ test("OpenAiJudgePort hashes the exact rasterized PNG inputs and rasterizer vers
     ],
   };
   const createJudge = (marker: number) =>
-    new OpenAiResponsesJudgeAdapter({
+    createTestJudge({
       rasterizer: {
         version: "test-rasterizer@1",
         async rasterize(slide) {
           return {
             mimeType: "image/png" as const,
-            content: Uint8Array.from([
-              0x89,
-              0x50,
-              0x4e,
-              0x47,
-              marker,
-              slide.pageNumber,
-            ]),
+            content: testPng(marker, slide.pageNumber),
           };
         },
       },
@@ -429,13 +607,13 @@ test("OpenAiJudgePort hashes the exact rasterized PNG inputs and rasterizer vers
 
 test("OpenAiJudgePort hashes the exact evaluator context even when a Case version was not bumped", async () => {
   const requests: Record<string, unknown>[] = [];
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     rasterizer: {
       version: "test-rasterizer@1",
       async rasterize(slide) {
         return {
           mimeType: "image/png",
-          content: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, slide.pageNumber]),
+          content: testPng(slide.pageNumber),
         };
       },
     },
@@ -486,19 +664,13 @@ test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the
     request: Record<string, unknown>;
     idempotencyKey: string;
   }> = [];
-  const judge = new OpenAiResponsesJudgeAdapter({
+  const judge = createTestJudge({
     rasterizer: {
       version: "test-rasterizer@1",
       async rasterize(slide) {
         return {
           mimeType: "image/png",
-          content: Uint8Array.from([
-            0x89,
-            0x50,
-            0x4e,
-            0x47,
-            slide.pageNumber,
-          ]),
+          content: testPng(slide.pageNumber),
         };
       },
     },
@@ -557,7 +729,84 @@ test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the
   );
 });
 
-test("Bakeoff fails closed without persisting scores and deletes an unused staged pack when Judge fails", async () => {
+test("Bakeoff waits for sibling Judge calls and retains the shared pack when one Judge branch fails", async () => {
+  const referencePackStore = new InMemoryReferencePackStore();
+  const observedRuns: string[] = [];
+  const judge = createTestJudge({
+    rasterizer: {
+      version: "test-rasterizer@1",
+      async rasterize(slide) {
+        return {
+          mimeType: "image/png",
+          content: testPng(slide.pageNumber),
+        };
+      },
+    },
+    transport: {
+      async create(request) {
+        const input = request.input as Array<{
+          content: Array<{ type: string; text?: string }>;
+        }>;
+        const contextText = input[0]?.content.find(
+          ({ type }) => type === "input_text",
+        )?.text;
+        assert.notEqual(contextText, undefined);
+        const context = JSON.parse(contextText!) as {
+          evaluationIdentity: { runId: string };
+        };
+        observedRuns.push(context.evaluationIdentity.runId);
+        if (context.evaluationIdentity.runId.includes("-wps-")) {
+          throw new Error("simulated WPS Judge failure");
+        }
+        return {
+          id: `resp_sibling_${observedRuns.length}`,
+          model: "gpt-5.6-sol",
+          status: "completed",
+          incomplete_details: null,
+          output: [
+            {
+              type: "message",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(validJudgePayload()),
+                },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu: new InMemoryFeishuProjection(),
+      productAdapters: [
+        new MockWpsProductAdapter(),
+        new MockQwenProductAdapter(),
+        new MockDoubaoProductAdapter(),
+      ],
+      referencePackStore,
+      judge,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_EVALUATION_CASE.caseId,
+    }),
+    /simulated WPS Judge failure/,
+  );
+
+  assert.equal(observedRuns.length, 3);
+  assert.equal(referencePackStore.snapshot().temporary.length, 0);
+  assert.equal(referencePackStore.snapshot().used.length, 1);
+  assert.equal(
+    referencePackStore.snapshot().used[0]?.scorecardIds.length,
+    3,
+  );
+});
+
+test("Bakeoff fails closed without persisting scores and retains the pack involved in a failed Judge attempt", async () => {
   const feishu = new InMemoryFeishuProjection();
   const referencePackStore = new InMemoryReferencePackStore();
   const harness = createBakeoffHarness({
@@ -580,8 +829,6 @@ test("Bakeoff fails closed without persisting scores and deletes an unused stage
   );
 
   assert.deepEqual(feishu.snapshot().artifactScoreTable, []);
-  assert.deepEqual(referencePackStore.snapshot(), {
-    temporary: [],
-    used: [],
-  });
+  assert.equal(referencePackStore.snapshot().temporary.length, 0);
+  assert.equal(referencePackStore.snapshot().used.length, 1);
 });

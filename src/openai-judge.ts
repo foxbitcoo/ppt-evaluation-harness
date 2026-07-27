@@ -9,6 +9,8 @@ import type {
   ArtifactScorecard,
   DimensionScore,
   EvaluationCaseRecord,
+  JudgeEgressAuthorizationLineage,
+  JudgeEgressContentField,
   KnowledgeErrorDeduction,
   RasterizedImageLineage,
   RenderManifest,
@@ -38,6 +40,7 @@ Return exactly the six declared 1–5 integer dimensions. Give page evidence and
 Delivery Quality is handled by automatic gates and must not become a seventh score.
 For factual correctness, use only facts in the supplied Reference Pack. Never deduct for an uncovered fact.
 Every knowledge-error deduction must identify the exact Reference Pack factId and sourceIds that support the correction.
+The factual_accuracy_and_content_quality score starts at 5 and subtracts exactly one point per distinct validated knowledgeErrors entry, with a floor of 1. Apply no other deduction to that dimension; place non-factual quality observations in the other five dimensions.
 Judge only the visible Artifact; do not infer vendor identity, hidden process, or internal pipeline causes.`;
 
 const JUDGE_SCHEMA = {
@@ -100,6 +103,12 @@ const JUDGE_CONFIG = Object.freeze({
   store: false as const,
   truncation: "disabled" as const,
   imageDetail: "high" as const,
+  text: Object.freeze({
+    verbosity: "low" as const,
+    formatType: "json_schema" as const,
+    formatName: "ppt_artifact_scorecard" as const,
+    strict: true as const,
+  }),
 });
 
 function sha256(value: string | Uint8Array): `sha256:${string}` {
@@ -109,6 +118,9 @@ function sha256(value: string | Uint8Array): `sha256:${string}` {
 const PROMPT_HASH = sha256(JUDGE_PROMPT);
 const SCHEMA_HASH = sha256(JSON.stringify(JUDGE_SCHEMA));
 const CONFIG_HASH = sha256(JSON.stringify(JUDGE_CONFIG));
+const PNG_SIGNATURE = Uint8Array.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
 
 export interface OpenAiJudgeCommand {
   readonly jobId: string;
@@ -122,6 +134,39 @@ export interface OpenAiJudgeCommand {
 
 export interface OpenAiJudgePort {
   score(command: OpenAiJudgeCommand): Promise<ArtifactScorecard>;
+}
+
+export interface JudgeEgressAuthorizationRequest {
+  readonly payloadHash: `sha256:${string}`;
+  readonly dataClassification: "public_or_synthetic";
+  readonly sourceOwner: string;
+  readonly processingPurpose: "presentation_artifact_evaluation";
+  readonly targetService: "openai";
+  readonly contentFields: readonly JudgeEgressContentField[];
+}
+
+export interface JudgeEgressAuthorizationDecision {
+  readonly decisionId: string;
+  readonly decision: "approved" | "denied";
+  readonly policyVersion: string;
+  readonly dataClassification: "public_or_synthetic";
+  readonly sourceOwner: string;
+  readonly processingPurpose: "presentation_artifact_evaluation";
+  readonly targetService: "openai";
+  readonly targetAccount: string;
+  readonly targetRegion: string;
+  readonly subprocessors: readonly string[];
+  readonly allowedContentFields: readonly JudgeEgressContentField[];
+  readonly requiredRedactions: readonly string[];
+  readonly legalSecurityBasis: string;
+  readonly approvedAt: string;
+  readonly expiresAt: string;
+}
+
+export interface JudgeEgressAuthorizationPort {
+  authorize(
+    request: JudgeEgressAuthorizationRequest,
+  ): Promise<JudgeEgressAuthorizationDecision>;
 }
 
 export interface OpenAiResponsesTransport {
@@ -185,8 +230,16 @@ export class OpenAiSdkResponsesTransport implements OpenAiResponsesTransport {
 export interface OpenAiResponsesJudgeAdapterOptions {
   readonly transport?: OpenAiResponsesTransport;
   readonly rasterizer?: StaticRenderRasterizerPort;
+  readonly egressAuthorization?: JudgeEgressAuthorizationPort;
   readonly now?: () => string;
 }
+
+const JUDGE_EGRESS_CONTENT_FIELDS = Object.freeze([
+  "evaluation_case",
+  "reference_pack",
+  "extracted_slide_text",
+  "static_slide_images",
+] as const satisfies readonly JudgeEgressContentField[]);
 
 function judgeCacheKey(
   command: OpenAiJudgeCommand,
@@ -208,32 +261,6 @@ function judgeCacheKey(
       configHash: CONFIG_HASH,
       rasterizerVersion,
       contextHash,
-    }),
-  );
-}
-
-function judgeInputHash(
-  command: OpenAiJudgeCommand,
-  rasterizerVersion: string,
-  contextHash: `sha256:${string}`,
-  rasterizedImageHashes: readonly RasterizedImageLineage[],
-): `sha256:${string}` {
-  return sha256(
-    JSON.stringify({
-      jobId: command.jobId,
-      runId: command.runId,
-      artifactId: command.artifact.artifactId,
-      caseId: command.evaluationCase.caseId,
-      caseVersion: command.evaluationCase.caseVersion,
-      artifactHash: command.artifact.contentHash,
-      renderManifestHash: command.renderManifest.contentHash,
-      referencePackHash: command.referencePack?.contentHash ?? null,
-      promptHash: PROMPT_HASH,
-      schemaHash: SCHEMA_HASH,
-      configHash: CONFIG_HASH,
-      rasterizerVersion,
-      contextHash,
-      rasterizedImageHashes,
     }),
   );
 }
@@ -264,11 +291,119 @@ function judgeContextText(command: OpenAiJudgeCommand): string {
   });
 }
 
+function nonEmptyDecisionString(value: string, label: string): string {
+  if (value.length === 0) {
+    throw new Error(`OpenAI Judge egress authorization missing ${label}`);
+  }
+  return value;
+}
+
+function freezeApprovedEgressAuthorization(
+  decision: JudgeEgressAuthorizationDecision,
+  request: JudgeEgressAuthorizationRequest,
+  evaluatedAt: string,
+): JudgeEgressAuthorizationLineage {
+  const evaluatedAtMs = Date.parse(evaluatedAt);
+  const approvedAtMs = Date.parse(decision.approvedAt);
+  const expiresAtMs = Date.parse(decision.expiresAt);
+  const allowed = new Set(decision.allowedContentFields);
+  if (
+    decision.decision !== "approved" ||
+    decision.dataClassification !== request.dataClassification ||
+    decision.sourceOwner !== request.sourceOwner ||
+    decision.processingPurpose !== request.processingPurpose ||
+    decision.targetService !== request.targetService ||
+    !Number.isFinite(evaluatedAtMs) ||
+    !Number.isFinite(approvedAtMs) ||
+    !Number.isFinite(expiresAtMs) ||
+    approvedAtMs > evaluatedAtMs ||
+    expiresAtMs <= evaluatedAtMs ||
+    JUDGE_EGRESS_CONTENT_FIELDS.some((field) => !allowed.has(field)) ||
+    decision.requiredRedactions.length > 0 ||
+    decision.subprocessors.some((name) => name.length === 0)
+  ) {
+    throw new Error(
+      "OpenAI Judge egress authorization is missing, denied, expired, or incompatible",
+    );
+  }
+  return Object.freeze({
+    decisionId: nonEmptyDecisionString(
+      decision.decisionId,
+      "decisionId",
+    ),
+    decision: "approved",
+    policyVersion: nonEmptyDecisionString(
+      decision.policyVersion,
+      "policyVersion",
+    ),
+    dataClassification: decision.dataClassification,
+    sourceOwner: decision.sourceOwner,
+    processingPurpose: decision.processingPurpose,
+    targetService: decision.targetService,
+    targetAccount: nonEmptyDecisionString(
+      decision.targetAccount,
+      "targetAccount",
+    ),
+    targetRegion: nonEmptyDecisionString(
+      decision.targetRegion,
+      "targetRegion",
+    ),
+    subprocessors: Object.freeze([...decision.subprocessors]),
+    allowedContentFields: Object.freeze([
+      ...decision.allowedContentFields,
+    ]),
+    requiredRedactions: Object.freeze([
+      ...decision.requiredRedactions,
+    ]),
+    legalSecurityBasis: nonEmptyDecisionString(
+      decision.legalSecurityBasis,
+      "legalSecurityBasis",
+    ),
+    approvedAt: decision.approvedAt,
+    expiresAt: decision.expiresAt,
+  });
+}
+
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error(`OpenAI Judge invalid ${label}`);
   }
   return value as Record<string, unknown>;
+}
+
+async function assertDecodablePng(
+  image: RasterizedJudgeImage,
+  pageNumber: number,
+): Promise<void> {
+  if (
+    image.mimeType !== "image/png" ||
+    !(image.content instanceof Uint8Array) ||
+    image.content.byteLength < PNG_SIGNATURE.byteLength ||
+    PNG_SIGNATURE.some(
+      (byte, index) => image.content[index] !== byte,
+    )
+  ) {
+    throw new Error(
+      `OpenAI Judge rasterizer returned invalid PNG bytes for page ${pageNumber}`,
+    );
+  }
+  try {
+    const metadata = await sharp(image.content).metadata();
+    if (
+      metadata.format !== "png" ||
+      metadata.width === undefined ||
+      metadata.height === undefined ||
+      metadata.width < 1 ||
+      metadata.height < 1
+    ) {
+      throw new Error("missing PNG dimensions");
+    }
+  } catch (error) {
+    throw new Error(
+      `OpenAI Judge rasterizer returned undecodable PNG bytes for page ${pageNumber}`,
+      { cause: error },
+    );
+  }
 }
 
 function asNonEmptyString(value: unknown, label: string): string {
@@ -383,6 +518,7 @@ function parseKnowledgeErrors(
   const sourceIds = new Set(
     referencePack?.sources.map(({ sourceId }) => sourceId) ?? [],
   );
+  const seenErrors = new Set<string>();
   return Object.freeze(
     value.map((entry) => {
       const record = asRecord(entry, "knowledge error");
@@ -422,13 +558,19 @@ function parseKnowledgeErrors(
           "OpenAI Judge knowledge error cites an uncovered fact or source",
         );
       }
+      const claim = asBoundedNonEmptyString(
+        record.claim,
+        240,
+        "knowledge claim",
+      );
+      const errorKey = `${pageNumber}:${factId}:${claim}`;
+      if (seenErrors.has(errorKey)) {
+        throw new Error("OpenAI Judge duplicate knowledge error");
+      }
+      seenErrors.add(errorKey);
       return Object.freeze({
         pageNumber: pageNumber as number,
-        claim: asBoundedNonEmptyString(
-          record.claim,
-          240,
-          "knowledge claim",
-        ),
+        claim,
         correction: asBoundedNonEmptyString(
           record.correction,
           240,
@@ -439,6 +581,22 @@ function parseKnowledgeErrors(
       });
     }),
   );
+}
+
+function assertNoHiddenFactualDeductions(
+  dimensions: readonly DimensionScore[],
+  knowledgeErrors: readonly KnowledgeErrorDeduction[],
+): void {
+  const factualScore = dimensions.find(
+    ({ dimension }) =>
+      dimension === "factual_accuracy_and_content_quality",
+  );
+  const expectedValue = Math.max(1, 5 - knowledgeErrors.length);
+  if (factualScore?.value !== expectedValue) {
+    throw new Error(
+      "OpenAI Judge factual score contains a hidden deduction not backed by a validated knowledge error",
+    );
+  }
 }
 
 function responseOutputText(response: Record<string, unknown>): string {
@@ -476,6 +634,9 @@ function responseOutputText(response: Record<string, unknown>): string {
 export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
   readonly #transport: OpenAiResponsesTransport;
   readonly #rasterizer: StaticRenderRasterizerPort;
+  readonly #egressAuthorization:
+    | JudgeEgressAuthorizationPort
+    | undefined;
   readonly #now: () => string;
   readonly #cache = new Map<string, Promise<ArtifactScorecard>>();
 
@@ -483,6 +644,7 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
     this.#transport = options.transport ?? new OpenAiSdkResponsesTransport();
     this.#rasterizer =
       options.rasterizer ?? new SharpStaticRenderRasterizer();
+    this.#egressAuthorization = options.egressAuthorization;
     this.#now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -521,15 +683,7 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
     const rasterizedSlides = await Promise.all(
       command.renderManifest.slides.map(async (slide) => {
         const image = await this.#rasterizer.rasterize(slide);
-        if (
-          image.mimeType !== "image/png" ||
-          !(image.content instanceof Uint8Array) ||
-          image.content.byteLength === 0
-        ) {
-          throw new Error(
-            `OpenAI Judge rasterizer returned an invalid PNG for page ${slide.pageNumber}`,
-          );
-        }
+        await assertDecodablePng(image, slide.pageNumber);
         return {
           pageNumber: slide.pageNumber,
           image,
@@ -548,14 +702,6 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
     const rasterizedImagesHash = sha256(
       JSON.stringify(rasterizedImageHashes),
     );
-    const inputHash = judgeInputHash(
-      command,
-      this.#rasterizer.version,
-      contextHash,
-      rasterizedImageHashes,
-    );
-    const idempotencyKey =
-      `judge_${inputHash.slice("sha256:".length)}` as const;
     const request = {
       model: JUDGE_CONFIG.model,
       reasoning: JUDGE_CONFIG.reasoning,
@@ -582,15 +728,43 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
         },
       ],
       text: {
-        verbosity: "low",
+        verbosity: JUDGE_CONFIG.text.verbosity,
         format: {
-          type: "json_schema",
-          name: "ppt_artifact_scorecard",
-          strict: true,
+          type: JUDGE_CONFIG.text.formatType,
+          name: JUDGE_CONFIG.text.formatName,
+          strict: JUDGE_CONFIG.text.strict,
           schema: JUDGE_SCHEMA,
         },
       },
     };
+    const payloadHash = sha256(JSON.stringify(request));
+    if (this.#egressAuthorization === undefined) {
+      throw new Error(
+        "OpenAI Judge egress authorization is missing; submission blocked",
+      );
+    }
+    const evaluatedAt = this.#now();
+    const egressRequest = Object.freeze<JudgeEgressAuthorizationRequest>({
+      payloadHash,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: command.evaluationCase.recordId,
+      processingPurpose: "presentation_artifact_evaluation",
+      targetService: "openai",
+      contentFields: JUDGE_EGRESS_CONTENT_FIELDS,
+    });
+    const egressAuthorization = freezeApprovedEgressAuthorization(
+      await this.#egressAuthorization.authorize(egressRequest),
+      egressRequest,
+      evaluatedAt,
+    );
+    const egressAuthorizationHash = sha256(
+      JSON.stringify(egressAuthorization),
+    );
+    const inputHash = sha256(
+      JSON.stringify({ payloadHash, egressAuthorizationHash }),
+    );
+    const idempotencyKey =
+      `judge_${inputHash.slice("sha256:".length)}` as const;
     const rawResponse = await this.#transport.create(request, idempotencyKey);
     const response = asRecord(rawResponse, "response");
     if (response.status !== "completed") {
@@ -618,6 +792,7 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
       command.referencePack,
       command.artifact.pageCount,
     );
+    assertNoHiddenFactualDeductions(dimensions, knowledgeErrors);
     return Object.freeze<ArtifactScorecard>({
       scorecardId: command.scorecardId,
       artifactId: command.artifact.artifactId,
@@ -645,6 +820,9 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
         configHash: CONFIG_HASH,
         schemaHash: SCHEMA_HASH,
         contextHash,
+        payloadHash,
+        egressAuthorizationHash,
+        egressAuthorization,
         inputHash,
         idempotencyKey,
         rasterizerVersion: this.#rasterizer.version,
@@ -670,7 +848,7 @@ export class OpenAiResponsesJudgeAdapter implements OpenAiJudgePort {
           effect: "score_normally_with_flag",
         },
       ],
-      createdAt: this.#now(),
+      createdAt: evaluatedAt,
     });
   }
 }

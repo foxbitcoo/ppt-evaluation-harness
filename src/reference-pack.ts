@@ -58,7 +58,10 @@ export interface ReferencePackStoreSnapshot {
 }
 
 export interface ReferencePackStorePort {
-  stage(pack: ReferencePack): StagedReferencePack;
+  stage(
+    pack: ReferencePack,
+    input: { readonly jobId: string },
+  ): StagedReferencePack;
   retainUsed(
     stagingId: string,
     input: {
@@ -73,13 +76,19 @@ export class InMemoryReferencePackStore implements ReferencePackStorePort {
   readonly #temporary = new Map<string, StagedReferencePack>();
   readonly #used: UsedReferencePackRecord[] = [];
   readonly #now: () => string;
+  #leaseSequence = 0;
 
   constructor(now: () => string = () => new Date().toISOString()) {
     this.#now = now;
   }
 
-  stage(pack: ReferencePack): StagedReferencePack {
-    const stagingId = `temporary:${pack.contentHash}`;
+  stage(
+    pack: ReferencePack,
+    input: { readonly jobId: string },
+  ): StagedReferencePack {
+    this.#leaseSequence += 1;
+    const stagingId =
+      `temporary:${input.jobId}:${pack.contentHash}:lease-${this.#leaseSequence}`;
     const staged = Object.freeze({ stagingId, pack });
     this.#temporary.set(stagingId, staged);
     return staged;
@@ -202,66 +211,81 @@ export function createContentAddressedReferencePack(input: {
   });
 }
 
-const VOLCANO_REFERENCE_PACK = createContentAddressedReferencePack({
-  packId: "education-earth-science-volcano-v1",
-  version: 1,
-  caseId: VOLCANO_CASE_ID,
-  sources: [
-    {
-      sourceId: "usgs-eruption-faq",
-      title: "How Do Volcanoes Erupt?",
-      url: "https://www.usgs.gov/faqs/how-do-volcanoes-erupt?page=1",
-      publisher: "U.S. Geological Survey",
-      authority: "official_agency",
-    },
-    {
-      sourceId: "usgs-nature-of-volcanoes",
-      title: "The Nature of Volcanoes",
-      url: "https://pubs.usgs.gov/gip/volc/nature.html",
-      publisher: "U.S. Geological Survey",
-      authority: "official_agency",
-    },
-  ],
-  facts: [
-    {
-      factId: "magma-rises",
-      statement:
-        "Magma is lighter than surrounding solid rock, so it rises and may reach the surface through vents and fissures.",
-      sourceIds: ["usgs-eruption-faq"],
-    },
-    {
-      factId: "viscosity-controls-gas-escape",
-      statement:
-        "Thin, runny magma lets gases escape more easily; thick, sticky magma traps gases so pressure can build toward an explosive eruption.",
-      sourceIds: ["usgs-eruption-faq"],
-    },
-    {
-      factId: "magma-and-lava",
-      statement:
-        "Molten rock below the surface is magma; after it erupts from a volcano it is called lava.",
-      sourceIds: ["usgs-eruption-faq", "usgs-nature-of-volcanoes"],
-    },
-  ],
-});
+export interface ReferencePackGeneratorPort {
+  generate(evaluationCase: EvaluationCaseRecord): ReferencePack | null;
+}
+
+export class ReviewedReferencePackGenerator
+  implements ReferencePackGeneratorPort
+{
+  generate(evaluationCase: EvaluationCaseRecord): ReferencePack | null {
+    if (evaluationCase.caseId !== VOLCANO_CASE_ID) return null;
+    return createContentAddressedReferencePack({
+      packId: "education-earth-science-volcano-v1",
+      version: 1,
+      caseId: evaluationCase.caseId,
+      sources: [
+        {
+          sourceId: "usgs-eruption-faq",
+          title: "How Do Volcanoes Erupt?",
+          url: "https://www.usgs.gov/faqs/how-do-volcanoes-erupt?page=1",
+          publisher: "U.S. Geological Survey",
+          authority: "official_agency",
+        },
+        {
+          sourceId: "usgs-nature-of-volcanoes",
+          title: "The Nature of Volcanoes",
+          url: "https://pubs.usgs.gov/gip/volc/nature.html",
+          publisher: "U.S. Geological Survey",
+          authority: "official_agency",
+        },
+      ],
+      facts: [
+        {
+          factId: "magma-rises",
+          statement:
+            "Magma is lighter than surrounding solid rock, so it rises and may reach the surface through vents and fissures.",
+          sourceIds: ["usgs-eruption-faq"],
+        },
+        {
+          factId: "viscosity-controls-gas-escape",
+          statement:
+            "Thin, runny magma lets gases escape more easily; thick, sticky magma traps gases so pressure can build toward an explosive eruption.",
+          sourceIds: ["usgs-eruption-faq"],
+        },
+        {
+          factId: "magma-and-lava",
+          statement:
+            "Molten rock below the surface is magma; after it erupts from a volcano it is called lava.",
+          sourceIds: [
+            "usgs-eruption-faq",
+            "usgs-nature-of-volcanoes",
+          ],
+        },
+      ],
+    });
+  }
+}
 
 export function resolveReferencePackForCase(input: {
   readonly evaluationCase: EvaluationCaseRecord;
   readonly mode?: ReferencePackMode;
+  readonly generator?: ReferencePackGeneratorPort;
 }): ReferencePackSelection {
   const mode = input.mode ?? "automatic";
-  if (
-    mode === "force" &&
-    input.evaluationCase.caseId !== VOLCANO_CASE_ID
-  ) {
+  if (mode === "off") {
+    return Object.freeze({ mode, pack: null });
+  }
+  const pack = (
+    input.generator ?? new ReviewedReferencePackGenerator()
+  ).generate(input.evaluationCase);
+  if (mode === "force" && pack === null) {
     throw new Error(
       `Reference Pack force mode found no reviewed Reference Pack for ${input.evaluationCase.caseId}`,
     );
   }
   return Object.freeze({
     mode,
-    pack:
-      mode !== "off" && input.evaluationCase.caseId === VOLCANO_CASE_ID
-        ? VOLCANO_REFERENCE_PACK
-        : null,
+    pack,
   });
 }

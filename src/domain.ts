@@ -177,6 +177,30 @@ export interface RasterizedImageLineage {
   readonly contentHash: `sha256:${string}`;
 }
 
+export type JudgeEgressContentField =
+  | "evaluation_case"
+  | "reference_pack"
+  | "extracted_slide_text"
+  | "static_slide_images";
+
+export interface JudgeEgressAuthorizationLineage {
+  readonly decisionId: string;
+  readonly decision: "approved";
+  readonly policyVersion: string;
+  readonly dataClassification: "public_or_synthetic";
+  readonly sourceOwner: string;
+  readonly processingPurpose: "presentation_artifact_evaluation";
+  readonly targetService: "openai";
+  readonly targetAccount: string;
+  readonly targetRegion: string;
+  readonly subprocessors: readonly string[];
+  readonly allowedContentFields: readonly JudgeEgressContentField[];
+  readonly requiredRedactions: readonly string[];
+  readonly legalSecurityBasis: string;
+  readonly approvedAt: string;
+  readonly expiresAt: string;
+}
+
 export interface JudgeLineage {
   readonly provider: "openai";
   readonly adapterVersion: "openai-responses-judge@1";
@@ -188,6 +212,9 @@ export interface JudgeLineage {
   readonly configHash: `sha256:${string}`;
   readonly schemaHash: `sha256:${string}`;
   readonly contextHash: `sha256:${string}`;
+  readonly payloadHash: `sha256:${string}`;
+  readonly egressAuthorizationHash: `sha256:${string}`;
+  readonly egressAuthorization: JudgeEgressAuthorizationLineage;
   readonly inputHash: `sha256:${string}`;
   readonly idempotencyKey: `judge_${string}`;
   readonly rasterizerVersion: string;

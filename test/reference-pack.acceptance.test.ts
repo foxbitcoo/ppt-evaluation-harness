@@ -17,11 +17,16 @@ test("Reference Pack selection defaults to automatic and freezes the volcano pac
   const selection = resolveReferencePackForCase({
     evaluationCase: VOLCANO_EVALUATION_CASE,
   });
+  const secondSelection = resolveReferencePackForCase({
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  });
 
   assert.equal(selection.mode, "automatic");
   assert.equal(selection.pack?.caseId, VOLCANO_EVALUATION_CASE.caseId);
   assert.match(selection.pack?.contentHash ?? "", /^sha256:[a-f0-9]{64}$/);
   assert.equal(Object.isFrozen(selection.pack), true);
+  assert.notEqual(selection.pack, secondSelection.pack);
+  assert.equal(selection.pack?.contentHash, secondSelection.pack?.contentHash);
 });
 
 test("Reference Pack off mode suppresses a matching volcano pack", () => {
@@ -136,7 +141,7 @@ test("a staged Reference Pack becomes an immutable persisted usage when scoring 
   assert.notEqual(pack, null);
   const store = new InMemoryReferencePackStore();
 
-  const staged = store.stage(pack!);
+  const staged = store.stage(pack!, { jobId: "MOCK-job-volcano-v1" });
   const usage = store.retainUsed(staged.stagingId, {
     jobId: "MOCK-job-volcano-v1",
     scorecardIds: [
@@ -159,10 +164,34 @@ test("an unused temporary Reference Pack can be deleted", () => {
   }).pack;
   assert.notEqual(pack, null);
   const store = new InMemoryReferencePackStore();
-  const staged = store.stage(pack!);
+  const staged = store.stage(pack!, { jobId: "MOCK-job-unused" });
 
   assert.equal(store.deleteUnused(staged.stagingId), true);
   assert.deepEqual(store.snapshot(), { temporary: [], used: [] });
+});
+
+test("concurrent Jobs stage independent usages of the same canonical Reference Pack", () => {
+  const pack = resolveReferencePackForCase({
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  }).pack;
+  assert.notEqual(pack, null);
+  const store = new InMemoryReferencePackStore();
+
+  const first = store.stage(pack!, { jobId: "MOCK-job-concurrent-a" });
+  const second = store.stage(pack!, { jobId: "MOCK-job-concurrent-b" });
+  assert.notEqual(first.stagingId, second.stagingId);
+
+  store.retainUsed(first.stagingId, {
+    jobId: "MOCK-job-concurrent-a",
+    scorecardIds: ["MOCK-scorecard-a"],
+  });
+  store.retainUsed(second.stagingId, {
+    jobId: "MOCK-job-concurrent-b",
+    scorecardIds: ["MOCK-scorecard-b"],
+  });
+
+  assert.equal(store.snapshot().temporary.length, 0);
+  assert.equal(store.snapshot().used.length, 2);
 });
 
 test("one Bakeoff Job shares one frozen automatic pack across three scorecards without exposing it to vendors", async () => {
