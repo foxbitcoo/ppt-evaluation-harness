@@ -690,6 +690,38 @@ test("concurrent starts for one stable Bakeoff Job share one vendor execution", 
   assert.equal(feishu.snapshot().runRecordTable.length, 7);
 });
 
+test("concurrent starts reject a conflicting selected Product Package set", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const fullHarness = createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  });
+  const wpsOnlyHarness = createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockWpsProductAdapter()],
+  });
+  const command = {
+    environment: "test" as const,
+    caseId: VOLCANO_CASE_ID,
+  };
+
+  const [full, conflict] = await Promise.allSettled([
+    fullHarness.startBakeoffJob(command),
+    wpsOnlyHarness.startBakeoffJob(command),
+  ]);
+
+  assert.equal(full.status, "fulfilled");
+  assert.equal(conflict.status, "rejected");
+  if (conflict.status === "rejected") {
+    assert.match(String(conflict.reason), /identity conflict/i);
+  }
+  assert.equal(feishu.snapshot().runRecordTable.length, 7);
+});
+
 test("compatibility fingerprint equality is independent of object key insertion order", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({

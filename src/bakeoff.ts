@@ -129,7 +129,7 @@ export interface BakeoffHarnessDependencies {
 }
 
 interface InFlightBakeoffJob {
-  readonly commandIdentity: string;
+  readonly jobIdentity: string;
   readonly outcome: Promise<BakeoffJobOutcome>;
 }
 
@@ -137,19 +137,80 @@ const IN_FLIGHT_BAKEOFF_JOBS = new WeakMap<
   FeishuProjectionPort,
   Map<string, InFlightBakeoffJob>
 >();
+const DEFAULT_REFERENCE_PACK_GENERATOR =
+  new ReviewedReferencePackGenerator();
+const DEFAULT_REFERENCE_PACK_STORES = new WeakMap<
+  FeishuProjectionPort,
+  ReferencePackStorePort
+>();
+const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
+let nextDependencyIdentity = 1;
 
-function bakeoffCommandIdentity(command: StartBakeoffJobCommand): string {
+function defaultReferencePackStore(
+  feishu: FeishuProjectionPort,
+): ReferencePackStorePort {
+  const existing = DEFAULT_REFERENCE_PACK_STORES.get(feishu);
+  if (existing !== undefined) return existing;
+  const created = new InMemoryReferencePackStore(
+    () => MOCK_SCENARIO.fixedTime,
+  );
+  DEFAULT_REFERENCE_PACK_STORES.set(feishu, created);
+  return created;
+}
+
+function dependencyIdentity(dependency: object | undefined): string | null {
+  if (dependency === undefined) return null;
+  const existing = DEPENDENCY_IDENTITIES.get(dependency);
+  if (existing !== undefined) return existing;
+  const created = `dependency-${nextDependencyIdentity}`;
+  nextDependencyIdentity += 1;
+  DEPENDENCY_IDENTITIES.set(dependency, created);
+  return created;
+}
+
+function bakeoffJobIdentity(
+  command: StartBakeoffJobCommand,
+  selections: readonly SelectedProductAdapter[],
+  dependencies: {
+    readonly attemptDeadline: AttemptDeadlinePort;
+    readonly referencePackStore: ReferencePackStorePort;
+    readonly referencePackGenerator: ReferencePackGeneratorPort;
+    readonly judge: OpenAiJudgePort | undefined;
+  },
+): string {
   return JSON.stringify({
     environment: command.environment,
     caseId: command.caseId,
     referencePackMode: command.referencePackMode ?? "automatic",
+    protocol: MOCK_BAKEOFF_PROTOCOL_SNAPSHOT,
+    selections: selections.map(({ adapter, productPackage, runId }) => ({
+      runId,
+      adapter: dependencyIdentity(adapter),
+      packageId: productPackage.packageId,
+      vendorId: productPackage.vendorId,
+      displayName: productPackage.displayName,
+      adapterVersion: productPackage.adapterVersion,
+      provenance: productPackage.provenance,
+      environmentOriginId: productPackage.environmentOrigin.originId,
+      environment: productPackage.environmentOrigin.environment,
+    })),
+    dependencies: {
+      attemptDeadline: dependencyIdentity(dependencies.attemptDeadline),
+      referencePackStore: dependencyIdentity(
+        dependencies.referencePackStore,
+      ),
+      referencePackGenerator: dependencyIdentity(
+        dependencies.referencePackGenerator,
+      ),
+      judge: dependencyIdentity(dependencies.judge),
+    },
   });
 }
 
 function coalesceBakeoffJob(
   feishu: FeishuProjectionPort,
   jobId: string,
-  command: StartBakeoffJobCommand,
+  jobIdentity: string,
   operation: () => Promise<BakeoffJobOutcome>,
 ): Promise<BakeoffJobOutcome> {
   let jobs = IN_FLIGHT_BAKEOFF_JOBS.get(feishu);
@@ -157,11 +218,12 @@ function coalesceBakeoffJob(
     jobs = new Map();
     IN_FLIGHT_BAKEOFF_JOBS.set(feishu, jobs);
   }
-  const commandIdentity = bakeoffCommandIdentity(command);
   const existing = jobs.get(jobId);
   if (existing !== undefined) {
-    if (existing.commandIdentity !== commandIdentity) {
-      throw new Error(`Bakeoff Job identity conflict: ${jobId}`);
+    if (existing.jobIdentity !== jobIdentity) {
+      return Promise.reject(
+        new Error(`Bakeoff Job identity conflict: ${jobId}`),
+      );
     }
     return existing.outcome;
   }
@@ -173,7 +235,7 @@ function coalesceBakeoffJob(
       jobs?.delete(jobId);
     }
   });
-  jobs.set(jobId, { commandIdentity, outcome });
+  jobs.set(jobId, { jobIdentity, outcome });
   return outcome;
 }
 
@@ -194,6 +256,23 @@ interface SelectedProductAdapter {
   readonly adapter: ProductAdapterPort;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
+}
+
+function snapshotProductSelections(
+  adapters: readonly ProductAdapterPort[],
+): readonly SelectedProductAdapter[] {
+  return Object.freeze(
+    adapters.map((adapter) => {
+      const productPackage = Object.freeze({
+        ...adapter.productPackage,
+      });
+      return Object.freeze({
+        adapter,
+        productPackage,
+        runId: runIdForPackage(productPackage.packageId),
+      });
+    }),
+  );
 }
 
 function replayedBakeoffOutcome(
@@ -780,13 +859,17 @@ export function createBakeoffHarness({
   feishu,
   productAdapter,
   productAdapters,
-  attemptDeadline = WALL_CLOCK_ATTEMPT_DEADLINE,
-  referencePackStore = new InMemoryReferencePackStore(
-    () => MOCK_SCENARIO.fixedTime,
-  ),
-  referencePackGenerator = new ReviewedReferencePackGenerator(),
+  attemptDeadline: configuredAttemptDeadline,
+  referencePackStore: configuredReferencePackStore,
+  referencePackGenerator: configuredReferencePackGenerator,
   judge,
 }: BakeoffHarnessDependencies): BakeoffHarness {
+  const attemptDeadline =
+    configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
+  const referencePackStore =
+    configuredReferencePackStore ?? defaultReferencePackStore(feishu);
+  const referencePackGenerator =
+    configuredReferencePackGenerator ?? DEFAULT_REFERENCE_PACK_GENERATOR;
   const selectedProductAdapters = Object.freeze([
     ...(productAdapters ??
       (productAdapter === undefined ? [] : [productAdapter])),
@@ -795,8 +878,11 @@ export function createBakeoffHarness({
     throw new Error("A Bakeoff Job requires at least one Product Adapter");
   }
 
-  const executor: BakeoffHarness = {
-    async startBakeoffJob(command) {
+  const executor = {
+    async startBakeoffJob(
+      command: StartBakeoffJobCommand,
+      selections: readonly SelectedProductAdapter[],
+    ): Promise<BakeoffJobOutcome> {
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
       }
@@ -805,18 +891,6 @@ export function createBakeoffHarness({
           `${command.environment} command cannot use ${feishu.targetEnvironment} projection environment`,
         );
       }
-      const selections = Object.freeze(
-        selectedProductAdapters.map((adapter) => {
-          const productPackage = Object.freeze({
-            ...adapter.productPackage,
-          });
-          return Object.freeze({
-            adapter,
-            productPackage,
-            runId: runIdForPackage(productPackage.packageId),
-          });
-        }),
-      );
       const packageIds = selections.map(
         ({ productPackage }) => productPackage.packageId,
       );
@@ -1106,11 +1180,20 @@ export function createBakeoffHarness({
   };
   return {
     startBakeoffJob(command) {
+      const selections = snapshotProductSelections(
+        selectedProductAdapters,
+      );
+      const jobIdentity = bakeoffJobIdentity(command, selections, {
+        attemptDeadline,
+        referencePackStore,
+        referencePackGenerator,
+        judge,
+      });
       return coalesceBakeoffJob(
         feishu,
         MOCK_SCENARIO.jobId,
-        command,
-        () => executor.startBakeoffJob(command),
+        jobIdentity,
+        () => executor.startBakeoffJob(command, selections),
       );
     },
   };
