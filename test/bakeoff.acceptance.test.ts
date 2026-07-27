@@ -8,9 +8,26 @@ import {
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   type Artifact,
+  type BakeoffJobOutcome,
+  type ArtifactScorecard,
+  type RenderManifest,
   type ProductAdapterPort,
   type ProductRunCommand,
 } from "../src/index.ts";
+
+type CapturedBakeoffOutcome = BakeoffJobOutcome & {
+  readonly artifact: Artifact;
+  readonly renderManifest: RenderManifest;
+  readonly scorecard: ArtifactScorecard;
+};
+
+function requireCaptured(
+  outcome: BakeoffJobOutcome,
+): asserts outcome is CapturedBakeoffOutcome {
+  assert.notEqual(outcome.artifact, null);
+  assert.notEqual(outcome.renderManifest, null);
+  assert.notEqual(outcome.scorecard, null);
+}
 
 function createFixedMockHarness(feishu: InMemoryFeishuProjection) {
   return createBakeoffHarness({
@@ -19,7 +36,7 @@ function createFixedMockHarness(feishu: InMemoryFeishuProjection) {
   });
 }
 
-test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK parent and WPS Run records", async () => {
+test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK parent, WPS Run, and Attempt records", async () => {
   const feishu = new InMemoryFeishuProjection();
   const harness = createFixedMockHarness(feishu);
 
@@ -35,6 +52,10 @@ test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK paren
   assert.deepEqual(projection.caseTable[0], {
     recordId: "MOCK-case-volcano-query-v1",
     provenance: "MOCK",
+    environmentOrigin: {
+      originId: "test:mock-bakeoff-v1",
+      environment: "test",
+    },
     caseId: VOLCANO_CASE_ID,
     caseVersion: 1,
     track: "query_generation",
@@ -74,6 +95,15 @@ test("a test Bakeoff Job freezes the 16-page volcano Case and creates MOCK paren
         status: "completed",
         provenance: "MOCK",
       },
+      {
+        recordId: "MOCK-run-wps-volcano-v1-attempt-1",
+        recordType: "evaluation_attempt",
+        jobId: "MOCK-job-volcano-v1",
+        parentRecordId: "MOCK-run-wps-volcano-v1",
+        product: "Mock WPS AI PPT",
+        status: "completed",
+        provenance: "MOCK",
+      },
     ],
   );
 });
@@ -92,6 +122,8 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(firstOutcome);
+  requireCaptured(secondOutcome);
 
   assert.equal(firstOutcome.artifact.provenance, "MOCK");
   assert.equal(firstOutcome.artifact.filename, "MOCK-wps-volcano-16.pptx");
@@ -161,6 +193,8 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(firstOutcome);
+  requireCaptured(secondOutcome);
 
   assert.equal(firstOutcome.scorecard.provenance, "MOCK");
   assert.equal(firstOutcome.scorecard.artifactId, firstOutcome.artifact.artifactId);
@@ -221,6 +255,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(outcome);
   const projection = feishu.snapshot();
 
   assert.deepEqual(
@@ -235,7 +270,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
     ],
   );
   assert.equal(projection.caseTable.length, 1);
-  assert.equal(projection.runRecordTable.length, 2);
+  assert.equal(projection.runRecordTable.length, 3);
   assert.equal(projection.artifactScoreTable.length, 1);
   assert.deepEqual(projection.productGapCardTable, []);
 
@@ -264,6 +299,7 @@ test("the public product adapter port can be replaced without changing the Bakeo
   const fixedMockAdapter = new MockWpsProductAdapter();
   const replacementAdapter: ProductAdapterPort = {
     productPackage: {
+      ...fixedMockAdapter.productPackage,
       packageId: "MOCK-replacement-package-v1",
       displayName: "Replacement Playwright-ready WPS Adapter",
       adapterVersion: "replacement-test@1",
@@ -285,6 +321,7 @@ test("the public product adapter port can be replaced without changing the Bakeo
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(outcome);
 
   assert.equal(
     feishu.snapshot().runRecordTable[1]?.product,
@@ -362,6 +399,8 @@ test("Artifact byte changes with a valid new hash drive new static renders and e
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  requireCaptured(fixedOutcome);
+  requireCaptured(variantOutcome);
 
   assert.notEqual(variantOutcome.artifact.contentHash, fixedOutcome.artifact.contentHash);
   assert.notEqual(

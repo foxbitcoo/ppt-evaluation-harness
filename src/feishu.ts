@@ -1,12 +1,17 @@
 import type {
   ArtifactScorecard,
   ArtifactScoreTableRecord,
+  ComparisonRecord,
   EvaluationCaseRecord,
   FeishuReport,
   FeishuReportDraft,
   ProductGapCardRecord,
   RunRecord,
 } from "./domain.ts";
+import {
+  assertEnvironmentOriginAllowed,
+  type EnvironmentOrigin,
+} from "./environment-origin.ts";
 
 export interface EvaluationCaseTablePort {
   upsertCase(record: EvaluationCaseRecord): Promise<void>;
@@ -25,6 +30,10 @@ export interface ProductGapCardTablePort {
   appendProductGapCard(record: ProductGapCardRecord): Promise<void>;
 }
 
+export interface ComparisonTablePort {
+  appendComparison(record: ComparisonRecord): Promise<void>;
+}
+
 export interface ReportDocumentPort {
   createReport(draft: FeishuReportDraft): Promise<FeishuReport>;
 }
@@ -33,25 +42,52 @@ export interface FeishuProjectionPort
   extends EvaluationCaseTablePort,
     RunRecordTablePort,
     ArtifactScoreTablePort,
+    ComparisonTablePort,
     ProductGapCardTablePort,
-    ReportDocumentPort {}
+    ReportDocumentPort {
+  readonly targetEnvironment: "test" | "production";
+}
 
 export interface FeishuProjectionSnapshot {
   readonly caseTable: readonly EvaluationCaseRecord[];
   readonly runRecordTable: readonly RunRecord[];
   readonly artifactScoreTable: readonly ArtifactScoreTableRecord[];
-  readonly productGapCardTable: readonly ProductGapCardRecord[];
+  readonly productGapCardTable: readonly (
+    | ComparisonRecord
+    | ProductGapCardRecord
+  )[];
   readonly reports: readonly FeishuReport[];
+}
+
+export interface InMemoryFeishuProjectionOptions {
+  readonly targetEnvironment?: "test" | "production";
 }
 
 export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #caseTable: EvaluationCaseRecord[] = [];
   readonly #runRecordTable: RunRecord[] = [];
   readonly #artifactScoreTable: ArtifactScoreTableRecord[] = [];
-  readonly #productGapCardTable: ProductGapCardRecord[] = [];
+  readonly #productGapCardTable: (
+    | ComparisonRecord
+    | ProductGapCardRecord
+  )[] = [];
   readonly #reports: FeishuReport[] = [];
+  readonly targetEnvironment: "test" | "production";
+
+  constructor(options: InMemoryFeishuProjectionOptions = {}) {
+    this.targetEnvironment = options.targetEnvironment ?? "test";
+  }
+
+  #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {
+    assertEnvironmentOriginAllowed(
+      origin,
+      this.targetEnvironment,
+      entityName,
+    );
+  }
 
   async upsertCase(record: EvaluationCaseRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Evaluation Case");
     const existingIndex = this.#caseTable.findIndex(
       ({ recordId }) => recordId === record.recordId,
     );
@@ -63,6 +99,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   async appendRunRecord(record: RunRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Run/Attempt");
     this.#runRecordTable.push(record);
   }
 
@@ -85,14 +122,37 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   async appendArtifactScore(record: ArtifactScoreTableRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Artifact score projection");
+    this.#assertAllowed(record.artifact.environmentOrigin, "Artifact");
+    this.#assertAllowed(
+      record.renderManifest.environmentOrigin,
+      "Render manifest",
+    );
+    this.#assertAllowed(record.scorecard.environmentOrigin, "Evaluation");
+    if (
+      record.runId !== record.artifact.runId ||
+      record.runId !== record.scorecard.runId ||
+      record.artifactId !== record.artifact.artifactId ||
+      record.artifactId !== record.scorecard.artifactId ||
+      record.renderManifest.artifactId !== record.artifactId
+    ) {
+      throw new Error("Artifact score projection contains inconsistent lineage");
+    }
     this.#artifactScoreTable.push(record);
   }
 
+  async appendComparison(record: ComparisonRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Comparison");
+    this.#productGapCardTable.push(record);
+  }
+
   async appendProductGapCard(record: ProductGapCardRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Product gap comparison");
     this.#productGapCardTable.push(record);
   }
 
   async createReport(draft: FeishuReportDraft): Promise<FeishuReport> {
+    this.#assertAllowed(draft.environmentOrigin, "Report");
     const report = {
       ...draft,
       url: `mock-feishu://documents/${draft.reportId}`,
