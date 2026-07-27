@@ -422,12 +422,14 @@ test("both-side static evidence identifies the product that produced each render
   });
 
   const [wps, qwen, doubao] = outcome.renderManifests;
-  assert.match(wps?.slides[0]?.content ?? "", /MOCK WPS AI PPT/);
-  assert.match(qwen?.slides[0]?.content ?? "", /MOCK Qwen PPT/);
-  assert.doesNotMatch(qwen?.slides[0]?.content ?? "", /MOCK WPS AI PPT/);
-  assert.match(doubao?.slides[0]?.content ?? "", /MOCK Doubao PPT/);
+  const slideText = (content: string | Uint8Array | undefined) =>
+    typeof content === "string" ? content : "";
+  assert.match(slideText(wps?.slides[0]?.content), /MOCK WPS AI PPT/);
+  assert.match(slideText(qwen?.slides[0]?.content), /MOCK Qwen PPT/);
+  assert.doesNotMatch(slideText(qwen?.slides[0]?.content), /MOCK WPS AI PPT/);
+  assert.match(slideText(doubao?.slides[0]?.content), /MOCK Doubao PPT/);
   assert.doesNotMatch(
-    doubao?.slides[0]?.content ?? "",
+    slideText(doubao?.slides[0]?.content),
     /MOCK WPS AI PPT/,
   );
 });

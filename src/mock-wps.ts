@@ -22,6 +22,7 @@ import {
 } from "./fixtures/mock-wps-deck.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import type {
+  AttemptCheckpointPort,
   ProductAttemptResult,
   ProductAdapterImplementationPackage,
   ProductAdapterExecutionConfiguration,
@@ -32,6 +33,10 @@ import type {
 } from "./product-adapter.ts";
 import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
+import {
+  resolveWpsAiPptProductAdapterExecutor,
+} from "./wps-aippt.ts";
+import type { WpsAiPptBrowserDriverPort } from "./wps-aippt-driver.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -678,6 +683,7 @@ function executeMockScenario(
 export function renderStaticArtifact(
   artifact: Artifact,
   renderManifestId: string = MOCK_SCENARIO.renderManifestId,
+  rendererAuthorizationDecisionId = "mock-renderer-authorized",
 ): RenderManifest {
   const presentation = presentationFromArtifact(artifact);
   const slides = presentation.slides.map((slide, index) =>
@@ -698,6 +704,12 @@ export function renderStaticArtifact(
       subprocessors: [],
     },
     renderer: "mock-static-svg@1" as const,
+    rendererAuthorizationDecisionId,
+    renderOutcome: "faithful" as const,
+    fidelity: {
+      status: "verified" as const,
+      notes: [],
+    },
     pageCount: slides.length,
     renderPolicy: {
       fontPack: "mock-font-pack@1",
@@ -830,8 +842,14 @@ function applyRegisteredArtifactScenario(
 export function resolveHarnessProductAdapterExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
-  runtime: {
-    readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort;
+  dependencies: {
+    readonly wpsAiPptBrowserDriver?:
+      | WpsAiPptBrowserDriverPort
+      | undefined;
+    readonly attemptCheckpointStore?:
+      | AttemptCheckpointPort
+      | undefined;
+    readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort | undefined;
   } = {},
 ): ProductAdapterExecutor {
   const adapterKind = executionConfiguration.adapterKind;
@@ -843,7 +861,15 @@ export function resolveHarnessProductAdapterExecutor(
     }
     return resolveDoubaoProductionExecutor(
       implementationPackage,
-      runtime.doubaoBrowserDriver,
+      dependencies.doubaoBrowserDriver,
+    );
+  }
+  if (adapterKind === "wps-aippt-browser") {
+    return resolveWpsAiPptProductAdapterExecutor(
+      implementationPackage,
+      executionConfiguration,
+      dependencies.wpsAiPptBrowserDriver,
+      dependencies.attemptCheckpointStore,
     );
   }
   if (
@@ -871,7 +897,17 @@ export function resolveHarnessProductAdapterExecutor(
       );
     }
     if (scenario === "hung") {
-      return new Promise<Artifact>(() => {});
+      return new Promise<Artifact>((_, reject) => {
+        if (command.signal.aborted) {
+          reject(new Error("mock adapter aborted"));
+          return;
+        }
+        command.signal.addEventListener(
+          "abort",
+          () => reject(new Error("mock adapter aborted")),
+          { once: true },
+        );
+      });
     }
     if (scenario === "throwing") {
       throw new Error("simulated adapter crash");

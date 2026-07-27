@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 import { PRODUCTION_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import { VOLCANO_EVALUATION_CASE } from "./fixtures/volcano-case.ts";
 import type {
+  ObservableAttemptEvent,
+} from "./domain.ts";
+import type {
   ObservedProductConfiguration,
   ProductAdapterImplementationPackage,
   ProductAdapterExecutor,
@@ -90,7 +93,7 @@ const DOUBAO_PRODUCT_PACKAGE = Object.freeze<ProductPackageSnapshot>({
   vendorId: "doubao",
   displayName: "Doubao Web PPT",
   adapterVersion: DOUBAO_PRODUCTION_ADAPTER_VERSION,
-  provenance: "PRODUCTION",
+  provenance: "LIVE_PRODUCTION",
   environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
   egressDestination: Object.freeze({
     targetService: "doubao-web",
@@ -391,6 +394,7 @@ function elapsedMs(startedAt: string, endedAt: string): number {
 
 function failedAttempt(
   input: {
+    readonly command: ProductRunCommand;
     readonly terminalReason: ProductAttemptResult["terminalReason"];
     readonly blockReason: ProductAttemptResult["blockReason"];
     readonly submissionEvidence: ProductAttemptResult["submissionEvidence"];
@@ -407,12 +411,39 @@ function failedAttempt(
     submissionEvidence: input.submissionEvidence,
     elapsedMs: elapsedMs(input.startedAt, input.endedAt),
     artifactCandidates: [],
-    observableEvents: Object.freeze([...input.observableEvents]),
+    observableEvents: materializeObservableEvents(
+      input.command,
+      input.observableEvents,
+    ),
     manualActions: Object.freeze([...input.manualActions]),
     ...(input.observedConfiguration === undefined
       ? {}
       : { observedConfiguration: input.observedConfiguration }),
   });
+}
+
+function materializeObservableEvents(
+  command: ProductRunCommand,
+  events: readonly ProductAdapterObservableEvent[],
+): readonly ObservableAttemptEvent[] {
+  return Object.freeze(
+    events.map((event, index) =>
+      Object.freeze({
+        eventId: `${command.attemptId}-event-${index + 1}`,
+        jobId: command.jobId,
+        caseId: command.evaluationCase.caseId,
+        runId: command.runId,
+        attemptId: command.attemptId,
+        attemptSeq: command.attemptSeq,
+        eventType: event.eventType,
+        sourceAt: event.observedAt,
+        observedAt: event.observedAt,
+        writerId: DOUBAO_PRODUCTION_ADAPTER_VERSION,
+        evidenceRef: event.evidenceRef,
+        adapterVersion: DOUBAO_PRODUCTION_ADAPTER_VERSION,
+      }),
+    ),
+  );
 }
 
 function observedConfiguration(
@@ -559,6 +590,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: preflight.incrementalChargeRequired
           ? "payment"
           : "technical_failure",
@@ -596,6 +628,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: submission.status,
@@ -641,6 +674,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason:
           generation.status === "timed_out"
             ? "vendor_timeout"
@@ -666,6 +700,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -703,6 +738,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -725,6 +761,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -762,6 +799,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -785,6 +823,7 @@ export function resolveDoubaoProductionExecutor(
         ),
       );
       return failedAttempt({
+        command,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -810,7 +849,7 @@ export function resolveDoubaoProductionExecutor(
         "sha256:".length + 32,
       )}`,
       runId: command.runId,
-      provenance: "PRODUCTION" as const,
+      provenance: "LIVE_PRODUCTION" as const,
       environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
       filename: exported.filename,
       mimeType: exported.mimeType,
@@ -828,7 +867,7 @@ export function resolveDoubaoProductionExecutor(
       artifactCandidates: Object.freeze([
         Object.freeze({ artifact, policyCompliant: true }),
       ]),
-      observableEvents: Object.freeze(events),
+      observableEvents: materializeObservableEvents(command, events),
       manualActions: Object.freeze(manualActions),
       observedConfiguration: configuration,
       captureEvidence: Object.freeze({

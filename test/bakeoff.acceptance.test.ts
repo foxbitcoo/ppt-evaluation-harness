@@ -155,7 +155,7 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
   assert.equal(firstOutcome.renderManifest.pageCount, 16);
   assert.equal(
     firstOutcome.renderManifest.contentHash,
-    "sha256:26513dea4952c94370de4c2bea6a89c93a365ba2b76c3c5129a58e7fdfdbc2a3",
+    "sha256:ed9807bf207dc8e3ed66aab84bfd0e69be689f189143e95e226ae6f0825d0220",
   );
   assert.deepEqual(
     firstOutcome.renderManifest.slides.map((slide) => slide.pageNumber),
@@ -165,6 +165,7 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
     firstOutcome.renderManifest.slides.every(
       (slide) =>
         slide.mimeType === "image/svg+xml" &&
+        typeof slide.content === "string" &&
         slide.content.includes("<svg") &&
         slide.content.includes("MOCK") &&
         /^sha256:[a-f0-9]{64}$/.test(slide.contentHash),
