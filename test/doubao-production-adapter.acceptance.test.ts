@@ -16,6 +16,7 @@ import {
   createDoubaoRealProviderReplayPackage,
   parseAdapterExecutionConfiguration,
   resolveHarnessProductAdapterExecutor,
+  type AttemptDeadlinePort,
   type DoubaoBrowserDriverPort,
   type ProductAttemptResult,
   type ProductAdapterPort,
@@ -820,7 +821,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
     driverId: "doubao-real-provider-replay",
     driverVersion: "doubao-harness-browser-bridge@2",
     implementationDigest:
-      "sha256:95973b0c7da786d8c733dba2e14d88c1494f174a4bf53072f1a698585b68016e",
+      "sha256:c272909c8271a625e07a6f83cb23869a6df48b3a4dd1ed5ed1532464f741e75e",
     provenance: "PRODUCTION_REPLAY",
   });
   assert.equal(fixture.recovery.recoveryCliExecuted, true);
@@ -853,6 +854,172 @@ test("an aborted submitted task is checkpointed and never proceeds to export", a
 
   assert.equal(result.terminalReason, "task_state_unknown");
   assert.equal(exportCount, 0);
+});
+
+test("a recovered submitted task that the vendor reports failed resolves as a technical failure", async () => {
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "doubao-vendor-failed-reconciliation",
+  );
+  await checkpoints.append({
+    eventId: "attempt-doubao-vendor-failed-event-1",
+    jobId: "job-doubao-vendor-failed",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+    runId: "run-doubao-vendor-failed",
+    attemptId: "attempt-doubao-vendor-failed",
+    attemptSeq: 1,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-27T06:00:10.000Z",
+    observedAt: "2026-07-27T06:00:10.000Z",
+    writerId: "doubao-web-ppt@1",
+    evidenceRef: "screenshot://doubao/submitted-redacted",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "doubao-task-failed-1",
+    taskStateVersion: "query_submitted@2",
+    adapterVersion: "doubao-web-ppt@1",
+    artifactId: null,
+  });
+  const adapter = new DoubaoProductionProductAdapter();
+  const executor = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      attemptCheckpointStore: checkpoints,
+      doubaoBrowserDriver: {
+        ...completeDoubaoDriver(),
+        async reconcileTask(query) {
+          return {
+            query,
+            observedState: "failed",
+            observedAt: "2026-07-27T06:01:00.000Z",
+            evidenceRef:
+              "screenshot://doubao/reconciliation-failed-redacted",
+          };
+        },
+      },
+    },
+  );
+
+  const execution = await executor({
+    jobId: "job-doubao-vendor-failed",
+    runId: "run-doubao-vendor-failed",
+    attemptId: "attempt-doubao-vendor-failed",
+    attemptSeq: 1,
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  });
+  assert.ok(!("content" in execution));
+  const result = execution as ProductAttemptResult;
+  const reconciliation = result.observableEvents?.at(-1);
+
+  assert.equal(result.terminalReason, "technical_failure");
+  assert.equal(result.submissionEvidence, "submitted");
+  assert.equal(reconciliation?.reconciliationObservedState, "failed");
+  assert.equal(
+    reconciliation?.reconciliationTerminalReason,
+    "technical_failure",
+  );
+});
+
+test("deadline shutdown completes when durable reconciliation confirms the submitted Doubao task failed", async () => {
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "doubao-deadline-vendor-failed",
+  );
+  await checkpoints.append({
+    eventId: "MOCK-run-doubao-volcano-v1-attempt-1-event-1",
+    jobId: "MOCK-job-volcano-v1",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+    runId: "MOCK-run-doubao-volcano-v1",
+    attemptId: "MOCK-run-doubao-volcano-v1-attempt-1",
+    attemptSeq: 1,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-27T06:00:10.000Z",
+    observedAt: "2026-07-27T06:00:10.000Z",
+    writerId: "doubao-web-ppt@1",
+    evidenceRef: "screenshot://doubao/submitted-redacted",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "doubao-task-deadline-failed-1",
+    taskStateVersion: "query_submitted@2",
+    adapterVersion: "doubao-web-ppt@1",
+    artifactId: null,
+  });
+  const productionAdapter = new DoubaoProductionProductAdapter();
+  const testAdapter: ProductAdapterPort = {
+    implementationPackage: productionAdapter.implementationPackage,
+    executionConfigurationPackage:
+      productionAdapter.executionConfigurationPackage,
+    productPackage: {
+      ...productionAdapter.productPackage,
+      packageId: "MOCK-doubao-package-v1",
+      provenance: "MOCK",
+      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+      egressDestination: {
+        targetService: "mock-doubao-production-boundary",
+        targetAccount: "mock-current-account",
+        targetRegion: "test",
+        subprocessors: [],
+      },
+    },
+  };
+  const driver: DoubaoBrowserDriverPort = {
+    ...completeDoubaoDriver(),
+    async reconcileTask(query) {
+      return {
+        query,
+        observedState: "failed",
+        observedAt: "2026-07-27T06:01:00.000Z",
+        evidenceRef:
+          "screenshot://doubao/reconciliation-failed-redacted",
+      };
+    },
+  };
+  const deadline: AttemptDeadlinePort = {
+    async run(operation, timeoutMs) {
+      const controller = new AbortController();
+      controller.abort();
+      return {
+        timedOut: true,
+        elapsedMs: timeoutMs,
+        shutdownCompleted: true,
+        shutdownValue: await operation(controller.signal),
+      };
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapter: testAdapter,
+    doubaoBrowserDriver: driver,
+    attemptCheckpointStore: checkpoints,
+    attemptDeadline: deadline,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+  });
+  const attempt = feishu
+    .snapshot()
+    .runRecordTable.find(
+      ({ recordId }) =>
+        recordId === "MOCK-run-doubao-volcano-v1-attempt-1",
+    );
+
+  assert.equal(outcome.job.status, "failed");
+  assert.equal(attempt?.status, "timed_out");
+  assert.equal(attempt?.terminalReason, "vendor_timeout");
+  assert.equal(attempt?.submissionEvidence, "submitted");
+  assert.ok(
+    checkpoints.snapshot().some(
+      ({
+        reconciliationObservedState,
+        reconciliationTerminalReason,
+      }) =>
+        reconciliationObservedState === "failed" &&
+        reconciliationTerminalReason === "technical_failure",
+    ),
+  );
 });
 
 test("the production boundary fails closed when observable configuration contains session-like URL material", async () => {

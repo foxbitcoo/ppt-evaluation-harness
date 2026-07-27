@@ -9,5 +9,5 @@ export const EMBEDDED_BUILD_MANIFEST = Object.freeze({
   sourceArchiveSchemaVersion: "runner-source-archive-v1" as const,
   trustedWpsLiveBridgeExecutableHash: null,
   sourceArchiveDigest:
-    "sha256:09dd957c6e4eddc1d685c0cad34fe3fe514beb47bce9cdb9c08b414164c63013" as `sha256:${string}`,
+    "sha256:afae65254c1dad9d5fecf479fa645dc11af1c5bc29c8abd99fcc1f5bd87602b4" as `sha256:${string}`,
 });

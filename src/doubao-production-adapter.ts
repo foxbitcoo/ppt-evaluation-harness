@@ -993,6 +993,8 @@ export function resolveDoubaoProductionExecutor(
             reconciliationTerminalReason:
               reconciliation.observedState === "artifact_ready"
                 ? "download_failure"
+                : reconciliation.observedState === "failed"
+                  ? "technical_failure"
                 : "task_state_unknown",
             reconciliationArtifactReference: null,
           });
@@ -1001,6 +1003,8 @@ export function resolveDoubaoProductionExecutor(
           terminalReason:
             reconciliation.observedState === "artifact_ready"
               ? "download_failure"
+              : reconciliation.observedState === "failed"
+                ? "technical_failure"
               : "task_state_unknown",
           blockReason: null,
           submissionEvidence: "submitted",
