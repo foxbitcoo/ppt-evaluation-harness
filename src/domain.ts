@@ -2,6 +2,15 @@ import type {
   EnvironmentOrigin,
   TestEnvironmentOrigin,
 } from "./environment-origin.ts";
+import type {
+  ArtifactPackageManifest,
+} from "./artifact-vault.ts";
+import type {
+  ApprovedEgressAuthorization,
+} from "./egress-authorization.ts";
+import type {
+  RunSpecificationReference,
+} from "./run-specification.ts";
 
 export const MOCK_PROVENANCE = "MOCK" as const;
 
@@ -63,6 +72,8 @@ export interface EvaluationCaseRecord {
   readonly recordId: string;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
+  readonly dataClassification: "public_or_synthetic" | "restricted";
+  readonly sourceOwner: string;
   readonly caseId: string;
   readonly caseVersion: number;
   readonly track: "query_generation";
@@ -112,6 +123,10 @@ export interface RunRecord {
   readonly scorecardId: string | null;
   readonly judgeEgressAttempt?: JudgeEgressAttemptAudit | null;
   readonly judgeFailure?: JudgeFailureLineage | null;
+  readonly specificationReference?: RunSpecificationReference | null;
+  readonly artifactPackageManifest?: ArtifactPackageManifest | null;
+  readonly egressAuthorizations?: readonly ApprovedEgressAuthorization[] | null;
+  readonly securityContextHash?: `sha256:${string}` | null;
 }
 
 export interface Artifact {
@@ -137,6 +152,21 @@ export interface StaticSlideRender {
   readonly extractedText: string;
 }
 
+export interface RenderPolicy {
+  readonly fontPack: string;
+  readonly resolution: string;
+  readonly colorProfile: string;
+  readonly animationPolicy: "first_frame";
+  readonly externalAssetPolicy: "network_disabled";
+}
+
+export interface ContactSheetRender {
+  readonly filename: string;
+  readonly mimeType: "image/svg+xml";
+  readonly contentHash: `sha256:${string}`;
+  readonly content: string;
+}
+
 export interface RenderManifest {
   readonly renderManifestId: string;
   readonly artifactId: string;
@@ -144,6 +174,8 @@ export interface RenderManifest {
   readonly environmentOrigin: EnvironmentOrigin;
   readonly renderer: "mock-static-svg@1";
   readonly pageCount: number;
+  readonly renderPolicy: RenderPolicy;
+  readonly contactSheet: ContactSheetRender;
   readonly contentHash: `sha256:${string}`;
   readonly slides: readonly StaticSlideRender[];
 }

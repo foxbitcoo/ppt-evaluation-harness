@@ -7,6 +7,8 @@ export const VOLCANO_EVALUATION_CASE: EvaluationCaseRecord = Object.freeze({
   recordId: "MOCK-case-volcano-query-v1",
   provenance: "MOCK",
   environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+  dataClassification: "public_or_synthetic",
+  sourceOwner: "ppt-evaluation-harness",
   caseId: VOLCANO_CASE_ID,
   caseVersion: 1,
   track: "query_generation",

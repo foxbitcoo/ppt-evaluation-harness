@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
@@ -20,6 +21,51 @@ import {
   assertEnvironmentOriginAllowed,
   type EnvironmentOrigin,
 } from "./environment-origin.ts";
+import {
+  assertApprovedEgressAuthorizationCurrent,
+  SYSTEM_CLOCK,
+  type ApprovedEgressAuthorization,
+  type ClockPort,
+  type EgressDestinationMetadata,
+} from "./egress-authorization.ts";
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function snapshotHash(value: unknown): `sha256:${string}` {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify(canonicalValue(value)))
+    .digest("hex")}`;
+}
+
+function cloneProjectionValue<T>(value: T): T {
+  if (value instanceof Uint8Array) {
+    return Uint8Array.from(value) as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneProjectionValue(entry)) as T;
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        key === "environmentOrigin"
+          ? entry
+          : cloneProjectionValue(entry),
+      ]),
+    ) as T;
+  }
+  return value;
+}
 
 function stableRunReplayPayload(record: RunRecord): unknown {
   const {
@@ -143,6 +189,14 @@ export interface FeishuProjectionPort
     ReportDocumentPort,
     ComparisonReportSourcePort {
   readonly targetEnvironment: "test" | "production";
+  readonly egressDestination: EgressDestinationMetadata;
+  commitAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+    authorization: ApprovedEgressAuthorization,
+  ): Promise<void>;
+  snapshot(): FeishuProjectionSnapshot;
+  scrubPayloadsForJob(jobId: string): Promise<void>;
+  hasPayloadsForJob(jobId: string): Promise<boolean>;
 }
 
 export interface FeishuProjectionSnapshot {
@@ -164,6 +218,8 @@ export interface FeishuProjectionSnapshot {
 
 export interface InMemoryFeishuProjectionOptions {
   readonly targetEnvironment?: "test" | "production";
+  readonly egressDestination?: EgressDestinationMetadata;
+  readonly clock?: ClockPort;
 }
 
 export class InMemoryFeishuProjection implements FeishuProjectionPort {
@@ -181,29 +237,86 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #productGapCardTable: (ComparisonRecord | ProductGapCardRecord)[] =
     [];
   readonly #reports: FeishuReport[] = [];
+  readonly #expiredJobIds = new Set<string>();
+  readonly #expiredCaseIds = new Set<string>();
+  readonly #expiredJobCaseIds = new Map<string, Set<string>>();
+  #projectionTail: Promise<void> = Promise.resolve();
+  #mutationVersion = 0;
+  readonly #clock: ClockPort;
   readonly targetEnvironment: "test" | "production";
+  readonly egressDestination: EgressDestinationMetadata;
 
   constructor(options: InMemoryFeishuProjectionOptions = {}) {
     this.targetEnvironment = options.targetEnvironment ?? "test";
+    this.#clock = options.clock ?? SYSTEM_CLOCK;
+    this.egressDestination = Object.freeze(
+      structuredClone(
+        options.egressDestination ?? {
+          targetService: "in-memory-feishu-operational-ledger",
+          targetAccount: "in-memory-feishu-test-project",
+          targetRegion: this.targetEnvironment,
+          subprocessors: [],
+        },
+      ),
+    );
   }
 
   #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {
     assertEnvironmentOriginAllowed(origin, this.targetEnvironment, entityName);
   }
 
+  #assertJobActive(jobId: string): void {
+    if (this.#expiredJobIds.has(jobId)) {
+      throw new Error(
+        `Tombstoned Job ${jobId} blocked Feishu projection write`,
+      );
+    }
+  }
+
+  async #runProjectionExclusive<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.#projectionTail;
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.#projectionTail = tail;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   async upsertCase(record: EvaluationCaseRecord): Promise<void> {
+    if (
+      this.#expiredCaseIds.has(record.caseId) &&
+      !this.#runRecordTable.some(
+        ({ caseId }) => caseId === record.caseId,
+      )
+    ) {
+      throw new Error(
+        `Tombstoned Case ${record.caseId} blocked Feishu projection write`,
+      );
+    }
     this.#assertAllowed(record.environmentOrigin, "Evaluation Case");
     const existingIndex = this.#caseTable.findIndex(
       ({ recordId }) => recordId === record.recordId,
     );
     if (existingIndex === -1) {
       this.#caseTable.push(record);
+      this.#mutationVersion += 1;
       return;
     }
     this.#caseTable[existingIndex] = record;
+    this.#mutationVersion += 1;
   }
 
   async appendRunRecord(record: RunRecord): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Run/Attempt");
     const existing = this.#runRecordTable.find(
       (candidate) => candidate.recordId === record.recordId,
@@ -220,6 +333,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#runRecordTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async linkReportToBakeoffJob(
@@ -247,9 +361,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
             ],
           }),
     };
+    this.#mutationVersion += 1;
   }
 
   async appendArtifactScore(record: ArtifactScoreTableRecord): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Artifact score projection");
     this.#assertAllowed(record.artifact.environmentOrigin, "Artifact");
     this.#assertAllowed(
@@ -280,11 +396,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#artifactScoreTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async appendAdjudicationEvent(
     record: AdjudicationEventRecord,
   ): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Adjudication Event");
     const existing = this.#adjudicationEventTable.find(
       ({ adjudicationEventId }) =>
@@ -348,6 +466,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#adjudicationEventTable.push(
       cloneWithEnvironmentOrigin(record),
     );
+    this.#mutationVersion += 1;
   }
 
   async listAdjudicationEvents(
@@ -361,6 +480,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   async appendReviewEvent(record: ReviewEventRecord): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Review Event");
     const existing = this.#reviewEventTable.find(
       ({ reviewEventId }) => reviewEventId === record.reviewEventId,
@@ -407,6 +527,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       );
     }
     this.#reviewEventTable.push(cloneWithEnvironmentOrigin(record));
+    this.#mutationVersion += 1;
   }
 
   async listReviewEvents(
@@ -437,6 +558,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async appendCapturedArtifact(
     record: CapturedArtifactTableRecord,
   ): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(
       record.environmentOrigin,
       "Artifact capture projection",
@@ -467,9 +589,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#capturedArtifactTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async appendComparison(record: ComparisonRecord): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Comparison");
     const existing = this.#productGapCardTable.find(
       (candidate) =>
@@ -485,9 +609,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#productGapCardTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async appendProductGapCard(record: ProductGapCardRecord): Promise<void> {
+    this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Product gap comparison");
     const existing = this.#productGapCardTable.find(
       (candidate) =>
@@ -501,6 +627,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#productGapCardTable.push(record);
+    this.#mutationVersion += 1;
   }
 
   async loadProductGapCard(
@@ -540,6 +667,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     const card = await this.loadProductGapCard(record.gapCardId);
+    this.#assertJobActive(card.jobId);
     if (
       card.provenance !== record.provenance ||
       card.environmentOrigin !== record.environmentOrigin
@@ -577,6 +705,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#gapCardWorkflowEventTable.push(
       cloneWithEnvironmentOrigin(record),
     );
+    this.#mutationVersion += 1;
   }
 
   async listProductGapCardWorkflowEvents(
@@ -597,6 +726,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       "GitHub Issue delivery reservation",
     );
     const card = await this.loadProductGapCard(record.gapCardId);
+    this.#assertJobActive(card.jobId);
     const existing =
       this.#githubIssueDeliveryReservationTable.find(
         (reservation) =>
@@ -638,6 +768,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     const stored = cloneWithEnvironmentOrigin(record);
     this.#githubIssueDeliveryReservationTable.push(stored);
+    this.#mutationVersion += 1;
     return {
       ...structuredClone(stored),
       environmentOrigin: stored.environmentOrigin,
@@ -689,6 +820,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     const card = await this.loadProductGapCard(record.gapCardId);
+    this.#assertJobActive(card.jobId);
     const concurrentExisting = this.#githubIssueLinkEventTable.find(
       (event) =>
         event.linkEventId === record.linkEventId ||
@@ -730,6 +862,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#githubIssueLinkEventTable.push(
       cloneWithEnvironmentOrigin(record),
     );
+    this.#mutationVersion += 1;
   }
 
   async listGitHubIssueLinkEvents(
@@ -743,6 +876,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   async createReport(draft: FeishuReportDraft): Promise<FeishuReport> {
+    this.#assertJobActive(draft.jobId);
     this.#assertAllowed(draft.environmentOrigin, "Report");
     const report = {
       ...draft,
@@ -758,6 +892,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return structuredClone(existing);
     }
     this.#reports.push(report);
+    this.#mutationVersion += 1;
     return structuredClone(report);
   }
 
@@ -842,25 +977,303 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
 
   snapshot(): FeishuProjectionSnapshot {
     return {
-      caseTable: structuredClone(this.#caseTable),
-      runRecordTable: structuredClone(this.#runRecordTable),
-      capturedArtifactTable: structuredClone(this.#capturedArtifactTable),
-      artifactScoreTable: structuredClone(this.#artifactScoreTable),
-      adjudicationEventTable: structuredClone(
+      caseTable: cloneProjectionValue(this.#caseTable),
+      runRecordTable: cloneProjectionValue(this.#runRecordTable),
+      capturedArtifactTable: cloneProjectionValue(this.#capturedArtifactTable),
+      artifactScoreTable: cloneProjectionValue(this.#artifactScoreTable),
+      adjudicationEventTable: cloneProjectionValue(
         this.#adjudicationEventTable,
       ),
-      reviewEventTable: structuredClone(this.#reviewEventTable),
-      gapCardWorkflowEventTable: structuredClone(
+      reviewEventTable: cloneProjectionValue(this.#reviewEventTable),
+      gapCardWorkflowEventTable: cloneProjectionValue(
         this.#gapCardWorkflowEventTable,
       ),
-      githubIssueDeliveryReservationTable: structuredClone(
+      githubIssueDeliveryReservationTable: cloneProjectionValue(
         this.#githubIssueDeliveryReservationTable,
       ),
-      githubIssueLinkEventTable: structuredClone(
+      githubIssueLinkEventTable: cloneProjectionValue(
         this.#githubIssueLinkEventTable,
       ),
-      productGapCardTable: structuredClone(this.#productGapCardTable),
-      reports: structuredClone(this.#reports),
+      productGapCardTable: cloneProjectionValue(this.#productGapCardTable),
+      reports: cloneProjectionValue(this.#reports),
     };
+  }
+
+  async commitAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+    authorization: ApprovedEgressAuthorization,
+  ): Promise<void> {
+    const batchJobIds = new Set([
+      ...snapshot.runRecordTable.map(({ jobId }) => jobId),
+      ...snapshot.capturedArtifactTable.map(({ jobId }) => jobId),
+      ...snapshot.artifactScoreTable.map(({ jobId }) => jobId),
+      ...snapshot.adjudicationEventTable.map(({ jobId }) => jobId),
+      ...snapshot.reviewEventTable.map(({ jobId }) => jobId),
+      ...snapshot.productGapCardTable.map(({ jobId }) => jobId),
+      ...snapshot.reports.map(({ jobId }) => jobId),
+    ]);
+    if (batchJobIds.size !== 1) {
+      throw new Error(
+        "Operational ledger projection batch must contain exactly one Job",
+      );
+    }
+    const jobId = [...batchJobIds][0];
+    if (jobId === undefined) {
+      throw new Error("Operational ledger projection batch is empty");
+    }
+    return this.#runProjectionExclusive(async () => {
+      this.#assertJobActive(jobId);
+      const job = snapshot.runRecordTable.find(
+        (record) =>
+          record.recordType === "bakeoff_job" &&
+          record.jobId === jobId,
+      );
+      const evaluationCase = snapshot.caseTable.find(
+        ({ caseId }) => caseId === job?.caseId,
+      );
+      const batchGapCards = new Map(
+        snapshot.productGapCardTable.flatMap((record) =>
+          record.recordType === "gap_card"
+            ? [[record.gapCardId, record] as const]
+            : [],
+        ),
+      );
+      const joblessGapCardRows = [
+        ...snapshot.gapCardWorkflowEventTable,
+        ...snapshot.githubIssueDeliveryReservationTable,
+        ...snapshot.githubIssueLinkEventTable,
+      ];
+      const payloadHash = snapshotHash(snapshot);
+      const expectedContentFields = [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ];
+      if (
+        job === undefined ||
+        evaluationCase === undefined ||
+        snapshot.caseTable.length !== 1 ||
+        snapshot.caseTable.some(
+          ({ caseId }) => caseId !== job.caseId,
+        ) ||
+        snapshot.runRecordTable.some(
+          ({ caseId }) => caseId !== job.caseId,
+        ) ||
+        joblessGapCardRows.some(
+          ({ gapCardId }) =>
+            batchGapCards.get(gapCardId)?.jobId !== jobId,
+        ) ||
+        !isDeepStrictEqual(authorization.request, {
+          requestId: `operational-ledger-projection:${jobId}:${payloadHash}`,
+          jobId,
+          runId: null,
+          attemptId: null,
+          dataClassification: evaluationCase.dataClassification,
+          sourceOwner: evaluationCase.sourceOwner,
+          processingPurpose: "operational_ledger_projection_storage",
+          targetKind: "storage",
+          targetService: this.egressDestination.targetService,
+          targetAccount: this.egressDestination.targetAccount,
+          targetRegion: this.egressDestination.targetRegion,
+          subprocessors: this.egressDestination.subprocessors,
+          contentFields: expectedContentFields,
+          payloadHash,
+          requiredRedactions: [],
+          requestedAt: authorization.request.requestedAt,
+        })
+      ) {
+        throw new Error(
+          "Operational ledger projection authorization mismatch",
+        );
+      }
+      assertApprovedEgressAuthorizationCurrent(
+        authorization,
+        this.#clock,
+      );
+      while (true) {
+        const observedMutationVersion = this.#mutationVersion;
+        const working = new InMemoryFeishuProjection({
+          targetEnvironment: this.targetEnvironment,
+          egressDestination: this.egressDestination,
+        });
+        working.#replaceSnapshot(this.snapshot());
+        for (const record of snapshot.caseTable) {
+          await working.upsertCase(record);
+        }
+        for (const record of snapshot.runRecordTable) {
+          await working.appendRunRecord(record);
+        }
+        for (const record of snapshot.capturedArtifactTable) {
+          await working.appendCapturedArtifact(record);
+        }
+        for (const record of snapshot.artifactScoreTable) {
+          await working.appendArtifactScore(record);
+        }
+        for (const record of snapshot.adjudicationEventTable) {
+          await working.appendAdjudicationEvent(record);
+        }
+        for (const record of snapshot.reviewEventTable) {
+          await working.appendReviewEvent(record);
+        }
+        for (const record of snapshot.productGapCardTable) {
+          if (record.recordType === "comparison") {
+            await working.appendComparison(record);
+          } else {
+            await working.appendProductGapCard(record);
+          }
+        }
+        for (const record of snapshot.gapCardWorkflowEventTable) {
+          await working.appendProductGapCardWorkflowEvent(record);
+        }
+        for (const record of snapshot.githubIssueDeliveryReservationTable) {
+          await working.reserveGitHubIssueDelivery(record);
+        }
+        for (const record of snapshot.githubIssueLinkEventTable) {
+          await working.appendGitHubIssueLinkEvent(record);
+        }
+        for (const report of snapshot.reports) {
+          const created = await working.createReport(report);
+          if (!isDeepStrictEqual(created, report)) {
+            throw new Error(
+              `Operational ledger projection report mismatch: ${report.reportId}`,
+            );
+          }
+        }
+        if (this.#mutationVersion !== observedMutationVersion) {
+          continue;
+        }
+        assertApprovedEgressAuthorizationCurrent(
+          authorization,
+          this.#clock,
+        );
+        this.#replaceSnapshot(working.snapshot());
+        return;
+      }
+    });
+  }
+
+  #replaceSnapshot(snapshot: FeishuProjectionSnapshot): void {
+    const replace = <T>(target: T[], source: readonly T[]) => {
+      target.splice(0, target.length, ...cloneProjectionValue(source));
+    };
+    replace(this.#caseTable, snapshot.caseTable);
+    replace(this.#runRecordTable, snapshot.runRecordTable);
+    replace(this.#capturedArtifactTable, snapshot.capturedArtifactTable);
+    replace(this.#artifactScoreTable, snapshot.artifactScoreTable);
+    replace(this.#adjudicationEventTable, snapshot.adjudicationEventTable);
+    replace(this.#reviewEventTable, snapshot.reviewEventTable);
+    replace(
+      this.#gapCardWorkflowEventTable,
+      snapshot.gapCardWorkflowEventTable,
+    );
+    replace(
+      this.#githubIssueDeliveryReservationTable,
+      snapshot.githubIssueDeliveryReservationTable,
+    );
+    replace(
+      this.#githubIssueLinkEventTable,
+      snapshot.githubIssueLinkEventTable,
+    );
+    replace(this.#productGapCardTable, snapshot.productGapCardTable);
+    replace(this.#reports, snapshot.reports);
+    this.#mutationVersion += 1;
+  }
+
+  async scrubPayloadsForJob(jobId: string): Promise<void> {
+    return this.#runProjectionExclusive(async () => {
+      this.#expiredJobIds.add(jobId);
+      const jobRuns = this.#runRecordTable.filter(
+        (record) => record.jobId === jobId,
+      );
+      const caseIds =
+        this.#expiredJobCaseIds.get(jobId) ?? new Set<string>();
+      for (const { caseId } of jobRuns) caseIds.add(caseId);
+      this.#expiredJobCaseIds.set(jobId, caseIds);
+      for (const caseId of caseIds) this.#expiredCaseIds.add(caseId);
+      const gapCardIds = new Set(
+        this.#productGapCardTable
+          .filter(
+            (record): record is ProductGapCardRecord =>
+              record.recordType === "gap_card" && record.jobId === jobId,
+          )
+          .map(({ gapCardId }) => gapCardId),
+      );
+      const remove = <T>(values: T[], matches: (value: T) => boolean) => {
+        for (let index = values.length - 1; index >= 0; index -= 1) {
+          const value = values[index];
+          if (value !== undefined && matches(value)) values.splice(index, 1);
+        }
+      };
+      remove(this.#capturedArtifactTable, (record) => record.jobId === jobId);
+      remove(this.#artifactScoreTable, (record) => record.jobId === jobId);
+      remove(this.#adjudicationEventTable, (record) => record.jobId === jobId);
+      remove(this.#reviewEventTable, (record) => record.jobId === jobId);
+      remove(this.#gapCardWorkflowEventTable, (record) =>
+        gapCardIds.has(record.gapCardId),
+      );
+      remove(this.#githubIssueDeliveryReservationTable, (record) =>
+        gapCardIds.has(record.gapCardId),
+      );
+      remove(this.#githubIssueLinkEventTable, (record) =>
+        gapCardIds.has(record.gapCardId),
+      );
+      remove(this.#productGapCardTable, (record) => record.jobId === jobId);
+      remove(this.#reports, (record) => record.jobId === jobId);
+      remove(this.#runRecordTable, (record) => record.jobId === jobId);
+      remove(
+        this.#caseTable,
+        (record) =>
+          caseIds.has(record.caseId) &&
+          !this.#runRecordTable.some(
+            (run) => run.caseId === record.caseId,
+          ),
+      );
+      this.#mutationVersion += 1;
+    });
+  }
+
+  async hasPayloadsForJob(jobId: string): Promise<boolean> {
+    const gapCardIds = new Set(
+      this.#productGapCardTable
+        .filter(
+          (record): record is ProductGapCardRecord =>
+            record.recordType === "gap_card" && record.jobId === jobId,
+        )
+        .map(({ gapCardId }) => gapCardId),
+    );
+    const caseIds = this.#expiredJobCaseIds.get(jobId) ?? new Set<string>();
+    return (
+      this.#runRecordTable.some((record) => record.jobId === jobId) ||
+      this.#capturedArtifactTable.some((record) => record.jobId === jobId) ||
+      this.#artifactScoreTable.some((record) => record.jobId === jobId) ||
+      this.#adjudicationEventTable.some((record) => record.jobId === jobId) ||
+      this.#reviewEventTable.some((record) => record.jobId === jobId) ||
+      this.#productGapCardTable.some((record) => record.jobId === jobId) ||
+      this.#reports.some((record) => record.jobId === jobId) ||
+      this.#caseTable.some(
+        (record) =>
+          caseIds.has(record.caseId) &&
+          !this.#runRecordTable.some(
+            ({ caseId }) => caseId === record.caseId,
+          ),
+      ) ||
+      this.#gapCardWorkflowEventTable.some((record) =>
+        gapCardIds.has(record.gapCardId),
+      ) ||
+      this.#githubIssueDeliveryReservationTable.some((record) =>
+        gapCardIds.has(record.gapCardId),
+      ) ||
+      this.#githubIssueLinkEventTable.some((record) =>
+        gapCardIds.has(record.gapCardId),
+      )
+    );
   }
 }

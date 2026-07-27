@@ -11,6 +11,7 @@ import {
   createBakeoffHarness,
   createComparisonReportService,
   type ArtifactScoreTableRecord,
+  type AttemptDeadlinePort,
   type ComparisonReportSource,
   type FeishuProjectionPort,
   type ProductAdapterPort,
@@ -357,11 +358,13 @@ test("default WPS-centered views follow stable vendor identity across package ve
       | MockDoubaoProductAdapter,
     packageId: string,
   ): ProductAdapterPort => ({
+    implementationPackage: adapter.implementationPackage,
+    executionConfigurationPackage:
+      adapter.executionConfigurationPackage,
     productPackage: {
       ...adapter.productPackage,
       packageId,
     },
-    execute: (command) => adapter.execute(command),
   });
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
@@ -565,20 +568,25 @@ test("append-only reevaluations require explicit scorecard selection and bind co
 test("replaying the same stable Bakeoff IDs is idempotent while conflicting audit or capture payloads are rejected", async () => {
   const feishu = new InMemoryFeishuProjection();
   let adapterExecutions = 0;
+  const attemptDeadline: AttemptDeadlinePort = {
+    async run(operation) {
+      adapterExecutions += 1;
+      return {
+        timedOut: false,
+        value: await operation(new AbortController().signal),
+        elapsedMs: 0,
+      };
+    },
+  };
   const adapters: readonly ProductAdapterPort[] = [
     new MockWpsProductAdapter(),
     new MockQwenProductAdapter(),
     new MockDoubaoProductAdapter(),
-  ].map((adapter) => ({
-    productPackage: adapter.productPackage,
-    async execute(command) {
-      adapterExecutions += 1;
-      return adapter.execute(command);
-    },
-  }));
+  ];
   const harness = createBakeoffHarness({
     feishu,
     productAdapters: adapters,
+    attemptDeadline,
   });
   const command = {
     environment: "test" as const,
@@ -662,24 +670,30 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting audi
 test("concurrent starts for one stable Bakeoff Job share one vendor execution", async () => {
   const feishu = new InMemoryFeishuProjection();
   let adapterExecutions = 0;
+  const attemptDeadline: AttemptDeadlinePort = {
+    async run(operation) {
+      adapterExecutions += 1;
+      return {
+        timedOut: false,
+        value: await operation(new AbortController().signal),
+        elapsedMs: 0,
+      };
+    },
+  };
   const adapters: readonly ProductAdapterPort[] = [
     new MockWpsProductAdapter(),
     new MockQwenProductAdapter(),
     new MockDoubaoProductAdapter(),
-  ].map((adapter) => ({
-    productPackage: adapter.productPackage,
-    async execute(command) {
-      adapterExecutions += 1;
-      return adapter.execute(command);
-    },
-  }));
+  ];
   const firstHarness = createBakeoffHarness({
     feishu,
     productAdapters: adapters,
+    attemptDeadline,
   });
   const secondHarness = createBakeoffHarness({
     feishu,
     productAdapters: adapters,
+    attemptDeadline,
   });
   const command = {
     environment: "test" as const,

@@ -13,6 +13,7 @@ import {
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   createComparisonReportService,
+  sha256Bytes,
   type ArtifactScoreTableRecord,
   type AttemptDeadlinePort,
   type ComparisonRecord,
@@ -21,7 +22,16 @@ import {
   type ProductAdapterPort,
   type ProductGapCardRecord,
   type RunRecord,
+  type RunSpecificationVault,
 } from "../src/index.ts";
+
+type CallerExecutionKeys = Extract<
+  keyof ProductAdapterPort,
+  "execute" | "executorFactory"
+>;
+const productAdapterPortHasNoCallerExecutionKeys:
+  CallerExecutionKeys extends never ? true : false = true;
+void productAdapterPortHasNoCallerExecutionKeys;
 
 function deterministicDeadline(
   options: {
@@ -686,11 +696,13 @@ test("production rejects every Mock lineage even when every visible provenance l
 
   const mockAdapter = new MockWpsProductAdapter();
   const relabeledAdapter: ProductAdapterPort = {
+    implementationPackage: mockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      mockAdapter.executionConfigurationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
       provenance: "PRODUCTION",
     },
-    execute: (command) => mockAdapter.execute(command),
   };
   await assert.rejects(
     createBakeoffHarness({
@@ -707,15 +719,20 @@ test("production rejects every Mock lineage even when every visible provenance l
 test("the command environment must match the projection environment before any adapter executes", async () => {
   const mockAdapter = new MockWpsProductAdapter();
   let executeCount = 0;
+  const attemptDeadline: AttemptDeadlinePort = {
+    async run() {
+      executeCount += 1;
+      throw new Error("adapter must not execute");
+    },
+  };
   const productionLabeledAdapter: ProductAdapterPort = {
+    implementationPackage: mockAdapter.implementationPackage,
+    executionConfigurationPackage:
+      mockAdapter.executionConfigurationPackage,
     productPackage: {
       ...mockAdapter.productPackage,
       provenance: "PRODUCTION",
       environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
-    },
-    async execute(command) {
-      executeCount += 1;
-      return mockAdapter.execute(command);
     },
   };
 
@@ -723,6 +740,7 @@ test("the command environment must match the projection environment before any a
     createBakeoffHarness({
       feishu: new InMemoryFeishuProjection(),
       productAdapters: [productionLabeledAdapter],
+      attemptDeadline,
     }).startBakeoffJob({
       environment: "production",
       caseId: VOLCANO_CASE_ID,
@@ -937,25 +955,17 @@ test("the Job freezes its selected Runs and protocol while Attempts retain obser
 });
 
 test("the 30-minute wall-clock deadline aborts a hung adapter without trusting adapter-reported elapsed time", async () => {
-  const wps = new MockWpsProductAdapter();
   let executeCount = 0;
-  let observedAbort = false;
-  const hungWps: ProductAdapterPort = {
-    productPackage: wps.productPackage,
-    execute(command) {
-      executeCount += 1;
-      command.signal.addEventListener("abort", () => {
-        observedAbort = true;
-      });
-      return new Promise(() => {});
-    },
-  };
+  const hungWps = new MockWpsProductAdapter({
+    scenario: "hung",
+  });
   let deadlineCall = 0;
   const immediateDeadline: AttemptDeadlinePort = {
     async run(operation, timeoutMs) {
       deadlineCall += 1;
       const controller = new AbortController();
       if (deadlineCall === 1) {
+        executeCount += 1;
         void operation(controller.signal);
         controller.abort();
         return { timedOut: true, elapsedMs: timeoutMs };
@@ -989,7 +999,6 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
     );
 
   assert.equal(executeCount, 1);
-  assert.equal(observedAbort, true);
   assert.equal(outcome.job.status, "partial");
   assert.equal(wpsAttempt?.status, "timed_out");
   assert.equal(wpsAttempt?.elapsedMs, 1_800_000);
@@ -999,13 +1008,9 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
 
 test("a thrown adapter error becomes a persisted technical failure with unknown submission evidence", async () => {
   const wps = new MockWpsProductAdapter();
-  const qwen = new MockQwenProductAdapter();
-  const throwingQwen: ProductAdapterPort = {
-    productPackage: qwen.productPackage,
-    async execute() {
-      throw new Error("simulated adapter crash");
-    },
-  };
+  const throwingQwen = new MockQwenProductAdapter({
+    scenario: "throwing",
+  });
   const feishu = new InMemoryFeishuProjection();
 
   const outcome = await createBakeoffHarness({
@@ -1054,21 +1059,14 @@ test("a thrown adapter error becomes a persisted technical failure with unknown 
 test("the selected adapter set is defensively frozen before any adapter can mutate its caller array", async () => {
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();
-  const selectedAdapters: ProductAdapterPort[] = [];
-  const mutatingWps: ProductAdapterPort = {
-    productPackage: wps.productPackage,
-    async execute(command) {
-      selectedAdapters.push(new MockDoubaoProductAdapter());
-      return wps.execute(command);
-    },
-  };
-  selectedAdapters.push(mutatingWps, qwen);
+  const selectedAdapters: ProductAdapterPort[] = [wps, qwen];
   const feishu = new InMemoryFeishuProjection();
-
-  await createBakeoffHarness({
+  const harness = createBakeoffHarness({
     feishu,
     productAdapters: selectedAdapters,
-  }).startBakeoffJob({
+  });
+  selectedAdapters.push(new MockDoubaoProductAdapter());
+  await harness.startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
@@ -1134,12 +1132,14 @@ test("all selected vendors begin under one shared 30-minute Job deadline", async
 test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", async () => {
   const wps = new MockWpsProductAdapter();
   const inheritedKeyAdapter: ProductAdapterPort = {
+    implementationPackage: wps.implementationPackage,
+    executionConfigurationPackage:
+      wps.executionConfigurationPackage,
     productPackage: {
       ...wps.productPackage,
       packageId: "__proto__",
       displayName: "Custom Prototype Vendor",
     },
-    execute: (command) => wps.execute(command),
   };
 
   const runOnce = async () => {
@@ -1165,21 +1165,9 @@ test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", asyn
 });
 
 test("measured deadline time overrides a successful adapter's self-reported elapsed time", async () => {
-  const wps = new MockWpsProductAdapter();
-  const inflatedElapsedAdapter: ProductAdapterPort = {
-    productPackage: wps.productPackage,
-    async execute(command) {
-      const artifact = await wps.execute(command);
-      assert.ok("content" in artifact);
-      return {
-        terminalReason: "success",
-        blockReason: null,
-        submissionEvidence: "submitted",
-        elapsedMs: 1_800_000,
-        artifactCandidates: [{ artifact, policyCompliant: true }],
-      };
-    },
-  };
+  const inflatedElapsedAdapter = new MockWpsProductAdapter({
+    scenario: "inflated_elapsed",
+  });
   const measuredDeadline: AttemptDeadlinePort = {
     async run(operation) {
       const controller = new AbortController();
@@ -1237,31 +1225,268 @@ test("an explicit vendor timeout remains timed out without trusting its self-rep
   assert.equal(attempt?.vendorReportedElapsedMs, 1_800_000);
 });
 
+test("a settled Bakeoff rejects a Mock adapter whose runtime scenario differs from the frozen implementation evidence", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockQwenProductAdapter({ scenario: "success" })],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapters: [
+        new MockQwenProductAdapter({ scenario: "timeout" }),
+      ],
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /identity conflict|protocol mismatch/i,
+  );
+});
+
+test("caller-supplied execution properties are ignored by the harness-owned registry", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let calls = 0;
+  const callerExtendedAdapter = {
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      delegate.executionConfigurationPackage,
+    productPackage: delegate.productPackage,
+    executorFactory: () => async () => {
+      calls += 1;
+      throw new Error("caller executor must not run");
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [callerExtendedAdapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(calls, 0);
+});
+
+test("an undeclared authorization field is rejected before configuration persistence or Job creation", () => {
+  const delegate = new MockWpsProductAdapter();
+  let captureCalls = 0;
+  const runSpecificationVault: RunSpecificationVault = {
+    async capture() {
+      captureCalls += 1;
+      throw new Error("unsafe configuration must not be captured");
+    },
+    async read() {
+      throw new Error("unsafe configuration must not be read");
+    },
+    retentionLocation() {
+      throw new Error(
+        "unsafe configuration must not get a retention location",
+      );
+    },
+  };
+  const unsafeContent = new TextEncoder().encode(
+    JSON.stringify({
+      adapterKind: "test",
+      authorization: "Bearer credential-value",
+      scenario: "success",
+      schemaVersion:
+        "product-adapter-execution-configuration-v1",
+    }),
+  );
+  const unsafeAdapter: ProductAdapterPort = {
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage: {
+      packageName: "test-execution-configuration:unsafe-field",
+      contentHash: sha256Bytes(unsafeContent),
+      content: unsafeContent,
+    },
+    productPackage: delegate.productPackage,
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  assert.throws(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapters: [unsafeAdapter],
+        runSpecificationVault,
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /allowlist schema/i,
+  );
+  assert.equal(captureCalls, 0);
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
+});
+
+test("mutating a caller execute property after start cannot replace registry execution", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let callerCalls = 0;
+  const mutableAdapter = {
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      delegate.executionConfigurationPackage,
+    productPackage: delegate.productPackage,
+    async execute() {
+      callerCalls += 1;
+      throw new Error("caller execute must not run");
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  const pending = createBakeoffHarness({
+    feishu,
+    productAdapters: [mutableAdapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  mutableAdapter.execute = async () => {
+    callerCalls += 1;
+    throw new Error("replacement execute must not run");
+  };
+
+  const outcome = await pending;
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(callerCalls, 0);
+});
+
+test("accessor-backed caller state cannot change registry execution after start", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let callerCalls = 0;
+  let liveMode: "success" | "failure" = "success";
+  const mutableAdapter = {
+    get mode() {
+      return liveMode;
+    },
+    set mode(value: "success" | "failure") {
+      liveMode = value;
+    },
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      delegate.executionConfigurationPackage,
+    productPackage: delegate.productPackage,
+    async execute() {
+      callerCalls += 1;
+      if (liveMode === "failure") {
+        throw new Error("live mutable adapter state must not execute");
+      }
+      return Promise.reject(
+        new Error("caller execute must not run"),
+      );
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  const pending = createBakeoffHarness({
+    feishu,
+    productAdapters: [mutableAdapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  mutableAdapter.mode = "failure";
+
+  const outcome = await pending;
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(callerCalls, 0);
+});
+
+test("a receiver-dependent execute method cannot become the selected executor", async () => {
+  class ReceiverFactoryAdapter implements ProductAdapterPort {
+    readonly implementationPackage =
+      new MockWpsProductAdapter().implementationPackage;
+    readonly executionConfigurationPackage =
+      new MockWpsProductAdapter().executionConfigurationPackage;
+    readonly productPackage =
+      new MockWpsProductAdapter().productPackage;
+    mode: "success" | "failure" = "success";
+    executeCalls = 0;
+
+    async execute() {
+      this.executeCalls += 1;
+      if (this.mode === "failure") {
+        throw new Error("receiver state changed");
+      }
+      throw new Error("receiver-dependent execute must not run");
+    }
+  }
+  const feishu = new InMemoryFeishuProjection();
+  const adapter = new ReceiverFactoryAdapter();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [adapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(adapter.executeCalls, 0);
+});
+
+test("the registry rejects an implementation package paired with another frozen configuration", () => {
+  const success = new MockQwenProductAdapter({
+    scenario: "success",
+  });
+  const timeout = new MockQwenProductAdapter({
+    scenario: "timeout",
+  });
+  const mismatchedAdapter: ProductAdapterPort = {
+    implementationPackage: success.implementationPackage,
+    executionConfigurationPackage:
+      timeout.executionConfigurationPackage,
+    productPackage: success.productPackage,
+  };
+  const feishu = new InMemoryFeishuProjection();
+
+  assert.throws(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapters: [mismatchedAdapter],
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /implementation package is not registered/i,
+  );
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
+});
+
 test("package metadata and derived Run IDs are snapshotted before any adapter executes", async () => {
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();
   const mutableQwenPackage = { ...qwen.productPackage };
   const mutableQwen: ProductAdapterPort = {
+    implementationPackage: qwen.implementationPackage,
+    executionConfigurationPackage:
+      qwen.executionConfigurationPackage,
     productPackage: mutableQwenPackage,
-    execute: (command) => qwen.execute(command),
-  };
-  const mutatingWps: ProductAdapterPort = {
-    productPackage: wps.productPackage,
-    async execute(command) {
-      mutableQwenPackage.packageId = "MUTATED-package-id";
-      mutableQwenPackage.displayName = "Mutated after selection";
-      return wps.execute(command);
-    },
   };
   const feishu = new InMemoryFeishuProjection();
 
-  await createBakeoffHarness({
+  const pending = createBakeoffHarness({
     feishu,
-    productAdapters: [mutatingWps, mutableQwen],
+    productAdapters: [wps, mutableQwen],
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
+  mutableQwenPackage.packageId = "MUTATED-package-id";
+  mutableQwenPackage.displayName = "Mutated after selection";
+  await pending;
   const qwenRun = feishu
     .snapshot()
     .runRecordTable.find(
@@ -1277,20 +1502,24 @@ test("distinct package Runs cannot persist the same Artifact ID", async () => {
   const wps = new MockWpsProductAdapter();
   const duplicateArtifactAdapters: ProductAdapterPort[] = [
     {
+      implementationPackage: wps.implementationPackage,
+      executionConfigurationPackage:
+        wps.executionConfigurationPackage,
       productPackage: {
         ...wps.productPackage,
         packageId: "custom-package-a",
         displayName: "Custom A",
       },
-      execute: (command) => wps.execute(command),
     },
     {
+      implementationPackage: wps.implementationPackage,
+      executionConfigurationPackage:
+        wps.executionConfigurationPackage,
       productPackage: {
         ...wps.productPackage,
         packageId: "custom-package-b",
         displayName: "Custom B",
       },
-      execute: (command) => wps.execute(command),
     },
   ];
   const feishu = new InMemoryFeishuProjection();

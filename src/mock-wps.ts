@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 import type {
   Artifact,
   RenderManifest,
   StaticSlideRender,
 } from "./domain.ts";
-import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
+import {
+  MOCK_TEST_ENVIRONMENT_ORIGIN,
+  PRODUCTION_ENVIRONMENT_ORIGIN,
+} from "./environment-origin.ts";
 import {
   MOCK_WPS_VOLCANO_SLIDES,
   type MockSlideFixture,
@@ -13,13 +17,104 @@ import {
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import type {
   ProductAttemptResult,
+  ProductAdapterImplementationPackage,
+  ProductAdapterExecutionConfiguration,
+  ProductAdapterExecutor,
   ProductAdapterPort,
   ProductPackageSnapshot,
   ProductRunCommand,
 } from "./product-adapter.ts";
+import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
+import { calculateRenderManifestHash } from "./render-manifest.ts";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
+const mockAdapterModuleContent = readFileSync(new URL(import.meta.url));
+
+const MOCK_ADAPTER_SCENARIOS = [
+  "success",
+  "timeout",
+  "quota_blocked",
+  "payment_blocked",
+  "authentication_blocked",
+  "human_wait",
+  "retry_then_success",
+  "first_compliant_artifact",
+  "repeat_not_submitted_failure",
+  "submitted_technical_failure",
+  "unknown_submission_failure",
+  "hung",
+  "throwing",
+  "inflated_elapsed",
+  "tampered_artifact",
+  "content_variant",
+  "wrong_environment_origin",
+] as const;
+
+export type MockAdapterScenario =
+  (typeof MOCK_ADAPTER_SCENARIOS)[number];
+
+function configuredMockAdapterImplementationPackage(
+  adapterName: string,
+  configuration: unknown,
+): ProductAdapterImplementationPackage {
+  const configurationContent = textEncoder.encode(
+    `\n${JSON.stringify({ adapterName, configuration })}`,
+  );
+  const content = new Uint8Array(
+    mockAdapterModuleContent.byteLength +
+      configurationContent.byteLength,
+  );
+  content.set(mockAdapterModuleContent, 0);
+  content.set(
+    configurationContent,
+    mockAdapterModuleContent.byteLength,
+  );
+  return Object.freeze({
+    packageName: `src/mock-wps.ts#${adapterName}`,
+    contentHash: `sha256:${createHash("sha256")
+      .update(content)
+      .digest("hex")}`,
+    content,
+  });
+}
+
+function mockAdapterExecutionConfigurationPackage(
+  adapterKind: string,
+  scenario: MockAdapterScenario,
+): ProductAdapterImplementationPackage {
+  const content = textEncoder.encode(
+    JSON.stringify({
+      adapterKind,
+      scenario,
+      schemaVersion:
+        "product-adapter-execution-configuration-v1",
+    }),
+  );
+  return Object.freeze({
+    packageName: `mock-execution-configuration#${adapterKind}`,
+    contentHash: `sha256:${createHash("sha256")
+      .update(content)
+      .digest("hex")}`,
+    content,
+  });
+}
+
+function mockScenarioFromExecutionConfiguration(
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  expectedAdapterKind: string,
+): MockAdapterScenario {
+  const scenario = executionConfiguration.scenario;
+  if (
+    executionConfiguration.adapterKind !== expectedAdapterKind ||
+    !MOCK_ADAPTER_SCENARIOS.some(
+      (allowedScenario) => allowedScenario === scenario,
+    )
+  ) {
+    throw new Error("Mock adapter execution configuration is invalid");
+  }
+  return scenario as MockAdapterScenario;
+}
 
 interface ZipEntry {
   readonly name: string;
@@ -422,19 +517,6 @@ const MOCK_DOUBAO_VOLCANO_SLIDES = MOCK_WPS_VOLCANO_SLIDES.map(
   },
 );
 
-export type MockAdapterScenario =
-  | "success"
-  | "timeout"
-  | "quota_blocked"
-  | "payment_blocked"
-  | "authentication_blocked"
-  | "human_wait"
-  | "retry_then_success"
-  | "first_compliant_artifact"
-  | "repeat_not_submitted_failure"
-  | "submitted_technical_failure"
-  | "unknown_submission_failure";
-
 export interface MockAdapterOptions {
   readonly scenario?: MockAdapterScenario;
 }
@@ -444,6 +526,33 @@ function executeMockScenario(
   artifact: Artifact,
   attemptSeq: number,
 ): ProductAttemptResult {
+  if (
+    scenario === "tampered_artifact" ||
+    scenario === "content_variant" ||
+    scenario === "wrong_environment_origin"
+  ) {
+    return {
+      terminalReason: "success",
+      blockReason: null,
+      submissionEvidence: "submitted",
+      elapsedMs: 1,
+      artifactCandidates: [{ artifact, policyCompliant: true }],
+    };
+  }
+  if (scenario === "inflated_elapsed") {
+    return {
+      terminalReason: "success",
+      blockReason: null,
+      submissionEvidence: "submitted",
+      elapsedMs: 30 * 60 * 1_000,
+      artifactCandidates: [{ artifact, policyCompliant: true }],
+    };
+  }
+  if (scenario === "hung" || scenario === "throwing") {
+    throw new Error(
+      "Mock asynchronous failure scenario must be handled by the trusted registry",
+    );
+  }
   if (scenario === "retry_then_success" && attemptSeq === 1) {
     return {
       terminalReason: "technical_failure",
@@ -500,6 +609,12 @@ function executeMockScenario(
         | "success"
         | "retry_then_success"
         | "first_compliant_artifact"
+        | "hung"
+        | "throwing"
+        | "inflated_elapsed"
+        | "tampered_artifact"
+        | "content_variant"
+        | "wrong_environment_origin"
         | keyof typeof technicalFailureEvidence
       >,
       Omit<ProductAttemptResult, "artifactCandidates">
@@ -562,27 +677,214 @@ export function renderStaticArtifact(
   const slides = presentation.slides.map((slide, index) =>
     renderSlide(slide, index + 1, presentation.application),
   );
-  const manifestPayload = JSON.stringify({
-    artifactHash: artifact.contentHash,
-    renderer: "mock-static-svg@1",
-    slideHashes: slides.map(({ pageNumber, contentHash }) => ({
-      pageNumber,
-      contentHash,
-    })),
-  });
-  return {
+  const contactSheetContent = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720"><metadata>${slides
+    .map(({ pageNumber, contentHash }) => `${pageNumber}:${contentHash}`)
+    .join("|")}</metadata></svg>`;
+  const manifest = {
     renderManifestId,
     artifactId: artifact.artifactId,
-    provenance: "MOCK",
+    provenance: "MOCK" as const,
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-    renderer: "mock-static-svg@1",
+    egressDestination: {
+      targetService: "mock-qwen-vendor",
+      targetAccount: "mock-qwen-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
+    renderer: "mock-static-svg@1" as const,
     pageCount: slides.length,
-    contentHash: sha256(manifestPayload),
+    renderPolicy: {
+      fontPack: "mock-font-pack@1",
+      resolution: "1280x720",
+      colorProfile: "sRGB",
+      animationPolicy: "first_frame" as const,
+      externalAssetPolicy: "network_disabled" as const,
+    },
+    contactSheet: {
+      filename: "contact-sheet.svg",
+      mimeType: "image/svg+xml" as const,
+      contentHash: sha256(contactSheetContent),
+      content: contactSheetContent,
+    },
     slides,
+  };
+  return {
+    ...manifest,
+    contentHash: calculateRenderManifestHash(
+      artifact.contentHash,
+      manifest,
+    ),
   };
 }
 
+type RegisteredMockAdapterKind =
+  | "mock-wps"
+  | "mock-qwen"
+  | "mock-doubao";
+
+function registeredAdapterName(
+  adapterKind: RegisteredMockAdapterKind,
+): string {
+  if (adapterKind === "mock-wps") {
+    return "MockWpsProductAdapter";
+  }
+  if (adapterKind === "mock-qwen") {
+    return "MockQwenProductAdapter";
+  }
+  return "MockDoubaoProductAdapter";
+}
+
+function assertRegisteredImplementationPackage(
+  adapterKind: RegisteredMockAdapterKind,
+  scenario: MockAdapterScenario,
+  implementationPackage: ProductAdapterImplementationPackage,
+): void {
+  const expected = configuredMockAdapterImplementationPackage(
+    registeredAdapterName(adapterKind),
+    { scenario },
+  );
+  if (
+    implementationPackage.packageName !== expected.packageName ||
+    implementationPackage.contentHash !== expected.contentHash ||
+    !Buffer.from(implementationPackage.content).equals(
+      Buffer.from(expected.content),
+    )
+  ) {
+    throw new Error(
+      `Product Adapter implementation package is not registered for ${adapterKind}:${scenario}`,
+    );
+  }
+}
+
+function artifactForRegisteredAdapter(
+  adapterKind: RegisteredMockAdapterKind,
+  command: ProductRunCommand,
+): Artifact {
+  if (adapterKind === "mock-wps") {
+    return captureMockArtifact(
+      command.runId,
+      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].artifactId,
+      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].filename,
+    );
+  }
+  if (adapterKind === "mock-qwen") {
+    return captureMockArtifact(
+      command.runId,
+      MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].artifactId,
+      MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].filename,
+      MOCK_QWEN_VOLCANO_SLIDES,
+      "MOCK Qwen PPT",
+    );
+  }
+  return captureMockArtifact(
+    command.runId,
+    MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].artifactId,
+    MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].filename,
+    MOCK_DOUBAO_VOLCANO_SLIDES,
+    "MOCK Doubao PPT",
+  );
+}
+
+function applyRegisteredArtifactScenario(
+  scenario: MockAdapterScenario,
+  artifact: Artifact,
+): Artifact {
+  if (scenario === "tampered_artifact") {
+    const content = artifact.content.slice();
+    content[100] = (content[100] ?? 0) ^ 0xff;
+    return { ...artifact, content };
+  }
+  if (scenario === "content_variant") {
+    const original = Buffer.from("火山为什么会喷发");
+    const replacement = Buffer.from("岩浆为什么会上升");
+    const content = artifact.content.slice();
+    const firstMatch = Buffer.from(content).indexOf(original);
+    if (
+      original.byteLength !== replacement.byteLength ||
+      firstMatch === -1
+    ) {
+      throw new Error("Mock content variant fixture is invalid");
+    }
+    content.set(replacement, firstMatch);
+    return {
+      ...artifact,
+      content,
+      contentHash: sha256(content),
+    };
+  }
+  if (scenario === "wrong_environment_origin") {
+    return {
+      ...artifact,
+      environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
+    };
+  }
+  return artifact;
+}
+
+export function resolveHarnessProductAdapterExecutor(
+  implementationPackage: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+): ProductAdapterExecutor {
+  const adapterKind = executionConfiguration.adapterKind;
+  if (
+    adapterKind !== "mock-wps" &&
+    adapterKind !== "mock-qwen" &&
+    adapterKind !== "mock-doubao"
+  ) {
+    throw new Error(
+      `Product Adapter kind is not registered: ${adapterKind}`,
+    );
+  }
+  const scenario = mockScenarioFromExecutionConfiguration(
+    executionConfiguration,
+    adapterKind,
+  );
+  assertRegisteredImplementationPackage(
+    adapterKind,
+    scenario,
+    implementationPackage,
+  );
+  const executor: ProductAdapterExecutor = async (command) => {
+    if (command.evaluationCase.targetPageCount !== 16) {
+      throw new Error(
+        `Mock ${adapterKind} fixture supports only the frozen 16-page Case`,
+      );
+    }
+    if (scenario === "hung") {
+      return new Promise<Artifact>(() => {});
+    }
+    if (scenario === "throwing") {
+      throw new Error("simulated adapter crash");
+    }
+    const artifact = applyRegisteredArtifactScenario(
+      scenario,
+      artifactForRegisteredAdapter(adapterKind, command),
+    );
+    if (
+      adapterKind === "mock-wps" &&
+      (scenario === "success" ||
+        scenario === "tampered_artifact" ||
+        scenario === "content_variant" ||
+        scenario === "wrong_environment_origin")
+    ) {
+      return artifact;
+    }
+    return executeMockScenario(
+      scenario,
+      artifact,
+      command.attemptSeq,
+    );
+  };
+  return Object.freeze(executor);
+}
+
 export class MockWpsProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage: ProductAdapterImplementationPackage;
+  readonly executionConfigurationPackage:
+    ProductAdapterImplementationPackage;
+  readonly executionConfiguration:
+    ProductAdapterExecutionConfiguration;
+  readonly #scenario: MockAdapterScenario;
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
     packageId: "MOCK-wps-package-v1",
     vendorId: "wps",
@@ -590,21 +892,39 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
     adapterVersion: "mock-wps@1",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "mock-wps-vendor",
+      targetAccount: "mock-wps-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
   });
-
-  async execute(command: ProductRunCommand): Promise<Artifact> {
-    if (command.evaluationCase.targetPageCount !== 16) {
-      throw new Error("Mock WPS fixture supports only the frozen 16-page Case");
-    }
-    return captureMockArtifact(
-      command.runId,
-      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].artifactId,
-      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].filename,
-    );
+  constructor(options: MockAdapterOptions = {}) {
+    this.#scenario = options.scenario ?? "success";
+    this.implementationPackage =
+      configuredMockAdapterImplementationPackage(
+        "MockWpsProductAdapter",
+        { scenario: this.#scenario },
+      );
+    this.executionConfigurationPackage =
+      mockAdapterExecutionConfigurationPackage(
+        "mock-wps",
+        this.#scenario,
+      );
+    this.executionConfiguration =
+      parseAdapterExecutionConfiguration(
+        this.executionConfigurationPackage,
+      );
   }
+
 }
 
 export class MockQwenProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage: ProductAdapterImplementationPackage;
+  readonly executionConfigurationPackage:
+    ProductAdapterImplementationPackage;
+  readonly executionConfiguration:
+    ProductAdapterExecutionConfiguration;
   readonly #scenario: MockAdapterScenario;
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
@@ -614,31 +934,39 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
     adapterVersion: "mock-qwen@1",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "mock-qwen-vendor",
+      targetAccount: "mock-qwen-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
   });
 
   constructor(options: MockAdapterOptions = {}) {
     this.#scenario = options.scenario ?? "success";
-  }
-
-  async execute(command: ProductRunCommand): Promise<ProductAttemptResult> {
-    if (command.evaluationCase.targetPageCount !== 16) {
-      throw new Error("Mock Qwen fixture supports only the frozen 16-page Case");
-    }
-    return executeMockScenario(
-      this.#scenario,
-      captureMockArtifact(
-        command.runId,
-        MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].artifactId,
-        MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].filename,
-        MOCK_QWEN_VOLCANO_SLIDES,
-        "MOCK Qwen PPT",
-      ),
-      command.attemptSeq,
-    );
+    this.implementationPackage =
+      configuredMockAdapterImplementationPackage(
+        "MockQwenProductAdapter",
+        { scenario: this.#scenario },
+      );
+    this.executionConfigurationPackage =
+      mockAdapterExecutionConfigurationPackage(
+        "mock-qwen",
+        this.#scenario,
+      );
+    this.executionConfiguration =
+      parseAdapterExecutionConfiguration(
+        this.executionConfigurationPackage,
+      );
   }
 }
 
 export class MockDoubaoProductAdapter implements ProductAdapterPort {
+  readonly implementationPackage: ProductAdapterImplementationPackage;
+  readonly executionConfigurationPackage:
+    ProductAdapterImplementationPackage;
+  readonly executionConfiguration:
+    ProductAdapterExecutionConfiguration;
   readonly #scenario: MockAdapterScenario;
 
   readonly productPackage: ProductPackageSnapshot = Object.freeze({
@@ -648,28 +976,29 @@ export class MockDoubaoProductAdapter implements ProductAdapterPort {
     adapterVersion: "mock-doubao@1",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    egressDestination: {
+      targetService: "mock-doubao-vendor",
+      targetAccount: "mock-doubao-test-account",
+      targetRegion: "test",
+      subprocessors: [],
+    },
   });
 
   constructor(options: MockAdapterOptions = {}) {
     this.#scenario = options.scenario ?? "success";
-  }
-
-  async execute(command: ProductRunCommand): Promise<ProductAttemptResult> {
-    if (command.evaluationCase.targetPageCount !== 16) {
-      throw new Error(
-        "Mock Doubao fixture supports only the frozen 16-page Case",
+    this.implementationPackage =
+      configuredMockAdapterImplementationPackage(
+        "MockDoubaoProductAdapter",
+        { scenario: this.#scenario },
       );
-    }
-    return executeMockScenario(
-      this.#scenario,
-      captureMockArtifact(
-        command.runId,
-        MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].artifactId,
-        MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].filename,
-        MOCK_DOUBAO_VOLCANO_SLIDES,
-        "MOCK Doubao PPT",
-      ),
-      command.attemptSeq,
-    );
+    this.executionConfigurationPackage =
+      mockAdapterExecutionConfigurationPackage(
+        "mock-doubao",
+        this.#scenario,
+      );
+    this.executionConfiguration =
+      parseAdapterExecutionConfiguration(
+        this.executionConfigurationPackage,
+      );
   }
 }

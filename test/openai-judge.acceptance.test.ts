@@ -9,7 +9,6 @@ import {
   MockQwenProductAdapter,
   MockWpsProductAdapter,
   OpenAiResponsesJudgeAdapter,
-  PRODUCTION_ENVIRONMENT_ORIGIN,
   VOLCANO_EVALUATION_CASE,
   createBakeoffHarness,
   resolveReferencePackForCase,
@@ -17,7 +16,6 @@ import {
   type JudgeEgressAuthorizationRequest,
   type OpenAiResponsesJudgeAdapterOptions,
   type OpenAiResponsesTransport,
-  type ProductAdapterPort,
 } from "../src/index.ts";
 import { scoreRenderedArtifact } from "../src/mock-score.ts";
 
@@ -1019,17 +1017,10 @@ test("Bakeoff rejects an invalid injected Judge score while retaining its captur
 });
 
 test("Bakeoff rejects an Artifact with the wrong environment origin before Judge egress", async () => {
-  const wps = new MockWpsProductAdapter();
   let judgeCalls = 0;
-  const wrongOriginAdapter: ProductAdapterPort = {
-    productPackage: wps.productPackage,
-    async execute(command) {
-      return {
-        ...(await wps.execute(command)),
-        environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
-      };
-    },
-  };
+  const wrongOriginAdapter = new MockWpsProductAdapter({
+    scenario: "wrong_environment_origin",
+  });
 
   await assert.rejects(
     createBakeoffHarness({
