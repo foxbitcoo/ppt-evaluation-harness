@@ -5,6 +5,63 @@ export {
   type AttemptDeadlineResult,
 } from "./bakeoff.ts";
 export {
+  InMemoryImmutableBlobStore,
+  createArtifactVault,
+  type ArtifactDerivativeLineage,
+  type ArtifactMetadata,
+  type ArtifactPackageManifest,
+  type ArtifactVault,
+  type ArtifactVaultDependencies,
+  type CaptureArtifactPackageCommand,
+  type ImmutableBlobStorePort,
+  type RecoveredArtifactPackage,
+  type RetentionPayloadLocation,
+} from "./artifact-vault.ts";
+export {
+  requireEgressAuthorization,
+  type ApprovedEgressAuthorization,
+  type DeniedEgressAuthorization,
+  type EgressAuthorizationDecision,
+  type EgressAuthorizationPort,
+  type EgressAuthorizationRequest,
+  type EgressProcessingPurpose,
+  type EgressTargetKind,
+} from "./egress-authorization.ts";
+export {
+  canonicalJsonBytes,
+  createRunSpecificationVault,
+  sha256Bytes,
+  type CaptureRunSpecificationCommand,
+  type RunSpecificationBundle,
+  type RunSpecificationReference,
+  type RunSpecificationVault,
+  type RunSpecificationVaultDependencies,
+  type RunSpecificationVersionReferences,
+} from "./run-specification.ts";
+export {
+  createOperationalLedgerRecoveryService,
+  type CapturedArtifactRecoveryManifest,
+  type ExportOperationalLedgerCommand,
+  type OperationalLedgerExportReference,
+  type OperationalLedgerRecoveryExport,
+  type OperationalLedgerRecoveryService,
+  type OperationalLedgerRecoveryServiceDependencies,
+  type RecoveredOperationalJob,
+  type RecoveryRehearsalResult,
+  type RecoveryScorecardRecord,
+} from "./ledger-recovery.ts";
+export {
+  createRetentionService,
+  InMemoryTombstoneLedger,
+  type ExpireRetentionCommand,
+  type RetentionDeletionEvidence,
+  type RetentionExpiryResult,
+  type RetentionService,
+  type RetentionServiceDependencies,
+  type RetentionTombstone,
+  type TombstoneLedgerPort,
+} from "./retention.ts";
+export {
   createComparisonReportService,
   type ComparisonReportService,
   type ComparisonReportServiceDependencies,

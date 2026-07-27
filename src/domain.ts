@@ -2,6 +2,15 @@ import type {
   EnvironmentOrigin,
   TestEnvironmentOrigin,
 } from "./environment-origin.ts";
+import type {
+  ArtifactPackageManifest,
+} from "./artifact-vault.ts";
+import type {
+  ApprovedEgressAuthorization,
+} from "./egress-authorization.ts";
+import type {
+  RunSpecificationReference,
+} from "./run-specification.ts";
 
 export const MOCK_PROVENANCE = "MOCK" as const;
 
@@ -112,6 +121,9 @@ export interface RunRecord {
   readonly scorecardId: string | null;
   readonly judgeEgressAttempt?: JudgeEgressAttemptAudit | null;
   readonly judgeFailure?: JudgeFailureLineage | null;
+  readonly specificationReference?: RunSpecificationReference | null;
+  readonly artifactPackageManifest?: ArtifactPackageManifest | null;
+  readonly egressAuthorizations?: readonly ApprovedEgressAuthorization[] | null;
 }
 
 export interface Artifact {

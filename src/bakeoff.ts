@@ -15,11 +15,22 @@ import type {
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
+import {
+  InMemoryImmutableBlobStore,
+  createArtifactVault,
+  type ArtifactPackageManifest,
+  type ArtifactVault,
+} from "./artifact-vault.ts";
 import { createComparisonReportService } from "./comparison-report.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
 } from "./environment-origin.ts";
+import {
+  requireEgressAuthorization,
+  type ApprovedEgressAuthorization,
+  type EgressAuthorizationPort,
+} from "./egress-authorization.ts";
 import type {
   ComparisonReportSource,
   FeishuProjectionPort,
@@ -49,8 +60,27 @@ import {
   type ReferencePackGeneratorPort,
   type ReferencePackStorePort,
 } from "./reference-pack.ts";
+import {
+  createRunSpecificationVault,
+  type RunSpecificationReference,
+  type RunSpecificationVault,
+} from "./run-specification.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
+const DEFAULT_SPEC_COMMIT_SHA = "9e68de5801bc14f00c187336000c83ce8cc37efa";
+const DEFAULT_TEST_EGRESS_AUTHORIZATION: EgressAuthorizationPort = {
+  async authorize(request) {
+    return {
+      status: "approved",
+      decisionId: `mock-approved:${request.requestId}`,
+      policyVersion: "mock-public-synthetic-egress-policy-v1",
+      request,
+      legalSecurityBasis: "synthetic test fixture",
+      approvedAt: MOCK_SCENARIO.fixedTime,
+      expiresAt: fixedTimestampAfter(24 * 60 * 60 * 1_000),
+    };
+  },
+};
 
 const MOCK_BAKEOFF_PROTOCOL_SNAPSHOT: BakeoffProtocolSnapshot =
   Object.freeze({
@@ -142,6 +172,10 @@ export interface BakeoffHarnessDependencies {
   readonly referencePackStore?: ReferencePackStorePort;
   readonly referencePackGenerator?: ReferencePackGeneratorPort;
   readonly judge?: OpenAiJudgePort;
+  readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly artifactVault?: ArtifactVault;
+  readonly runSpecificationVault?: RunSpecificationVault;
+  readonly specCommitSha?: string;
 }
 
 interface InFlightBakeoffJob {
@@ -159,6 +193,14 @@ const DEFAULT_REFERENCE_PACK_STORES = new WeakMap<
   FeishuProjectionPort,
   ReferencePackStorePort
 >();
+const DEFAULT_ARTIFACT_VAULTS = new WeakMap<
+  FeishuProjectionPort,
+  ArtifactVault
+>();
+const DEFAULT_RUN_SPECIFICATION_VAULTS = new WeakMap<
+  FeishuProjectionPort,
+  RunSpecificationVault
+>();
 const DEPENDENCY_IDENTITIES = new WeakMap<object, string>();
 let nextDependencyIdentity = 1;
 
@@ -171,6 +213,40 @@ function defaultReferencePackStore(
     () => MOCK_SCENARIO.fixedTime,
   );
   DEFAULT_REFERENCE_PACK_STORES.set(feishu, created);
+  return created;
+}
+
+function defaultArtifactVault(
+  feishu: FeishuProjectionPort,
+): ArtifactVault {
+  const existing = DEFAULT_ARTIFACT_VAULTS.get(feishu);
+  if (existing !== undefined) return existing;
+  const identity = dependencyIdentity(feishu);
+  const created = createArtifactVault({
+    primary: new InMemoryImmutableBlobStore(
+      `mock-primary-artifact-store:${identity}`,
+    ),
+    secondary: new InMemoryImmutableBlobStore(
+      `mock-secondary-artifact-store:${identity}`,
+    ),
+    egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
+  });
+  DEFAULT_ARTIFACT_VAULTS.set(feishu, created);
+  return created;
+}
+
+function defaultRunSpecificationVault(
+  feishu: FeishuProjectionPort,
+): RunSpecificationVault {
+  const existing = DEFAULT_RUN_SPECIFICATION_VAULTS.get(feishu);
+  if (existing !== undefined) return existing;
+  const created = createRunSpecificationVault({
+    store: new InMemoryImmutableBlobStore(
+      `mock-recovery-store:${dependencyIdentity(feishu)}`,
+    ),
+    egressAuthorization: DEFAULT_TEST_EGRESS_AUTHORIZATION,
+  });
+  DEFAULT_RUN_SPECIFICATION_VAULTS.set(feishu, created);
   return created;
 }
 
@@ -201,7 +277,11 @@ function bakeoffJobIdentity(
     readonly attemptDeadline: AttemptDeadlinePort;
     readonly referencePackStore: ReferencePackStorePort;
     readonly referencePackGenerator: ReferencePackGeneratorPort;
-    readonly judge: OpenAiJudgePort | undefined;
+      readonly judge: OpenAiJudgePort | undefined;
+      readonly egressAuthorization: EgressAuthorizationPort | undefined;
+      readonly artifactVault: ArtifactVault;
+      readonly runSpecificationVault: RunSpecificationVault;
+      readonly specCommitSha: string;
   },
 ): string {
   return JSON.stringify({
@@ -231,6 +311,14 @@ function bakeoffJobIdentity(
         dependencies.referencePackGenerator,
       ),
       judge: dependencyIdentity(dependencies.judge),
+      egressAuthorization: dependencyIdentity(
+        dependencies.egressAuthorization,
+      ),
+      artifactVault: dependencyIdentity(dependencies.artifactVault),
+      runSpecificationVault: dependencyIdentity(
+        dependencies.runSpecificationVault,
+      ),
+      specCommitSha: dependencies.specCommitSha,
     },
   });
 }
@@ -277,6 +365,8 @@ interface CapturedVendorResult {
   readonly renderManifest: RenderManifest | null;
   readonly scorecard: ArtifactScorecard | null;
   readonly judgeFailure?: JudgeFailureLineage | null;
+  readonly artifactPackageManifest: ArtifactPackageManifest | null;
+  readonly egressAuthorizations: readonly ApprovedEgressAuthorization[];
   readonly attemptRecords: readonly RunRecord[];
 }
 
@@ -284,6 +374,16 @@ interface SelectedProductAdapter {
   readonly adapter: ProductAdapterPort;
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
+}
+
+class ArtifactPackageIdentityConflictError extends Error {
+  readonly artifactId: string;
+
+  constructor(artifactId: string, cause: unknown) {
+    super(`Artifact package identity conflict: ${artifactId}`, { cause });
+    this.name = "ArtifactPackageIdentityConflictError";
+    this.artifactId = artifactId;
+  }
 }
 
 function snapshotProductSelections(
@@ -307,6 +407,7 @@ function replayedBakeoffOutcome(
   command: StartBakeoffJobCommand,
   selections: readonly SelectedProductAdapter[],
   source: ComparisonReportSource,
+  specCommitSha: string,
 ): BakeoffJobOutcome {
   const expectedRunIds = selections.map(({ runId }) => runId);
   const selectedRunIds = source.job.selectedRunIds;
@@ -377,7 +478,8 @@ function replayedBakeoffOutcome(
       run.product !== selection.productPackage.displayName ||
       run.productVendorId !== selection.productPackage.vendorId ||
       run.productPackageId !== selection.productPackage.packageId ||
-      run.adapterVersion !== selection.productPackage.adapterVersion
+      run.adapterVersion !== selection.productPackage.adapterVersion ||
+      run.specificationReference?.specCommitSha !== specCommitSha
     ) {
       throw new Error(
         `Bakeoff Job identity conflict: ${source.job.recordId}`,
@@ -632,6 +734,8 @@ async function executeVendor(
   jobDeadlineAtEpochMs: number,
   referencePack: ReferencePack | null,
   judge: OpenAiJudgePort | undefined,
+  egressAuthorization: EgressAuthorizationPort | undefined,
+  artifactVault: ArtifactVault,
   onReferencePackUse: (evaluationAttemptId: string) => void,
 ): Promise<CapturedVendorResult> {
   const { adapter, productPackage, runId } = selection;
@@ -643,6 +747,7 @@ async function executeVendor(
   let result: ProductAttemptResult;
   let terminalReason: TerminalReason;
   let status: RunStatus;
+  const egressAuthorizations: ApprovedEgressAuthorization[] = [];
 
   while (true) {
     const attemptId = `${runId}-attempt-${attemptSeq}`;
@@ -661,6 +766,25 @@ async function executeVendor(
         artifactCandidates: [],
       };
     } else {
+      egressAuthorizations.push(
+        await requireEgressAuthorization(egressAuthorization, {
+          requestId: `vendor-generation:${attemptId}`,
+          jobId: MOCK_SCENARIO.jobId,
+          runId,
+          attemptId,
+          dataClassification: "public_or_synthetic",
+          sourceOwner: "ppt-evaluation-harness",
+          processingPurpose: "vendor_generation",
+          targetKind: "vendor",
+          targetService: productPackage.vendorId,
+          targetAccount: productPackage.packageId,
+          targetRegion: targetEnvironment,
+          subprocessors: [],
+          contentFields: ["vendor_input_contract"],
+          requiredRedactions: [],
+          requestedAt: MOCK_SCENARIO.fixedTime,
+        }),
+      );
       const startedAt = Date.now();
       try {
         const deadlineResult = await attemptDeadline.run(
@@ -746,6 +870,8 @@ async function executeVendor(
       artifact: null,
       renderManifest: null,
       scorecard: null,
+      artifactPackageManifest: null,
+      egressAuthorizations,
       attemptRecords: attempts,
     };
   }
@@ -763,6 +889,8 @@ async function executeVendor(
       artifact: null,
       renderManifest: null,
       scorecard: null,
+      artifactPackageManifest: null,
+      egressAuthorizations,
       attemptRecords: attempts.map((attempt, index) =>
         index === attempts.length - 1
           ? {
@@ -782,9 +910,50 @@ async function executeVendor(
     targetEnvironment,
     `Artifact ${artifact.artifactId}`,
   );
+  egressAuthorizations.push(
+    await requireEgressAuthorization(egressAuthorization, {
+      requestId: `artifact-rendering:${artifact.artifactId}`,
+      jobId: MOCK_SCENARIO.jobId,
+      runId,
+      attemptId: attempts.at(-1)?.recordId ?? null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "ppt-evaluation-harness",
+      processingPurpose: "artifact_rendering",
+      targetKind: "renderer",
+      targetService: "mock-static-svg@1",
+      targetAccount: "sandboxed-renderer",
+      targetRegion: targetEnvironment,
+      subprocessors: [],
+      contentFields: ["artifact_binary"],
+      requiredRedactions: [],
+      requestedAt: MOCK_SCENARIO.fixedTime,
+    }),
+  );
   const renderManifest = renderStaticArtifact(
     artifact,
     scenario?.renderManifestId ?? runId.replace(/^MOCK-run-/, "MOCK-render-"),
+  );
+  let artifactPackageManifest: ArtifactPackageManifest;
+  try {
+    artifactPackageManifest = await artifactVault.capture({
+      jobId: MOCK_SCENARIO.jobId,
+      artifact,
+      renderManifest,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      /immutable blob conflict:.*\/manifest/i.test(error.message)
+    ) {
+      throw new ArtifactPackageIdentityConflictError(
+        artifact.artifactId,
+        error,
+      );
+    }
+    throw error;
+  }
+  egressAuthorizations.push(
+    ...artifactPackageManifest.egressAuthorizations,
   );
   const scorecardId =
     scenario?.scorecardId ?? runId.replace(/^MOCK-run-/, "MOCK-scorecard-");
@@ -805,6 +974,30 @@ async function executeVendor(
     });
   } else {
     try {
+      egressAuthorizations.push(
+        await requireEgressAuthorization(egressAuthorization, {
+          requestId: `judge-evaluation:${evaluationAttemptId}`,
+          jobId: MOCK_SCENARIO.jobId,
+          runId,
+          attemptId: evaluationAttemptId,
+          dataClassification: "public_or_synthetic",
+          sourceOwner: "ppt-evaluation-harness",
+          processingPurpose: "judge_evaluation",
+          targetKind: "judge",
+          targetService: "openai",
+          targetAccount: "configured-openai-judge-account",
+          targetRegion: targetEnvironment,
+          subprocessors: [],
+          contentFields: [
+            "evaluation_case",
+            "reference_pack",
+            "extracted_slide_text",
+            "static_slide_images",
+          ],
+          requiredRedactions: [],
+          requestedAt: MOCK_SCENARIO.fixedTime,
+        }),
+      );
       scorecard = await judge.score({
         jobId: MOCK_SCENARIO.jobId,
         runId,
@@ -873,6 +1066,8 @@ async function executeVendor(
     renderManifest,
     scorecard,
     judgeFailure,
+    artifactPackageManifest,
+    egressAuthorizations,
     attemptRecords: attempts.map((attempt, index) =>
       index === attempts.length - 1
         ? { ...attempt, artifactId: artifact.artifactId }
@@ -902,6 +1097,10 @@ export function createBakeoffHarness({
   referencePackStore: configuredReferencePackStore,
   referencePackGenerator: configuredReferencePackGenerator,
   judge,
+  egressAuthorization: configuredEgressAuthorization,
+  artifactVault: configuredArtifactVault,
+  runSpecificationVault: configuredRunSpecificationVault,
+  specCommitSha = DEFAULT_SPEC_COMMIT_SHA,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
     configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
@@ -909,6 +1108,31 @@ export function createBakeoffHarness({
     configuredReferencePackStore ?? defaultReferencePackStore(feishu);
   const referencePackGenerator =
     configuredReferencePackGenerator ?? DEFAULT_REFERENCE_PACK_GENERATOR;
+  const egressAuthorization =
+    configuredEgressAuthorization ?? DEFAULT_TEST_EGRESS_AUTHORIZATION;
+  const artifactVault =
+    configuredArtifactVault ??
+    (configuredEgressAuthorization === undefined
+      ? defaultArtifactVault(feishu)
+      : createArtifactVault({
+          primary: new InMemoryImmutableBlobStore(
+            `mock-primary-artifact-store:${dependencyIdentity(feishu)}`,
+          ),
+          secondary: new InMemoryImmutableBlobStore(
+            `mock-secondary-artifact-store:${dependencyIdentity(feishu)}`,
+          ),
+          egressAuthorization,
+        }));
+  const runSpecificationVault =
+    configuredRunSpecificationVault ??
+    (configuredEgressAuthorization === undefined
+      ? defaultRunSpecificationVault(feishu)
+      : createRunSpecificationVault({
+          store: new InMemoryImmutableBlobStore(
+            `mock-recovery-store:${dependencyIdentity(feishu)}`,
+          ),
+          egressAuthorization,
+        }));
   const selectedProductAdapters = Object.freeze([
     ...(productAdapters ??
       (productAdapter === undefined ? [] : [productAdapter])),
@@ -947,6 +1171,19 @@ export function createBakeoffHarness({
           `Product Package ${productPackage.packageId}`,
         );
       }
+      assertEnvironmentOriginAllowed(
+        VOLCANO_EVALUATION_CASE.environmentOrigin,
+        command.environment,
+        `Evaluation Case ${VOLCANO_EVALUATION_CASE.caseId}`,
+      );
+      if (
+        command.environment === "production" &&
+        configuredEgressAuthorization === undefined
+      ) {
+        throw new Error(
+          "Production Bakeoff requires an explicit egress authorization port; calls blocked",
+        );
+      }
 
       const protocolSnapshot = bakeoffProtocolSnapshot(
         command.referencePackMode ?? "automatic",
@@ -959,8 +1196,29 @@ export function createBakeoffHarness({
           command,
           selections,
           existingSource,
+          specCommitSha,
         );
       }
+
+      const runSpecificationReferences = new Map<
+        string,
+        RunSpecificationReference
+      >(
+        await Promise.all(
+          selections.map(async ({ productPackage, runId }) => {
+            const reference = await runSpecificationVault.capture({
+              jobId: MOCK_SCENARIO.jobId,
+              runId,
+              specCommitSha,
+              evaluationCase: VOLCANO_EVALUATION_CASE,
+              productPackage,
+              protocolSnapshot,
+              requestedAt: MOCK_SCENARIO.fixedTime,
+            });
+            return [runId, reference] as const;
+          }),
+        ),
+      );
 
       const referencePackSelection = resolveReferencePackForCase({
         evaluationCase: VOLCANO_EVALUATION_CASE,
@@ -987,6 +1245,8 @@ export function createBakeoffHarness({
             jobDeadlineAtEpochMs,
             referencePackSelection.pack,
             judge,
+            egressAuthorization,
+            artifactVault,
             (evaluationAttemptId) => {
               evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
             },
@@ -1013,6 +1273,16 @@ export function createBakeoffHarness({
         (result) => result.status === "rejected",
       );
       if (rejectedResult?.status === "rejected") {
+        if (
+          rejectedResult.reason instanceof
+            ArtifactPackageIdentityConflictError &&
+          completedResults.some(
+            ({ artifact }) =>
+              artifact?.artifactId === rejectedResult.reason.artifactId,
+          )
+        ) {
+          throw new Error("Bakeoff Job contains duplicate Artifact IDs");
+        }
         throw rejectedResult.reason;
       }
       const results = completedResults;
@@ -1052,6 +1322,32 @@ export function createBakeoffHarness({
           : successful.length === 0
             ? "failed"
             : "partial";
+      const projectionAuthorization = await requireEgressAuthorization(
+        egressAuthorization,
+        {
+          requestId: `operational-ledger-projection:${MOCK_SCENARIO.jobId}`,
+          jobId: MOCK_SCENARIO.jobId,
+          runId: null,
+          attemptId: null,
+          dataClassification: "public_or_synthetic",
+          sourceOwner: "ppt-evaluation-harness",
+          processingPurpose: "operational_ledger_projection_storage",
+          targetKind: "storage",
+          targetService: "feishu-operational-ledger",
+          targetAccount: "configured-feishu-project",
+          targetRegion: command.environment,
+          subprocessors: [],
+          contentFields: [
+            "case",
+            "run",
+            "attempt_events",
+            "artifact_manifest",
+            "scorecard",
+          ],
+          requiredRedactions: [],
+          requestedAt: MOCK_SCENARIO.fixedTime,
+        },
+      );
       await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
       await feishu.appendRunRecord({
         recordId: MOCK_SCENARIO.jobId,
@@ -1082,6 +1378,7 @@ export function createBakeoffHarness({
         artifactId: null,
         renderManifestId: null,
         scorecardId: null,
+        egressAuthorizations: [projectionAuthorization],
         ...sharedRunFields(command.caseId),
       });
       for (const result of results) {
@@ -1125,6 +1422,10 @@ export function createBakeoffHarness({
             result.judgeFailure?.egressAttempt ??
             null,
           judgeFailure: result.judgeFailure ?? null,
+          specificationReference:
+            runSpecificationReferences.get(result.runId) ?? null,
+          artifactPackageManifest: result.artifactPackageManifest,
+          egressAuthorizations: result.egressAuthorizations,
           ...sharedRunFields(command.caseId),
         });
         for (const attempt of result.attemptRecords) {
@@ -1237,6 +1538,10 @@ export function createBakeoffHarness({
           referencePackStore,
           referencePackGenerator,
           judge,
+          egressAuthorization,
+          artifactVault,
+          runSpecificationVault,
+          specCommitSha,
         },
       );
       return coalesceBakeoffJob(
