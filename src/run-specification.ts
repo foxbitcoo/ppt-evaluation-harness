@@ -25,9 +25,11 @@ import type {
   ImmutableBlobStorePort,
   RetentionPayloadLocation,
 } from "./artifact-vault.ts";
-import type {
-  ProductAdapterImplementationPackage,
-  ProductPackageSnapshot,
+import {
+  parseAdapterExecutionConfiguration,
+  type ProductAdapterExecutionConfiguration,
+  type ProductAdapterImplementationPackage,
+  type ProductPackageSnapshot,
 } from "./product-adapter.ts";
 import type { PayloadInventoryPort } from "./retention.ts";
 
@@ -68,6 +70,7 @@ export interface RunSpecificationBundle {
     readonly executionConfigurationDigest: `sha256:${string}`;
     readonly executionConfigurationPackageName: string;
     readonly executionConfigurationPackageByteSize: number;
+    readonly executionConfiguration: ProductAdapterExecutionConfiguration;
     readonly implementationPackageName: string;
     readonly implementationPackageByteSize: number;
   };
@@ -299,6 +302,10 @@ export function createRunSpecificationVault({
           "Run specification requires exact adapter implementation and execution configuration packages",
         );
       }
+      const executionConfiguration =
+        parseAdapterExecutionConfiguration(
+          command.adapterExecutionConfigurationPackage,
+        );
       const bundleWithoutReferences = Object.freeze({
         schemaVersion: "run-specification-bundle-v1",
         jobId: command.jobId,
@@ -330,6 +337,7 @@ export function createRunSpecificationVault({
             command.adapterExecutionConfigurationPackage.packageName,
           executionConfigurationPackageByteSize:
             command.adapterExecutionConfigurationPackage.content.byteLength,
+          executionConfiguration,
           implementationPackageName:
             command.adapterImplementationPackage.packageName,
           implementationPackageByteSize:
@@ -542,6 +550,17 @@ export function createRunSpecificationVault({
         ) ||
         reference.egressAuthorization.request.requiredRedactions.length !==
           0 ||
+        sha256Bytes(
+          canonicalJsonBytes(
+            bundle.adapterSpecification.executionConfiguration,
+          ),
+        ) !==
+          bundle.adapterSpecification.executionConfigurationDigest ||
+        canonicalJsonBytes(
+          bundle.adapterSpecification.executionConfiguration,
+        ).byteLength !==
+          bundle.adapterSpecification
+            .executionConfigurationPackageByteSize ||
         !isDeepStrictEqual(
           bundle.versionReferences,
           expectedVersionReferences({

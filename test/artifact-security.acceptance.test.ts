@@ -52,6 +52,17 @@ function testAdapterImplementationPackage(packageName: string) {
   } as const;
 }
 
+function testAdapterExecutionConfigurationPackage(name: string) {
+  const content = new TextEncoder().encode(
+    JSON.stringify({ name }),
+  );
+  return {
+    packageName: `test-execution-configuration:${name}`,
+    contentHash: sha256Bytes(content),
+    content,
+  } as const;
+}
+
 const APPROVED_EGRESS: EgressAuthorizationPort = {
   async authorize(request) {
     return {
@@ -995,7 +1006,7 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
     implementationPackage:
       testAdapterImplementationPackage("denied-vendor-adapter-test"),
     executionConfigurationPackage:
-      testAdapterImplementationPackage("denied-vendor-execution-test"),
+      testAdapterExecutionConfigurationPackage("denied-vendor"),
     productPackage: {
       packageId: "MOCK-denied-vendor-package-v1",
       vendorId: "denied-vendor",
@@ -1347,6 +1358,21 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
   assert.match(
     specification.adapterSpecification.implementationDigest,
     /^sha256:[a-f0-9]{64}$/,
+  );
+  assert.deepEqual(
+    specification.adapterSpecification.executionConfiguration,
+    {
+      adapterName: "MockWpsProductAdapter",
+      configuration: { scenario: "success" },
+    },
+  );
+  assert.equal(
+    sha256Bytes(
+      canonicalJsonBytes(
+        specification.adapterSpecification.executionConfiguration,
+      ),
+    ),
+    specification.adapterSpecification.executionConfigurationDigest,
   );
 });
 

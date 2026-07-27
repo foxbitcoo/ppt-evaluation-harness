@@ -142,12 +142,14 @@ export {
   type MockAdapterOptions,
   type MockAdapterScenario,
 } from "./mock-wps.ts";
-export type {
-  ArtifactCandidate,
-  ProductAttemptResult,
-  ProductAdapterPort,
-  ProductPackageSnapshot,
-  ProductRunCommand,
+export {
+  parseAdapterExecutionConfiguration,
+  type ArtifactCandidate,
+  type ProductAdapterExecutionConfiguration,
+  type ProductAttemptResult,
+  type ProductAdapterPort,
+  type ProductPackageSnapshot,
+  type ProductRunCommand,
 } from "./product-adapter.ts";
 export type {
   Artifact,

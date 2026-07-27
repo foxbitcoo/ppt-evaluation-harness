@@ -54,11 +54,13 @@ import {
   OpenAiJudgeEvaluationError,
   type OpenAiJudgePort,
 } from "./openai-judge.ts";
-import type {
-  ProductAdapterImplementationPackage,
-  ProductAdapterPort,
-  ProductAttemptResult,
-  ProductPackageSnapshot,
+import {
+  parseAdapterExecutionConfiguration,
+  type ProductAdapterExecutionConfiguration,
+  type ProductAdapterImplementationPackage,
+  type ProductAdapterPort,
+  type ProductAttemptResult,
+  type ProductPackageSnapshot,
 } from "./product-adapter.ts";
 import {
   InMemoryReferencePackStore,
@@ -398,6 +400,7 @@ function bakeoffJobIdentity(
     ),
     selections: selections.map(
       ({
+        executionConfiguration,
         executionConfigurationPackage,
         executionEntrypointDigest,
         implementationPackage,
@@ -417,6 +420,7 @@ function bakeoffJobIdentity(
           implementationPackage,
           executionEntrypointDigest,
           executionConfigurationPackage,
+          executionConfiguration,
           productPackage.packageId,
         ),
       }),
@@ -497,6 +501,7 @@ interface CapturedVendorResult {
 
 interface SelectedProductAdapter {
   readonly execute: ProductAdapterPort["execute"];
+  readonly executionConfiguration: ProductAdapterExecutionConfiguration;
   readonly executionEntrypointDigest: `sha256:${string}`;
   readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
   readonly implementationPackage: ProductAdapterImplementationPackage;
@@ -544,11 +549,16 @@ function snapshotProductSelections(
           ),
         });
       const selectedExecute = adapter.execute;
+      const executionConfiguration =
+        parseAdapterExecutionConfiguration(
+          executionConfigurationPackage,
+        );
       const executionEntrypointDigest = sha256Bytes(
         new TextEncoder().encode(selectedExecute.toString()),
       );
       return Object.freeze({
-        execute: selectedExecute.bind(adapter),
+        execute: selectedExecute,
+        executionConfiguration,
         executionEntrypointDigest,
         executionConfigurationPackage,
         implementationPackage,
@@ -563,6 +573,7 @@ function adapterImplementationEvidence(
   implementationPackage: ProductAdapterImplementationPackage,
   executionEntrypointDigest: `sha256:${string}`,
   executionConfigurationPackage: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
   productPackageId: string,
 ): {
   readonly implementationDigest: `sha256:${string}`;
@@ -570,6 +581,7 @@ function adapterImplementationEvidence(
   readonly executionConfigurationDigest: `sha256:${string}`;
   readonly executionConfigurationPackageName: string;
   readonly executionConfigurationPackageByteSize: number;
+  readonly executionConfiguration: ProductAdapterExecutionConfiguration;
   readonly implementationPackageName: string;
   readonly implementationPackageByteSize: number;
 } {
@@ -579,13 +591,21 @@ function adapterImplementationEvidence(
   const executionConfigurationDigest = sha256Bytes(
     executionConfigurationPackage.content,
   );
+  const parsedExecutionConfiguration =
+    parseAdapterExecutionConfiguration(
+      executionConfigurationPackage,
+    );
   if (
     implementationDigest !==
       implementationPackage.contentHash ||
     implementationPackage.packageName.trim().length === 0 ||
     executionConfigurationDigest !==
       executionConfigurationPackage.contentHash ||
-    executionConfigurationPackage.packageName.trim().length === 0
+    executionConfigurationPackage.packageName.trim().length === 0 ||
+    !isDeepStrictEqual(
+      parsedExecutionConfiguration,
+      executionConfiguration,
+    )
   ) {
     throw new Error(
       `Adapter implementation package is invalid: ${productPackageId}`,
@@ -599,6 +619,7 @@ function adapterImplementationEvidence(
       executionConfigurationPackage.packageName,
     executionConfigurationPackageByteSize:
       executionConfigurationPackage.content.byteLength,
+    executionConfiguration,
     implementationPackageName:
       implementationPackage.packageName,
     implementationPackageByteSize:
@@ -703,6 +724,7 @@ function replayedBakeoffOutcome(
               selection.implementationPackage,
               selection.executionEntrypointDigest,
               selection.executionConfigurationPackage,
+              selection.executionConfiguration,
               selection.productPackage.packageId,
             ),
           }),
@@ -1007,7 +1029,12 @@ async function executeVendor(
   judgeDestination: EgressDestinationMetadata,
   onReferencePackUse: (evaluationAttemptId: string) => void,
 ): Promise<CapturedVendorResult> {
-  const { execute, productPackage, runId } = selection;
+  const {
+    execute,
+    executionConfiguration,
+    productPackage,
+    runId,
+  } = selection;
   const scenario = KNOWN_VENDOR_SCENARIOS.get(productPackage.packageId);
   const attempts: RunRecord[] = [];
   let retryOfAttemptId: string | null = null;
@@ -1073,15 +1100,18 @@ async function executeVendor(
       try {
         const deadlineResult = await attemptDeadline.run(
           (signal) =>
-            execute({
-              jobId: MOCK_SCENARIO.jobId,
-              runId,
-              attemptId,
-              attemptSeq,
-              timeoutMs: attemptTimeoutMs,
-              signal,
-              evaluationCase: VOLCANO_EVALUATION_CASE,
-            }),
+            execute(
+              {
+                jobId: MOCK_SCENARIO.jobId,
+                runId,
+                attemptId,
+                attemptSeq,
+                timeoutMs: attemptTimeoutMs,
+                signal,
+                evaluationCase: VOLCANO_EVALUATION_CASE,
+              },
+              executionConfiguration,
+            ),
           attemptTimeoutMs,
         );
         observedBudgetRemainingMs = Math.max(

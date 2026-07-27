@@ -1375,6 +1375,49 @@ test("a selected adapter executes the frozen function even when the caller mutat
   assert.equal(replacementCalls, 0);
 });
 
+test("a selected adapter executes with frozen declared configuration instead of live mutable adapter state", async () => {
+  const delegate = new MockWpsProductAdapter();
+  let successCalls = 0;
+  let failureCalls = 0;
+  const mutableAdapter = {
+    mode: "success" as "success" | "failure",
+    implementationPackage: delegate.implementationPackage,
+    executionConfigurationPackage:
+      testExecutionConfigurationPackage("success"),
+    productPackage: delegate.productPackage,
+    async execute(
+      command: Parameters<ProductAdapterPort["execute"]>[0],
+      frozenConfiguration?: unknown,
+    ) {
+      const mode =
+        frozenConfiguration === undefined
+          ? this.mode
+          : (frozenConfiguration as { mode: string }).mode;
+      if (mode === "failure") {
+        failureCalls += 1;
+        throw new Error("live mutable adapter state must not execute");
+      }
+      successCalls += 1;
+      return delegate.execute(command);
+    },
+  };
+  const feishu = new InMemoryFeishuProjection();
+  const pending = createBakeoffHarness({
+    feishu,
+    productAdapters: [mutableAdapter],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  mutableAdapter.mode = "failure";
+
+  const outcome = await pending;
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(successCalls, 1);
+  assert.equal(failureCalls, 0);
+});
+
 test("a settled Bakeoff rejects identical execute source with changed declared closure configuration", async () => {
   const delegate = new MockWpsProductAdapter();
   const calls = { first: 0, changed: 0 };
