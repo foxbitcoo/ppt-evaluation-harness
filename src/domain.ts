@@ -308,6 +308,84 @@ export interface ArtifactScoreTableRecord {
   readonly comparisonCompatibilityFingerprint: ComparisonCompatibilityFingerprint;
 }
 
+export type DimensionReviewState =
+  | "model_not_reviewed"
+  | "human_reviewed";
+
+export type EffectiveScoreSource = "model_original" | "human_adjudication";
+
+export interface ReviewEventRecord {
+  readonly recordType: "review_event";
+  readonly schemaVersion: "review-event-v1";
+  readonly reviewEventId: string;
+  readonly scorecardId: string;
+  readonly artifactId: string;
+  readonly runId: string;
+  readonly jobId: string;
+  readonly reviewedDimensions: readonly ScoreDimension[];
+  readonly decision: "accepted_model_scores";
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+  readonly lastSyncedAt: string;
+  readonly reason: string;
+  readonly priorReviewEventId: string | null;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
+export interface AdjudicationEventRecord {
+  readonly recordType: "adjudication_event";
+  readonly schemaVersion: "adjudication-event-v1";
+  readonly adjudicationEventId: string;
+  readonly scorecardId: string;
+  readonly artifactId: string;
+  readonly runId: string;
+  readonly jobId: string;
+  readonly dimension: ScoreDimension;
+  readonly modelOriginalAssessmentStatus: DimensionAssessmentStatus;
+  readonly modelOriginalScore: ScoreValue | null;
+  readonly humanFinalAssessmentStatus: "ASSESSED";
+  readonly humanFinalScore: ScoreValue;
+  readonly evidencePages: readonly number[];
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+  readonly lastSyncedAt: string;
+  readonly reason: string;
+  readonly priorAdjudicationEventId: string | null;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
+export interface EffectiveDimensionScore {
+  readonly dimension: ScoreDimension;
+  readonly modelOriginalAssessmentStatus: DimensionAssessmentStatus;
+  readonly modelOriginalValue: ScoreValue | null;
+  readonly effectiveAssessmentStatus: DimensionAssessmentStatus;
+  readonly effectiveValue: ScoreValue | null;
+  readonly evidencePages: readonly number[];
+  readonly rationale: string;
+  readonly reviewState: DimensionReviewState;
+  readonly source: EffectiveScoreSource;
+  readonly adjudicationEventId: string | null;
+}
+
+export type ScorecardReviewState =
+  | "model_not_reviewed"
+  | "partially_human_reviewed"
+  | "human_reviewed";
+
+export interface EffectiveArtifactScorecard {
+  readonly scorecardId: string;
+  readonly artifactId: string;
+  readonly runId: string;
+  readonly jobId: string;
+  readonly originalScorecard: ArtifactScorecard;
+  readonly dimensions: readonly EffectiveDimensionScore[];
+  readonly reviewState: ScorecardReviewState;
+}
+
 export interface ComparisonCompatibilityFingerprint {
   readonly caseManifestHash: `sha256:${string}`;
   readonly caseInputHash: `sha256:${string}`;
@@ -356,6 +434,12 @@ export interface ComparisonDimensionResult {
   readonly difference: number | null;
   readonly leftEvidencePages: readonly number[];
   readonly rightEvidencePages: readonly number[];
+  readonly leftReviewState: DimensionReviewState;
+  readonly rightReviewState: DimensionReviewState;
+  readonly leftScoreSource: EffectiveScoreSource;
+  readonly rightScoreSource: EffectiveScoreSource;
+  readonly leftAdjudicationEventId: string | null;
+  readonly rightAdjudicationEventId: string | null;
 }
 
 export interface DynamicComparisonView extends ComparisonRecord {
@@ -408,7 +492,7 @@ export interface ProductGapCardRecord {
   readonly comparisonId: string;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
-  readonly workflowState: "draft";
+  readonly workflowState: "pending_review";
   readonly causeAttribution: "HYPOTHESIS";
   readonly dimension: ScoreDimension;
   readonly keyPages: {
@@ -421,6 +505,74 @@ export interface ProductGapCardRecord {
   readonly causeHypothesis: CauseHypothesis;
   readonly proposedExperiment: string;
   readonly acceptanceMetric: string;
+}
+
+export type ProductGapCardWorkflowState =
+  | "pending_review"
+  | "confirmed_for_delivery"
+  | "rejected";
+
+export interface ProductGapCardWorkflowEventRecord {
+  readonly recordType: "gap_card_workflow_event";
+  readonly schemaVersion: "gap-card-workflow-event-v1";
+  readonly workflowEventId: string;
+  readonly gapCardId: string;
+  readonly decision: Exclude<
+    ProductGapCardWorkflowState,
+    "pending_review"
+  >;
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+  readonly lastSyncedAt: string;
+  readonly reason: string;
+  readonly priorWorkflowEventId: string | null;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
+export interface GitHubIssueLinkEventRecord {
+  readonly recordType: "github_issue_link_event";
+  readonly schemaVersion: "github-issue-link-event-v1";
+  readonly linkEventId: string;
+  readonly gapCardId: string;
+  readonly idempotencyKey: string;
+  readonly confirmedByWorkflowEventId: string;
+  readonly issueNumber: number;
+  readonly issueUrl: string;
+  readonly actorId: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+  readonly lastSyncedAt: string;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
+export interface GitHubIssueDeliveryReservationRecord {
+  readonly recordType: "github_issue_delivery_reservation";
+  readonly schemaVersion: "github-issue-delivery-reservation-v1";
+  readonly reservationId: string;
+  readonly gapCardId: string;
+  readonly idempotencyKey: string;
+  readonly confirmedByWorkflowEventId: string;
+  readonly requestedByActorId: string;
+  readonly occurredAt: string;
+  readonly createdAt: string;
+  readonly lastSyncedAt: string;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+}
+
+export interface LinkedGitHubIssue {
+  readonly issueNumber: number;
+  readonly issueUrl: string;
+}
+
+export interface ProductGapCardWorkflowView {
+  readonly gapCard: ProductGapCardRecord;
+  readonly workflowState: ProductGapCardWorkflowState;
+  readonly latestWorkflowEventId: string | null;
+  readonly githubIssue: LinkedGitHubIssue | null;
 }
 
 export interface VendorFinding {

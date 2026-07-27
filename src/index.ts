@@ -20,6 +20,7 @@ export {
 } from "./environment-origin.ts";
 export {
   InMemoryFeishuProjection,
+  type AdjudicationEventTablePort,
   type ArtifactScoreTablePort,
   type CapturedArtifactTablePort,
   type ComparisonTablePort,
@@ -30,9 +31,27 @@ export {
   type FeishuProjectionSnapshot,
   type InMemoryFeishuProjectionOptions,
   type ProductGapCardTablePort,
+  type ProductGapCardWorkflowTablePort,
   type ReportDocumentPort,
+  type ReviewEventTablePort,
   type RunRecordTablePort,
 } from "./feishu.ts";
+export {
+  createScoreAdjudicationService,
+  type AdjudicateDimensionCommand,
+  type RecordScoreReviewCommand,
+  type ScoreAdjudicationService,
+  type ScoreAdjudicationServiceDependencies,
+} from "./score-adjudication.ts";
+export {
+  createProductGapCardWorkflowService,
+  type CreateLinkedGitHubIssueCommand,
+  type GitHubIssueCreateCommand,
+  type GitHubIssuePort,
+  type ProductGapCardWorkflowService,
+  type ProductGapCardWorkflowServiceDependencies,
+  type RecordProductGapCardDecisionCommand,
+} from "./product-gap-workflow.ts";
 export {
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
@@ -53,6 +72,7 @@ export type {
 } from "./product-adapter.ts";
 export type {
   Artifact,
+  AdjudicationEventRecord,
   ArtifactScorecard,
   ArtifactScoreTableRecord,
   CapturedArtifactTableRecord,
@@ -72,10 +92,20 @@ export type {
   DimensionAssessmentStatus,
   DimensionDeductionBasis,
   DimensionScore,
+  DimensionReviewState,
+  EffectiveArtifactScorecard,
+  EffectiveDimensionScore,
+  EffectiveScoreSource,
   EvaluationInputManifest,
   FeishuReport,
   FeishuReportDraft,
+  GitHubIssueDeliveryReservationRecord,
+  GitHubIssueLinkEventRecord,
+  LinkedGitHubIssue,
   ProductGapCardRecord,
+  ProductGapCardWorkflowEventRecord,
+  ProductGapCardWorkflowState,
+  ProductGapCardWorkflowView,
   ProductGapEvidence,
   PageEvidenceLink,
   PipelineCauseHypothesis,
@@ -84,6 +114,7 @@ export type {
   DynamicComparisonView,
   ObservableAttemptEvent,
   RenderManifest,
+  ReviewEventRecord,
   RunRecord,
   RunStatus,
   JudgeLineage,
@@ -93,6 +124,7 @@ export type {
   JudgeFailureLineage,
   KnowledgeErrorDeduction,
   ScoreDimension,
+  ScorecardReviewState,
   ScoreValue,
   StartBakeoffJobCommand,
   StaticSlideRender,

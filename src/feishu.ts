@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import type {
+  AdjudicationEventRecord,
   ArtifactScorecard,
   ArtifactScoreTableRecord,
   CapturedArtifactTableRecord,
@@ -8,7 +9,11 @@ import type {
   EvaluationCaseRecord,
   FeishuReport,
   FeishuReportDraft,
+  GitHubIssueDeliveryReservationRecord,
+  GitHubIssueLinkEventRecord,
   ProductGapCardRecord,
+  ProductGapCardWorkflowEventRecord,
+  ReviewEventRecord,
   RunRecord,
 } from "./domain.ts";
 import {
@@ -23,6 +28,15 @@ function stableRunReplayPayload(record: RunRecord): unknown {
     ...stable
   } = record;
   return stable;
+}
+
+function cloneWithEnvironmentOrigin<
+  T extends { readonly environmentOrigin: EnvironmentOrigin },
+>(record: T): T {
+  return {
+    ...structuredClone(record),
+    environmentOrigin: record.environmentOrigin,
+  };
 }
 
 export interface EvaluationCaseTablePort {
@@ -42,12 +56,54 @@ export interface ArtifactScoreTablePort {
   appendArtifactScore(record: ArtifactScoreTableRecord): Promise<void>;
 }
 
+export interface AdjudicationEventTablePort {
+  appendAdjudicationEvent(record: AdjudicationEventRecord): Promise<void>;
+  listAdjudicationEvents(
+    scorecardId: string,
+  ): Promise<readonly AdjudicationEventRecord[]>;
+  loadArtifactScoreByScorecardId(
+    scorecardId: string,
+  ): Promise<ArtifactScoreTableRecord>;
+}
+
+export interface ReviewEventTablePort {
+  appendReviewEvent(record: ReviewEventRecord): Promise<void>;
+  listReviewEvents(
+    scorecardId: string,
+  ): Promise<readonly ReviewEventRecord[]>;
+}
+
 export interface CapturedArtifactTablePort {
   appendCapturedArtifact(record: CapturedArtifactTableRecord): Promise<void>;
 }
 
 export interface ProductGapCardTablePort {
   appendProductGapCard(record: ProductGapCardRecord): Promise<void>;
+}
+
+export interface ProductGapCardWorkflowTablePort {
+  loadProductGapCard(gapCardId: string): Promise<ProductGapCardRecord>;
+  appendProductGapCardWorkflowEvent(
+    record: ProductGapCardWorkflowEventRecord,
+  ): Promise<void>;
+  listProductGapCardWorkflowEvents(
+    gapCardId: string,
+  ): Promise<readonly ProductGapCardWorkflowEventRecord[]>;
+  /**
+   * Atomically creates or returns the unique reservation for a Gap Card.
+   */
+  reserveGitHubIssueDelivery(
+    record: GitHubIssueDeliveryReservationRecord,
+  ): Promise<GitHubIssueDeliveryReservationRecord>;
+  loadGitHubIssueDeliveryReservation(
+    gapCardId: string,
+  ): Promise<GitHubIssueDeliveryReservationRecord | null>;
+  appendGitHubIssueLinkEvent(
+    record: GitHubIssueLinkEventRecord,
+  ): Promise<void>;
+  listGitHubIssueLinkEvents(
+    gapCardId: string,
+  ): Promise<readonly GitHubIssueLinkEventRecord[]>;
 }
 
 export interface ComparisonTablePort {
@@ -79,8 +135,11 @@ export interface FeishuProjectionPort
     RunRecordTablePort,
     CapturedArtifactTablePort,
     ArtifactScoreTablePort,
+    AdjudicationEventTablePort,
+    ReviewEventTablePort,
     ComparisonTablePort,
     ProductGapCardTablePort,
+    ProductGapCardWorkflowTablePort,
     ReportDocumentPort,
     ComparisonReportSourcePort {
   readonly targetEnvironment: "test" | "production";
@@ -91,6 +150,11 @@ export interface FeishuProjectionSnapshot {
   readonly runRecordTable: readonly RunRecord[];
   readonly capturedArtifactTable: readonly CapturedArtifactTableRecord[];
   readonly artifactScoreTable: readonly ArtifactScoreTableRecord[];
+  readonly adjudicationEventTable: readonly AdjudicationEventRecord[];
+  readonly reviewEventTable: readonly ReviewEventRecord[];
+  readonly gapCardWorkflowEventTable: readonly ProductGapCardWorkflowEventRecord[];
+  readonly githubIssueDeliveryReservationTable: readonly GitHubIssueDeliveryReservationRecord[];
+  readonly githubIssueLinkEventTable: readonly GitHubIssueLinkEventRecord[];
   readonly productGapCardTable: readonly (
     | ComparisonRecord
     | ProductGapCardRecord
@@ -107,6 +171,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #runRecordTable: RunRecord[] = [];
   readonly #capturedArtifactTable: CapturedArtifactTableRecord[] = [];
   readonly #artifactScoreTable: ArtifactScoreTableRecord[] = [];
+  readonly #adjudicationEventTable: AdjudicationEventRecord[] = [];
+  readonly #reviewEventTable: ReviewEventRecord[] = [];
+  readonly #gapCardWorkflowEventTable: ProductGapCardWorkflowEventRecord[] =
+    [];
+  readonly #githubIssueDeliveryReservationTable: GitHubIssueDeliveryReservationRecord[] =
+    [];
+  readonly #githubIssueLinkEventTable: GitHubIssueLinkEventRecord[] = [];
   readonly #productGapCardTable: (ComparisonRecord | ProductGapCardRecord)[] =
     [];
   readonly #reports: FeishuReport[] = [];
@@ -211,6 +282,158 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#artifactScoreTable.push(record);
   }
 
+  async appendAdjudicationEvent(
+    record: AdjudicationEventRecord,
+  ): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Adjudication Event");
+    const existing = this.#adjudicationEventTable.find(
+      ({ adjudicationEventId }) =>
+        adjudicationEventId === record.adjudicationEventId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, record)) {
+        throw new Error(
+          `Adjudication Event identity conflict: ${record.adjudicationEventId}`,
+        );
+      }
+      return;
+    }
+    const score = this.#artifactScoreTable.find(
+      ({ scorecard }) => scorecard.scorecardId === record.scorecardId,
+    );
+    const dimension = score?.scorecard.dimensions.find(
+      (candidate) => candidate.dimension === record.dimension,
+    );
+    if (
+      score === undefined ||
+      dimension === undefined ||
+      score.artifactId !== record.artifactId ||
+      score.runId !== record.runId ||
+      score.jobId !== record.jobId ||
+      score.provenance !== record.provenance ||
+      score.environmentOrigin !== record.environmentOrigin ||
+      dimension.assessmentStatus !==
+        record.modelOriginalAssessmentStatus ||
+      dimension.value !== record.modelOriginalScore ||
+      dimension.assessmentStatus !== "ASSESSED" ||
+      dimension.value === null ||
+      record.evidencePages.length === 0 ||
+      new Set(record.evidencePages).size !==
+        record.evidencePages.length ||
+      record.evidencePages.some(
+        (pageNumber) =>
+          !Number.isInteger(pageNumber) ||
+          pageNumber < 1 ||
+          pageNumber > score.artifact.pageCount,
+      )
+    ) {
+      throw new Error(
+        "Adjudication Event contains inconsistent model-score lineage",
+      );
+    }
+    const priorEvents = this.#adjudicationEventTable.filter(
+      (event) =>
+        event.scorecardId === record.scorecardId &&
+        event.dimension === record.dimension,
+    );
+    const expectedPrior =
+      priorEvents[priorEvents.length - 1]?.adjudicationEventId ?? null;
+    if (record.priorAdjudicationEventId !== expectedPrior) {
+      throw new Error(
+        `Adjudication Event prior reference conflict: expected ${
+          expectedPrior ?? "null"
+        }`,
+      );
+    }
+    this.#adjudicationEventTable.push(
+      cloneWithEnvironmentOrigin(record),
+    );
+  }
+
+  async listAdjudicationEvents(
+    scorecardId: string,
+  ): Promise<readonly AdjudicationEventRecord[]> {
+    return structuredClone(
+      this.#adjudicationEventTable.filter(
+        (event) => event.scorecardId === scorecardId,
+      ),
+    );
+  }
+
+  async appendReviewEvent(record: ReviewEventRecord): Promise<void> {
+    this.#assertAllowed(record.environmentOrigin, "Review Event");
+    const existing = this.#reviewEventTable.find(
+      ({ reviewEventId }) => reviewEventId === record.reviewEventId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, record)) {
+        throw new Error(
+          `Review Event identity conflict: ${record.reviewEventId}`,
+        );
+      }
+      return;
+    }
+    const score = this.#artifactScoreTable.find(
+      ({ scorecard }) => scorecard.scorecardId === record.scorecardId,
+    );
+    const scoreDimensions = new Set(
+      score?.scorecard.dimensions.map(({ dimension }) => dimension) ?? [],
+    );
+    if (
+      score === undefined ||
+      score.artifactId !== record.artifactId ||
+      score.runId !== record.runId ||
+      score.jobId !== record.jobId ||
+      score.provenance !== record.provenance ||
+      score.environmentOrigin !== record.environmentOrigin ||
+      record.reviewedDimensions.length === 0 ||
+      new Set(record.reviewedDimensions).size !==
+        record.reviewedDimensions.length ||
+      record.reviewedDimensions.some(
+        (dimension) => !scoreDimensions.has(dimension),
+      )
+    ) {
+      throw new Error("Review Event contains inconsistent score lineage");
+    }
+    const expectedPrior =
+      this.#reviewEventTable.filter(
+        (event) => event.scorecardId === record.scorecardId,
+      ).at(-1)?.reviewEventId ?? null;
+    if (record.priorReviewEventId !== expectedPrior) {
+      throw new Error(
+        `Review Event prior reference conflict: expected ${
+          expectedPrior ?? "null"
+        }`,
+      );
+    }
+    this.#reviewEventTable.push(cloneWithEnvironmentOrigin(record));
+  }
+
+  async listReviewEvents(
+    scorecardId: string,
+  ): Promise<readonly ReviewEventRecord[]> {
+    return structuredClone(
+      this.#reviewEventTable.filter(
+        (event) => event.scorecardId === scorecardId,
+      ),
+    );
+  }
+
+  async loadArtifactScoreByScorecardId(
+    scorecardId: string,
+  ): Promise<ArtifactScoreTableRecord> {
+    const score = this.#artifactScoreTable.find(
+      ({ scorecard }) => scorecard.scorecardId === scorecardId,
+    );
+    if (score === undefined) {
+      throw new Error(`Artifact Scorecard not found: ${scorecardId}`);
+    }
+    return {
+      ...structuredClone(score),
+      environmentOrigin: score.environmentOrigin,
+    };
+  }
+
   async appendCapturedArtifact(
     record: CapturedArtifactTableRecord,
   ): Promise<void> {
@@ -278,6 +501,245 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     this.#productGapCardTable.push(record);
+  }
+
+  async loadProductGapCard(
+    gapCardId: string,
+  ): Promise<ProductGapCardRecord> {
+    const card = this.#productGapCardTable.find(
+      (record): record is ProductGapCardRecord =>
+        record.recordType === "gap_card" &&
+        record.gapCardId === gapCardId,
+    );
+    if (card === undefined) {
+      throw new Error(`Product Gap Card not found: ${gapCardId}`);
+    }
+    return {
+      ...structuredClone(card),
+      environmentOrigin: card.environmentOrigin,
+    };
+  }
+
+  async appendProductGapCardWorkflowEvent(
+    record: ProductGapCardWorkflowEventRecord,
+  ): Promise<void> {
+    this.#assertAllowed(
+      record.environmentOrigin,
+      "Product Gap Card workflow event",
+    );
+    const existing = this.#gapCardWorkflowEventTable.find(
+      ({ workflowEventId }) =>
+        workflowEventId === record.workflowEventId,
+    );
+    if (existing !== undefined) {
+      if (!isDeepStrictEqual(existing, record)) {
+        throw new Error(
+          `Product Gap Card workflow event identity conflict: ${record.workflowEventId}`,
+        );
+      }
+      return;
+    }
+    const card = await this.loadProductGapCard(record.gapCardId);
+    if (
+      card.provenance !== record.provenance ||
+      card.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "Product Gap Card workflow event contains inconsistent lineage",
+      );
+    }
+    if (
+      this.#githubIssueLinkEventTable.some(
+        (event) => event.gapCardId === record.gapCardId,
+      )
+    ) {
+      throw new Error(
+        "Product Gap Card workflow is immutable after GitHub Issue delivery",
+      );
+    }
+    const priorEvents = this.#gapCardWorkflowEventTable.filter(
+      (event) => event.gapCardId === record.gapCardId,
+    );
+    const expectedPrior =
+      priorEvents.at(-1)?.workflowEventId ?? null;
+    if (record.priorWorkflowEventId !== expectedPrior) {
+      throw new Error(
+        `Product Gap Card workflow prior reference conflict: expected ${
+          expectedPrior ?? "null"
+        }`,
+      );
+    }
+    if (priorEvents.length > 0) {
+      throw new Error(
+        "Product Gap Card already has a terminal workflow decision",
+      );
+    }
+    this.#gapCardWorkflowEventTable.push(
+      cloneWithEnvironmentOrigin(record),
+    );
+  }
+
+  async listProductGapCardWorkflowEvents(
+    gapCardId: string,
+  ): Promise<readonly ProductGapCardWorkflowEventRecord[]> {
+    return structuredClone(
+      this.#gapCardWorkflowEventTable.filter(
+        (event) => event.gapCardId === gapCardId,
+      ),
+    );
+  }
+
+  async reserveGitHubIssueDelivery(
+    record: GitHubIssueDeliveryReservationRecord,
+  ): Promise<GitHubIssueDeliveryReservationRecord> {
+    this.#assertAllowed(
+      record.environmentOrigin,
+      "GitHub Issue delivery reservation",
+    );
+    const card = await this.loadProductGapCard(record.gapCardId);
+    const existing =
+      this.#githubIssueDeliveryReservationTable.find(
+        (reservation) =>
+          reservation.gapCardId === record.gapCardId ||
+          reservation.reservationId === record.reservationId,
+      );
+    if (existing !== undefined) {
+      if (
+        existing.gapCardId !== record.gapCardId ||
+        existing.reservationId !== record.reservationId ||
+        existing.idempotencyKey !== record.idempotencyKey ||
+        existing.confirmedByWorkflowEventId !==
+          record.confirmedByWorkflowEventId
+      ) {
+        throw new Error(
+          `GitHub Issue delivery reservation conflict: ${record.gapCardId}`,
+        );
+      }
+      return {
+        ...structuredClone(existing),
+        environmentOrigin: existing.environmentOrigin,
+      };
+    }
+    const confirmation = this.#gapCardWorkflowEventTable.find(
+      (event) =>
+        event.workflowEventId ===
+          record.confirmedByWorkflowEventId &&
+        event.gapCardId === record.gapCardId &&
+        event.decision === "confirmed_for_delivery",
+    );
+    if (
+      confirmation === undefined ||
+      card.provenance !== record.provenance ||
+      card.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "GitHub Issue delivery reservation requires a matching confirmed Product Gap Card",
+      );
+    }
+    const stored = cloneWithEnvironmentOrigin(record);
+    this.#githubIssueDeliveryReservationTable.push(stored);
+    return {
+      ...structuredClone(stored),
+      environmentOrigin: stored.environmentOrigin,
+    };
+  }
+
+  async loadGitHubIssueDeliveryReservation(
+    gapCardId: string,
+  ): Promise<GitHubIssueDeliveryReservationRecord | null> {
+    const reservation =
+      this.#githubIssueDeliveryReservationTable.find(
+        (candidate) => candidate.gapCardId === gapCardId,
+      );
+    return reservation === undefined
+      ? null
+      : {
+          ...structuredClone(reservation),
+          environmentOrigin: reservation.environmentOrigin,
+        };
+  }
+
+  async appendGitHubIssueLinkEvent(
+    record: GitHubIssueLinkEventRecord,
+  ): Promise<void> {
+    this.#assertAllowed(
+      record.environmentOrigin,
+      "GitHub Issue link event",
+    );
+    const existingById = this.#githubIssueLinkEventTable.find(
+      ({ linkEventId }) => linkEventId === record.linkEventId,
+    );
+    if (existingById !== undefined) {
+      if (!isDeepStrictEqual(existingById, record)) {
+        throw new Error(
+          `GitHub Issue link event identity conflict: ${record.linkEventId}`,
+        );
+      }
+      return;
+    }
+    const existingForCard = this.#githubIssueLinkEventTable.find(
+      (event) => event.gapCardId === record.gapCardId,
+    );
+    if (existingForCard !== undefined) {
+      if (!isDeepStrictEqual(existingForCard, record)) {
+        throw new Error(
+          `Product Gap Card GitHub linkage conflict: ${record.gapCardId}`,
+        );
+      }
+      return;
+    }
+    const card = await this.loadProductGapCard(record.gapCardId);
+    const concurrentExisting = this.#githubIssueLinkEventTable.find(
+      (event) =>
+        event.linkEventId === record.linkEventId ||
+        event.gapCardId === record.gapCardId,
+    );
+    if (concurrentExisting !== undefined) {
+      if (!isDeepStrictEqual(concurrentExisting, record)) {
+        throw new Error(
+          `Product Gap Card GitHub linkage conflict: ${record.gapCardId}`,
+        );
+      }
+      return;
+    }
+    const confirmation = this.#gapCardWorkflowEventTable.find(
+      (event) =>
+        event.workflowEventId ===
+          record.confirmedByWorkflowEventId &&
+        event.gapCardId === record.gapCardId &&
+        event.decision === "confirmed_for_delivery",
+    );
+    const reservation =
+      this.#githubIssueDeliveryReservationTable.find(
+        (candidate) =>
+          candidate.gapCardId === record.gapCardId &&
+          candidate.idempotencyKey === record.idempotencyKey &&
+          candidate.confirmedByWorkflowEventId ===
+            record.confirmedByWorkflowEventId,
+      );
+    if (
+      confirmation === undefined ||
+      reservation === undefined ||
+      card.provenance !== record.provenance ||
+      card.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "GitHub Issue link requires a matching confirmed Product Gap Card",
+      );
+    }
+    this.#githubIssueLinkEventTable.push(
+      cloneWithEnvironmentOrigin(record),
+    );
+  }
+
+  async listGitHubIssueLinkEvents(
+    gapCardId: string,
+  ): Promise<readonly GitHubIssueLinkEventRecord[]> {
+    return structuredClone(
+      this.#githubIssueLinkEventTable.filter(
+        (event) => event.gapCardId === gapCardId,
+      ),
+    );
   }
 
   async createReport(draft: FeishuReportDraft): Promise<FeishuReport> {
@@ -384,6 +846,19 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       runRecordTable: structuredClone(this.#runRecordTable),
       capturedArtifactTable: structuredClone(this.#capturedArtifactTable),
       artifactScoreTable: structuredClone(this.#artifactScoreTable),
+      adjudicationEventTable: structuredClone(
+        this.#adjudicationEventTable,
+      ),
+      reviewEventTable: structuredClone(this.#reviewEventTable),
+      gapCardWorkflowEventTable: structuredClone(
+        this.#gapCardWorkflowEventTable,
+      ),
+      githubIssueDeliveryReservationTable: structuredClone(
+        this.#githubIssueDeliveryReservationTable,
+      ),
+      githubIssueLinkEventTable: structuredClone(
+        this.#githubIssueLinkEventTable,
+      ),
       productGapCardTable: structuredClone(this.#productGapCardTable),
       reports: structuredClone(this.#reports),
     };

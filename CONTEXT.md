@@ -73,6 +73,15 @@ _Avoid_: Screenshot, completion signal, cloud URL without snapshot
 An actionable comparison finding containing page evidence, severity, scope, a clearly labeled pipeline-cause hypothesis, a proposed experiment, and an acceptance metric.
 _Avoid_: Proven root cause, generic recommendation
 
+**Score Adjudication**:
+An append-only human decision that preserves the model-original dimension score and records the human-final score, actor, time, reason, evidence, and prior adjudication reference. Effective score views use the latest valid human adjudication and otherwise fall back to the model original.
+An adjudication cannot change `NOT_ASSESSABLE` into an assessed score; newly available reviewed reference evidence requires a new Scorecard whose input manifest and compatibility fingerprint freeze that Reference Pack.
+_Avoid_: Overwritten model score, mutable review flag
+
+**Gap Card Delivery Workflow**:
+The PM-controlled transition of a Gap Card from `pending_review` to either `confirmed_for_delivery` or `rejected`. Only `confirmed_for_delivery` cards may reserve delivery and create or recover one idempotently linked GitHub Issue; the reservation, workflow decision, and link remain append-only audit records.
+_Avoid_: Draft means approved, automatic issue creation
+
 **Selection Utility**:
 A long-term, user/scenario-specific recommendation signal that combines Artifact Quality, Human Preference, and Operational Metrics through an explicit utility profile.
 _Avoid_: LLM aesthetic score, universal leaderboard

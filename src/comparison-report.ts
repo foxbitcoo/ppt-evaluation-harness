@@ -7,8 +7,9 @@ import type {
   ComparisonReportOutcome,
   CauseHypothesis,
   CapturedArtifactTableRecord,
-  DimensionScore,
   DynamicComparisonView,
+  EffectiveArtifactScorecard,
+  EffectiveDimensionScore,
   FeishuReportDraft,
   PageEvidenceLink,
   ProductGapCardRecord,
@@ -19,6 +20,7 @@ import type {
   VendorFinding,
 } from "./domain.ts";
 import type { FeishuProjectionPort } from "./feishu.ts";
+import { createScoreAdjudicationService } from "./score-adjudication.ts";
 
 export interface CreateComparisonReportCommand {
   readonly jobId: string;
@@ -37,8 +39,12 @@ export interface ComparisonReportServiceDependencies {
 
 interface ScoredRun {
   readonly run: RunRecord & { readonly product: string };
-  readonly score: ArtifactScoreTableRecord;
+  readonly score: EffectiveArtifactScoreTableRecord;
 }
+
+type EffectiveArtifactScoreTableRecord = ArtifactScoreTableRecord & {
+  readonly effectiveScorecard: EffectiveArtifactScorecard;
+};
 
 function shortHash(value: unknown): string {
   return createHash("sha256")
@@ -50,7 +56,7 @@ function shortHash(value: unknown): string {
 function scoredRunById(
   runId: string,
   vendorRuns: readonly RunRecord[],
-  scores: readonly ArtifactScoreTableRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
   scorecardId?: string,
 ): ScoredRun {
   const run = vendorRuns.find(({ recordId }) => recordId === runId);
@@ -76,8 +82,8 @@ function scoredRunById(
 }
 
 function dimensionsByName(
-  dimensions: readonly DimensionScore[],
-): ReadonlyMap<ScoreDimension, DimensionScore> {
+  dimensions: readonly EffectiveDimensionScore[],
+): ReadonlyMap<ScoreDimension, EffectiveDimensionScore> {
   return new Map(
     dimensions.map((dimension) => [dimension.dimension, dimension]),
   );
@@ -110,7 +116,7 @@ function comparePair(
   jobId: string,
   pair: ComparisonPairSelection,
   vendorRuns: readonly RunRecord[],
-  scores: readonly ArtifactScoreTableRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
 ): DynamicComparisonView {
   if (pair.leftRunId === pair.rightRunId) {
     throw new Error("A Comparison View requires two distinct Runs");
@@ -146,40 +152,59 @@ function comparePair(
   }
 
   const rightDimensions = dimensionsByName(
-    right.score.scorecard.dimensions,
+    right.score.effectiveScorecard.dimensions,
   );
-  const dimensions = left.score.scorecard.dimensions.map((leftDimension) => {
-    const rightDimension = rightDimensions.get(leftDimension.dimension);
-    if (rightDimension === undefined) {
-      throw new Error("Selected Scorecards use incompatible dimensions");
-    }
-    const leftAssessable =
-      leftDimension.assessmentStatus === "ASSESSED" &&
-      leftDimension.value !== null;
-    const rightAssessable =
-      rightDimension.assessmentStatus === "ASSESSED" &&
-      rightDimension.value !== null;
-    const assessable = leftAssessable && rightAssessable;
-    return {
-      dimension: leftDimension.dimension,
-      assessmentStatus: assessable
-        ? ("ASSESSED" as const)
-        : ("NOT_ASSESSABLE" as const),
-      leftAssessmentStatus: leftAssessable
-        ? ("ASSESSED" as const)
-        : ("NOT_ASSESSABLE" as const),
-      rightAssessmentStatus: rightAssessable
-        ? ("ASSESSED" as const)
-        : ("NOT_ASSESSABLE" as const),
-      leftValue: leftAssessable ? leftDimension.value : null,
-      rightValue: rightAssessable ? rightDimension.value : null,
-      difference: assessable
-        ? leftDimension.value - rightDimension.value
-        : null,
-      leftEvidencePages: leftDimension.evidencePages,
-      rightEvidencePages: rightDimension.evidencePages,
-    };
-  });
+  const dimensions = left.score.effectiveScorecard.dimensions.map(
+    (leftDimension) => {
+      const rightDimension = rightDimensions.get(
+        leftDimension.dimension,
+      );
+      if (rightDimension === undefined) {
+        throw new Error(
+          "Selected Scorecards use incompatible dimensions",
+        );
+      }
+      const leftAssessable =
+        leftDimension.effectiveAssessmentStatus === "ASSESSED" &&
+        leftDimension.effectiveValue !== null;
+      const rightAssessable =
+        rightDimension.effectiveAssessmentStatus === "ASSESSED" &&
+        rightDimension.effectiveValue !== null;
+      const assessable = leftAssessable && rightAssessable;
+      return {
+        dimension: leftDimension.dimension,
+        assessmentStatus: assessable
+          ? ("ASSESSED" as const)
+          : ("NOT_ASSESSABLE" as const),
+        leftAssessmentStatus: leftAssessable
+          ? ("ASSESSED" as const)
+          : ("NOT_ASSESSABLE" as const),
+        rightAssessmentStatus: rightAssessable
+          ? ("ASSESSED" as const)
+          : ("NOT_ASSESSABLE" as const),
+        leftValue: leftAssessable
+          ? leftDimension.effectiveValue
+          : null,
+        rightValue: rightAssessable
+          ? rightDimension.effectiveValue
+          : null,
+        difference: assessable
+          ? leftDimension.effectiveValue -
+            rightDimension.effectiveValue
+          : null,
+        leftEvidencePages: leftDimension.evidencePages,
+        rightEvidencePages: rightDimension.evidencePages,
+        leftReviewState: leftDimension.reviewState,
+        rightReviewState: rightDimension.reviewState,
+        leftScoreSource: leftDimension.source,
+        rightScoreSource: rightDimension.source,
+        leftAdjudicationEventId:
+          leftDimension.adjudicationEventId,
+        rightAdjudicationEventId:
+          rightDimension.adjudicationEventId,
+      };
+    },
+  );
   const knownComparisonIds = new Map<string, string>([
     [
       "MOCK-run-wps-volcano-v1|MOCK-run-qwen-volcano-v1",
@@ -242,10 +267,31 @@ function reportDraft(
   comparisons: readonly DynamicComparisonView[],
   gapCards: readonly ProductGapCardRecord[],
   vendorSummaries: readonly VendorComparisonSummary[],
-  scores: readonly ArtifactScoreTableRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
 ): FeishuReportDraft {
   const reportKey = shortHash(
-    comparisons.map(({ comparisonId }) => comparisonId),
+    comparisons.map(({ comparisonId, dimensions }) => ({
+      comparisonId,
+      dimensions: dimensions.map(
+        ({
+          dimension,
+          leftValue,
+          rightValue,
+          leftReviewState,
+          rightReviewState,
+          leftAdjudicationEventId,
+          rightAdjudicationEventId,
+        }) => ({
+          dimension,
+          leftValue,
+          rightValue,
+          leftReviewState,
+          rightReviewState,
+          leftAdjudicationEventId,
+          rightAdjudicationEventId,
+        }),
+      ),
+    })),
   );
   const comparisonSections = comparisons
     .map(
@@ -261,6 +307,8 @@ ${comparison.dimensions
       rightValue,
       leftEvidencePages,
       rightEvidencePages,
+      leftReviewState,
+      rightReviewState,
     }) => {
       const leftScore = scores.find(
         ({ scorecard }) =>
@@ -282,9 +330,23 @@ ${comparison.dimensions
               rightScore.artifactId,
               rightEvidencePages,
             )}`;
-      return `| ${DIMENSION_SPECS[dimension].label} | ${
-        leftValue ?? "NOT_ASSESSABLE"
-      } | ${rightValue ?? "NOT_ASSESSABLE"} | ${evidence} |`;
+      const display = (
+        value: number | null,
+        reviewState: "model_not_reviewed" | "human_reviewed",
+      ) => `${
+        value ?? "NOT_ASSESSABLE"
+      }（${
+        reviewState === "human_reviewed"
+          ? "人工已复核"
+          : "模型未复核"
+      }）`;
+      return `| ${DIMENSION_SPECS[dimension].label} | ${display(
+        leftValue,
+        leftReviewState,
+      )} | ${display(
+        rightValue,
+        rightReviewState,
+      )} | ${evidence} |`;
     },
   )
   .join("\n")}`,
@@ -403,13 +465,13 @@ const DIMENSION_SPECS: Readonly<
     label: "叙事与受众适配",
     hypothesis: "outline_or_content",
     experiment: "冻结视觉模板，A/B 测试叙事顺序和受众约束注入。",
-    metric: "盲评叙事维度提高至少 1 个等级，关键页阅读路径无回退。",
+    metric: "按冻结的 evaluation_mode: non_blind 协议，叙事维度提高至少 1 个等级，关键页阅读路径无回退。",
   },
   visual_aesthetics_and_professional_finish: {
     label: "视觉美感与专业完成度",
     hypothesis: "layout_selection",
     experiment: "冻结内容，A/B 测试模板检索与视觉风格选择。",
-    metric: "盲评视觉完成度提高至少 1 个等级，静态一致性门禁保持通过。",
+    metric: "按冻结的 evaluation_mode: non_blind 协议，视觉完成度提高至少 1 个等级，静态一致性门禁保持通过。",
   },
   layout_hierarchy_and_readability: {
     label: "版式层级与可读性",
@@ -466,13 +528,13 @@ function evidenceForDimension(
   scoredRun: ScoredRun,
   dimension: ScoreDimension,
 ): ProductGapEvidence {
-  const score = scoredRun.score.scorecard.dimensions.find(
+  const score = scoredRun.score.effectiveScorecard.dimensions.find(
     (candidate) => candidate.dimension === dimension,
   );
   if (
     score === undefined ||
-    score.assessmentStatus !== "ASSESSED" ||
-    score.value === null
+    score.effectiveAssessmentStatus !== "ASSESSED" ||
+    score.effectiveValue === null
   ) {
     throw new Error(`Gap evidence is not assessable: ${dimension}`);
   }
@@ -481,7 +543,7 @@ function evidenceForDimension(
     runId: scoredRun.run.recordId,
     artifactId: scoredRun.score.artifactId,
     scorecardId: scoredRun.score.scorecard.scorecardId,
-    value: score.value,
+    value: score.effectiveValue,
     rationale: score.rationale,
     links: score.evidencePages
       .slice(0, 3)
@@ -499,7 +561,7 @@ function createGapCards(
   feishu: FeishuProjectionPort,
   comparisons: readonly DynamicComparisonView[],
   vendorRuns: readonly RunRecord[],
-  scores: readonly ArtifactScoreTableRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
 ): readonly ProductGapCardRecord[] {
   return comparisons
     .flatMap((comparison, comparisonIndex) =>
@@ -550,13 +612,15 @@ function createGapCards(
         gapCardId: `gap-${shortHash([
           comparison.comparisonId,
           dimension.dimension,
+          dimension.leftAdjudicationEventId,
+          dimension.rightAdjudicationEventId,
         ])}`,
         caseId: comparison.caseId,
         jobId: comparison.jobId,
         comparisonId: comparison.comparisonId,
         provenance: comparison.provenance,
         environmentOrigin: comparison.environmentOrigin,
-        workflowState: "draft",
+        workflowState: "pending_review",
         causeAttribution: "HYPOTHESIS",
         dimension: dimension.dimension,
         keyPages: {
@@ -583,7 +647,7 @@ function createVendorSummaries(
   feishu: FeishuProjectionPort,
   comparisons: readonly DynamicComparisonView[],
   vendorRuns: readonly RunRecord[],
-  scores: readonly ArtifactScoreTableRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
 ): readonly VendorComparisonSummary[] {
   const summaries = new Map<
     string,
@@ -631,7 +695,7 @@ function createVendorSummaries(
         `Artifact Scorecard not found for selection: ${scorecardId}`,
       );
     }
-    const assessment = score.scorecard.dimensions.find(
+    const assessment = score.effectiveScorecard.dimensions.find(
       (candidate) => candidate.dimension === dimension,
     );
     return (
@@ -722,7 +786,7 @@ function createVendorSummaries(
 
 function defaultViewPairs(
   vendorRuns: readonly RunRecord[],
-  scores: readonly ArtifactScoreTableRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
 ): readonly ComparisonPairSelection[] {
   const scoredRunIds = new Set(scores.map(({ runId }) => runId));
   const runIdForVendor = (vendorId: string): string | null =>
@@ -748,9 +812,22 @@ export function createComparisonReportService({
   return {
     async createReport(command) {
       const source = await feishu.loadComparisonReportSource(command.jobId);
+      const adjudicationService = createScoreAdjudicationService({
+        feishu,
+      });
+      const effectiveScores: readonly EffectiveArtifactScoreTableRecord[] =
+        await Promise.all(
+          source.artifactScores.map(async (score) => ({
+            ...score,
+            effectiveScorecard:
+              await adjudicationService.getEffectiveScorecardForRecord(
+                score,
+              ),
+          })),
+        );
       const pairs =
         command.pairs ??
-        defaultViewPairs(source.vendorRuns, source.artifactScores);
+        defaultViewPairs(source.vendorRuns, effectiveScores);
       if (pairs.length === 0) {
         throw new Error("A comparison report requires at least one pair");
       }
@@ -759,17 +836,28 @@ export function createComparisonReportService({
           command.jobId,
           pair,
           source.vendorRuns,
-          source.artifactScores,
+          effectiveScores,
         ),
       );
       for (const comparison of comparisons) {
-        await feishu.appendComparison(comparison);
+        await feishu.appendComparison({
+          recordType: comparison.recordType,
+          comparisonId: comparison.comparisonId,
+          caseId: comparison.caseId,
+          jobId: comparison.jobId,
+          leftRunId: comparison.leftRunId,
+          rightRunId: comparison.rightRunId,
+          leftScorecardId: comparison.leftScorecardId,
+          rightScorecardId: comparison.rightScorecardId,
+          provenance: comparison.provenance,
+          environmentOrigin: comparison.environmentOrigin,
+        });
       }
       const gapCards = createGapCards(
         feishu,
         comparisons,
         source.vendorRuns,
-        source.artifactScores,
+        effectiveScores,
       );
       for (const gapCard of gapCards) {
         await feishu.appendProductGapCard(gapCard);
@@ -778,7 +866,7 @@ export function createComparisonReportService({
         feishu,
         comparisons,
         source.vendorRuns,
-        source.artifactScores,
+        effectiveScores,
       );
       const report = await feishu.createReport(
         reportDraft(
@@ -789,7 +877,7 @@ export function createComparisonReportService({
           comparisons,
           gapCards,
           vendorSummaries,
-          source.artifactScores,
+          effectiveScores,
         ),
       );
       await feishu.linkReportToBakeoffJob(
