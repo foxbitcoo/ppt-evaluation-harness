@@ -357,11 +357,7 @@ async function executeVendor(
         };
       }
     }
-    terminalReason =
-      result.terminalReason === "vendor_timeout" &&
-      vendorReportedElapsedMs !== null
-        ? "technical_failure"
-        : result.terminalReason;
+    terminalReason = result.terminalReason;
     status = statusFromTerminalReason(terminalReason);
     attempts.push(
       attemptRecord({

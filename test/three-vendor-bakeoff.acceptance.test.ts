@@ -1210,6 +1210,32 @@ test("measured deadline time overrides a successful adapter's self-reported elap
   assert.equal(attempt?.vendorReportedElapsedMs, 1_800_000);
 });
 
+test("an explicit vendor timeout remains timed out without trusting its self-reported elapsed time", async () => {
+  const feishu = new InMemoryFeishuProjection();
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockQwenProductAdapter({ scenario: "timeout" }),
+    ],
+    attemptDeadline: deterministicDeadline({ successElapsedMs: 5 }),
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const attempt = feishu
+    .snapshot()
+    .runRecordTable.find(
+      ({ recordType }) => recordType === "evaluation_attempt",
+    );
+
+  assert.equal(outcome.job.status, "failed");
+  assert.equal(attempt?.status, "timed_out");
+  assert.equal(attempt?.terminalReason, "vendor_timeout");
+  assert.equal(attempt?.elapsedMs, 5);
+  assert.equal(attempt?.vendorReportedElapsedMs, 1_800_000);
+});
+
 test("package metadata and derived Run IDs are snapshotted before any adapter executes", async () => {
   const wps = new MockWpsProductAdapter();
   const qwen = new MockQwenProductAdapter();
