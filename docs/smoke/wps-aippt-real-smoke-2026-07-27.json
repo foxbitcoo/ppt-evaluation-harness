@@ -53,10 +53,10 @@
   "buildIdentity": {
     "specCommitSha": "28c1ec3dfe04cb8b5355311d42e9f2307eb918b1",
     "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-    "sourceArchiveDigest": "sha256:ea981a3611f5ba9f23c18c6ba25e24cc6245b7c35dce0239d07c58ff3dbf19fa",
+    "sourceArchiveDigest": "sha256:7700a29d871b78aa8d5ae4040721af46ca31ab4de49557e1ed5142222bf3374b",
     "sourceArchiveEntryCount": 36,
-    "embeddedManifestHash": "sha256:07a05be2ec3b6c1b8186c810a1338b61555f74a11322ffaaa5132afa6dff7645",
-    "manifestHash": "sha256:bb7495a9c2fa0f70be0cd6a1ee8996a4e3fab19738c3bc3ebff62469774319dd"
+    "embeddedManifestHash": "sha256:416e111fc4033e7563741ddb048867648a4608c1f557808cc0971da27c06078f",
+    "manifestHash": "sha256:55bf288272868d10eb79921038717508bd5abaecec85e85896e274a571f028ee"
   },
   "artifact": {
     "filename": "火山为什么会喷发？(1).pptx",
@@ -70,8 +70,8 @@
   "durableRecoveryRehearsal": {
     "status": "observed_real_provider_replay_ingest_recovered",
     "executionEvidencePresent": true,
-    "artifactPackageManifestHash": "sha256:b491165950348f58f169573e9619abe54db992b56fa0d068cbfccb3915261f77",
-    "artifactIdentityHash": "sha256:49a6c1b87a8dc932cc1e53e8c2504f605702564d14d77918ad7621995f1d7a74",
+    "artifactPackageManifestHash": "sha256:eed2f1a89d15f1cad6ee35687bb75a51e5314b8a79c9ce746617956ea6760eec",
+    "artifactIdentityHash": "sha256:d444a06dcc29ddb7f7deaa682fd8c248cb213cabea1818963ec0e1e64eafb16b",
     "recoveredOriginalHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
     "derivativeCount": 33,
     "recoveredDerivativeCount": 33,
@@ -83,21 +83,21 @@
     "artifactStorage": {
       "primaryRootReference": "root:wps-replay-artifact-primary",
       "primaryStoreId": "wps-replay-artifact-primary-v3",
-      "primaryBackendInstanceIdentity": "fs-backend:sha256:375e453122b2eae89b0d7e055f06e3bd08e405836618285cd75ff1c0ed3d47f4",
+      "primaryBackendInstanceIdentity": "fs-backend:sha256:42645b39977d124055ffbb4898c03748a31c6d30f42d8d0b19b6072d8cd4ef5f",
       "recoveryRootReference": "root:wps-replay-artifact-recovery",
       "recoveryStoreId": "wps-replay-artifact-recovery-v3",
-      "recoveryBackendInstanceIdentity": "fs-backend:sha256:bc463d14f1a0cfbd57e3c9e0c4bd96448cf496e194393e84f1dcf01544c9e01f",
+      "recoveryBackendInstanceIdentity": "fs-backend:sha256:19760f2ad03d1aa1f090467e8c720741593013f720ada0b55a36c17bb1b8d35a",
       "manifestRecoveryKey": "artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/manifest",
-      "manifestRecoveryHash": "sha256:49a6c1b87a8dc932cc1e53e8c2504f605702564d14d77918ad7621995f1d7a74",
+      "manifestRecoveryHash": "sha256:d444a06dcc29ddb7f7deaa682fd8c248cb213cabea1818963ec0e1e64eafb16b",
       "originalRecoveryKey": "artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/original",
       "originalRecoveryHash": "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86"
     },
     "runSpecificationStorage": {
       "rootReference": "root:wps-replay-run-specification",
       "storeId": "wps-replay-run-specification-v3",
-      "backendInstanceIdentity": "fs-backend:sha256:645c6bf4c2c8d308bcd46194a0659633f470e50995d58e90617278ff35cb5d00",
-      "key": "run-specifications/a6ade3dd8eb73948cce5e6c29bf926ee0c484bb9df36fa377e33025502357fba",
-      "contentHash": "sha256:a6ade3dd8eb73948cce5e6c29bf926ee0c484bb9df36fa377e33025502357fba",
+      "backendInstanceIdentity": "fs-backend:sha256:d723d80dc25dcf2d6946b4fd92f320c2ce9437c0b45929aea6a48aba8cd47d82",
+      "key": "run-specifications/623a17ee80725691f129ab03cd63c8c5fe0d829006c18d88f1432f633b61763d",
+      "contentHash": "sha256:623a17ee80725691f129ab03cd63c8c5fe0d829006c18d88f1432f633b61763d",
       "caseProvenance": "PRODUCTION"
     },
     "checkpointStorage": {
@@ -108,14 +108,14 @@
       "replayAvailable": true
     },
     "durableRootRegistry": {
-      "registryId": "wps-real-provider-20260727-round5-freeze",
-      "registryHash": "sha256:d0ed82aa6d4a09afb353f6ab025480a1806c25deb26e06132f1d16fff391f09d",
+      "registryId": "wps-real-provider-20260727-round5-deadline-freeze",
+      "registryHash": "sha256:7293af20db4c0ca2f170c3f10083f116c8150b9cc81a1b66419a5f500b57a91e",
       "operationalRootReference": "root:wps-replay-operational"
     },
-    "recoveryCommand": "node --import tsx scripts/recover-wps-production-run.ts wps-real-provider-20260727-round5-freeze root:wps-replay-artifact-recovery root:wps-replay-run-specification root:wps-replay-checkpoint wps-replay-artifact-recovery-v3 artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/manifest artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/original wps-replay-run-specification-v3 run-specifications/a6ade3dd8eb73948cce5e6c29bf926ee0c484bb9df36fa377e33025502357fba wps-replay-checkpoints-v3 production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1",
+    "recoveryCommand": "node --import tsx scripts/recover-wps-production-run.ts wps-real-provider-20260727-round5-deadline-freeze root:wps-replay-artifact-recovery root:wps-replay-run-specification root:wps-replay-checkpoint wps-replay-artifact-recovery-v3 artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/manifest artifacts/production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1-artifact-c87cf5bd16ee81eb/original wps-replay-run-specification-v3 run-specifications/623a17ee80725691f129ab03cd63c8c5fe0d829006c18d88f1432f633b61763d wps-replay-checkpoints-v3 production-replay-run-wps-aippt-real-provider-replay-v-97e08cde980732ac5f86c80cdedfd618-volcano-v1-attempt-1",
     "recoveryCliExecuted": true,
     "recoveryCliResultReference": "root:wps-replay-operational:recovery-cli-result.json",
-    "recoveryCliResultHash": "sha256:b9daa802978a15df24ff91e0078dd038b89e8843d12d9a489c603f84efd4a54e"
+    "recoveryCliResultHash": "sha256:e63704ca2a2c7233dff6b1cc276f4f46dc2e888b923704682289b1334fed0ac8"
   },
   "render": {
     "pipeline": "libreoffice-impress+pdftoppm",
@@ -124,7 +124,7 @@
     "fidelityStatus": "degraded",
     "visualAssessment": "NOT_ASSESSABLE",
     "faithfulVisualGate": "CONDITIONAL",
-    "renderManifestHash": "sha256:f6b740c41862c749edb5c52d594edf9979e4f1246415ea11e0b1f6d2656e8f2e",
+    "renderManifestHash": "sha256:45f9222767e6efb2608b04573babbc14d35f9a13180eafede1d054a37132e7ed",
     "pdfHash": "sha256:21a1ce7cb1624e20a1dd23e45287e7aa53728a630f54aaf41b65be3bca19780e",
     "firstPageHash": "sha256:557823f094c26392fe495aee58d621df8a02f9729dae5c4176e44934dc6d503e",
     "lastPageHash": "sha256:e4b24e51f7ead5cf95b91cc8a80ce7af39911e7ae8fd920672944e44a6658555",

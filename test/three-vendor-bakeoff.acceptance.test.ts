@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   InMemoryFeishuProjection,
+  InMemoryAttemptCheckpointStore,
   InMemoryReferencePackStore,
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
@@ -1047,6 +1048,60 @@ test("a timed-out Attempt cannot finalize before adapter shutdown and reconcilia
       ),
     false,
   );
+});
+
+test("a submitted checkpoint plus post-abort rejection cannot finalize without durable reconciliation", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "submitted-abort-reconciliation-checkpoints",
+  );
+  const incompleteDeadline: AttemptDeadlinePort = {
+    async run(operation, timeoutMs) {
+      const controller = new AbortController();
+      const running = operation(controller.signal);
+      await checkpoints.append({
+        eventId: "submitted-abort-attempt-event-1",
+        jobId: "MOCK-job-volcano-v1",
+        caseId: VOLCANO_CASE_ID,
+        runId: "MOCK-run-wps-volcano-v1",
+        attemptId: "MOCK-run-wps-volcano-v1-attempt-1",
+        attemptSeq: 1,
+        eventType: "query_submitted",
+        sourceAt: "2026-01-01T00:00:00.000Z",
+        observedAt: "2026-01-01T00:00:00.001Z",
+        writerId: "wps-aippt-browser@1",
+        evidenceRef: "ev_submitted_abort_0001",
+        submissionEvidenceAtCheckpoint: "submitted",
+        vendorTaskId: "task_submitted_abort_0001",
+        taskStateVersion: "submitted@2",
+        adapterVersion: "wps-aippt-browser@1",
+        artifactId: null,
+      });
+      controller.abort();
+      await assert.rejects(running, /adapter aborted/i);
+      return {
+        timedOut: true,
+        elapsedMs: timeoutMs,
+        shutdownCompleted: true,
+      };
+    },
+  };
+
+  await assert.rejects(
+    createBakeoffHarness({
+      feishu,
+      productAdapter: new MockWpsProductAdapter({
+        scenario: "hung",
+      }),
+      attemptDeadline: incompleteDeadline,
+      attemptCheckpointStore: checkpoints,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+    }),
+    /submitted.*reconciliation.*incomplete/i,
+  );
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
 });
 
 test("a thrown adapter error becomes a persisted technical failure with unknown submission evidence", async () => {

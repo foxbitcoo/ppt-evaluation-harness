@@ -661,6 +661,15 @@ class ArtifactPackageIdentityConflictError extends Error {
   }
 }
 
+class UnresolvedAttemptShutdownError extends Error {
+  constructor(attemptId: string) {
+    super(
+      `Submitted Attempt ${attemptId} shutdown is unresolved: durable reconciliation is incomplete`,
+    );
+    this.name = "UnresolvedAttemptShutdownError";
+  }
+}
+
 function snapshotProductSelections(
   adapters: readonly ProductAdapterPort[],
   dependencies: {
@@ -1247,6 +1256,7 @@ async function executeVendor(
   rendererDestination: EgressDestinationMetadata,
   safeRasterRenderer: SafeRasterRendererPort | undefined,
   judgeDestination: EgressDestinationMetadata,
+  attemptCheckpointStore: AttemptCheckpointPort,
   onReferencePackUse: (evaluationAttemptId: string) => void,
 ): Promise<CapturedVendorResult> {
   const {
@@ -1344,6 +1354,28 @@ async function executeVendor(
           );
         }
         if (deadlineResult.timedOut) {
+          const durableCheckpoints =
+            (await attemptCheckpointStore.readAttempt?.(attemptId)) ??
+            [];
+          const submittedCheckpoint = durableCheckpoints.some(
+            ({ submissionEvidenceAtCheckpoint }) =>
+              submissionEvidenceAtCheckpoint === "submitted",
+          );
+          const durableReconciliationTerminal =
+            durableCheckpoints.some(
+              ({
+                eventType,
+                reconciliationTerminalReason,
+              }) =>
+                eventType === "task_reconciliation_result" &&
+                reconciliationTerminalReason !== undefined,
+            );
+          if (
+            submittedCheckpoint &&
+            !durableReconciliationTerminal
+          ) {
+            throw new UnresolvedAttemptShutdownError(attemptId);
+          }
           const shutdownResult =
             deadlineResult.shutdownValue === undefined
               ? null
@@ -1373,10 +1405,11 @@ async function executeVendor(
         }
       } catch (error) {
         if (
-          error instanceof Error &&
-          /cannot finalize before adapter shutdown and durable reconciliation complete/i.test(
-            error.message,
-          )
+          error instanceof UnresolvedAttemptShutdownError ||
+          (error instanceof Error &&
+            /cannot finalize before adapter shutdown and durable reconciliation complete/i.test(
+              error.message,
+            ))
         ) {
           throw error;
         }
@@ -2036,6 +2069,7 @@ export function createBakeoffHarness({
             rendererDestination,
             safeRasterRenderer,
             judgeDestination,
+            attemptCheckpointStore,
             (evaluationAttemptId) => {
               evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
             },
