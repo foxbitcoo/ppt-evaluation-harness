@@ -652,6 +652,44 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting audi
   );
 });
 
+test("concurrent starts for one stable Bakeoff Job share one vendor execution", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  let adapterExecutions = 0;
+  const adapters: readonly ProductAdapterPort[] = [
+    new MockWpsProductAdapter(),
+    new MockQwenProductAdapter(),
+    new MockDoubaoProductAdapter(),
+  ].map((adapter) => ({
+    productPackage: adapter.productPackage,
+    async execute(command) {
+      adapterExecutions += 1;
+      return adapter.execute(command);
+    },
+  }));
+  const firstHarness = createBakeoffHarness({
+    feishu,
+    productAdapters: adapters,
+  });
+  const secondHarness = createBakeoffHarness({
+    feishu,
+    productAdapters: adapters,
+  });
+  const command = {
+    environment: "test" as const,
+    caseId: VOLCANO_CASE_ID,
+  };
+
+  const [first, second] = await Promise.all([
+    firstHarness.startBakeoffJob(command),
+    secondHarness.startBakeoffJob(command),
+  ]);
+
+  assert.equal(adapterExecutions, 3);
+  assert.equal(first.job.jobId, second.job.jobId);
+  assert.equal(first.report.reportId, second.report.reportId);
+  assert.equal(feishu.snapshot().runRecordTable.length, 7);
+});
+
 test("compatibility fingerprint equality is independent of object key insertion order", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({

@@ -128,6 +128,55 @@ export interface BakeoffHarnessDependencies {
   readonly judge?: OpenAiJudgePort;
 }
 
+interface InFlightBakeoffJob {
+  readonly commandIdentity: string;
+  readonly outcome: Promise<BakeoffJobOutcome>;
+}
+
+const IN_FLIGHT_BAKEOFF_JOBS = new WeakMap<
+  FeishuProjectionPort,
+  Map<string, InFlightBakeoffJob>
+>();
+
+function bakeoffCommandIdentity(command: StartBakeoffJobCommand): string {
+  return JSON.stringify({
+    environment: command.environment,
+    caseId: command.caseId,
+    referencePackMode: command.referencePackMode ?? "automatic",
+  });
+}
+
+function coalesceBakeoffJob(
+  feishu: FeishuProjectionPort,
+  jobId: string,
+  command: StartBakeoffJobCommand,
+  operation: () => Promise<BakeoffJobOutcome>,
+): Promise<BakeoffJobOutcome> {
+  let jobs = IN_FLIGHT_BAKEOFF_JOBS.get(feishu);
+  if (jobs === undefined) {
+    jobs = new Map();
+    IN_FLIGHT_BAKEOFF_JOBS.set(feishu, jobs);
+  }
+  const commandIdentity = bakeoffCommandIdentity(command);
+  const existing = jobs.get(jobId);
+  if (existing !== undefined) {
+    if (existing.commandIdentity !== commandIdentity) {
+      throw new Error(`Bakeoff Job identity conflict: ${jobId}`);
+    }
+    return existing.outcome;
+  }
+
+  let outcome!: Promise<BakeoffJobOutcome>;
+  outcome = operation().finally(() => {
+    const current = jobs?.get(jobId);
+    if (current?.outcome === outcome) {
+      jobs?.delete(jobId);
+    }
+  });
+  jobs.set(jobId, { commandIdentity, outcome });
+  return outcome;
+}
+
 interface CapturedVendorResult {
   readonly productPackage: ProductPackageSnapshot;
   readonly runId: string;
@@ -746,7 +795,7 @@ export function createBakeoffHarness({
     throw new Error("A Bakeoff Job requires at least one Product Adapter");
   }
 
-  return {
+  const executor: BakeoffHarness = {
     async startBakeoffJob(command) {
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
@@ -1053,6 +1102,16 @@ export function createBakeoffHarness({
         scorecards: successful.map(({ scorecard }) => scorecard),
         report,
       };
+    },
+  };
+  return {
+    startBakeoffJob(command) {
+      return coalesceBakeoffJob(
+        feishu,
+        MOCK_SCENARIO.jobId,
+        command,
+        () => executor.startBakeoffJob(command),
+      );
     },
   };
 }
