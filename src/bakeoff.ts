@@ -5,6 +5,7 @@ import type {
   ArtifactScorecard,
   BakeoffJobOutcome,
   BlockReason,
+  JudgeFailureLineage,
   RenderManifest,
   RunRecord,
   RunStatus,
@@ -25,11 +26,23 @@ import { renderStaticArtifact } from "./mock-wps.ts";
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import { scoreRenderedArtifact } from "./mock-score.ts";
+import {
+  OpenAiJudgeEvaluationError,
+  type OpenAiJudgePort,
+} from "./openai-judge.ts";
 import type {
   ProductAdapterPort,
   ProductAttemptResult,
   ProductPackageSnapshot,
 } from "./product-adapter.ts";
+import {
+  InMemoryReferencePackStore,
+  ReviewedReferencePackGenerator,
+  resolveReferencePackForCase,
+  type ReferencePack,
+  type ReferencePackGeneratorPort,
+  type ReferencePackStorePort,
+} from "./reference-pack.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
 
@@ -96,6 +109,9 @@ export interface BakeoffHarnessDependencies {
   readonly productAdapter?: ProductAdapterPort;
   readonly productAdapters?: readonly ProductAdapterPort[];
   readonly attemptDeadline?: AttemptDeadlinePort;
+  readonly referencePackStore?: ReferencePackStorePort;
+  readonly referencePackGenerator?: ReferencePackGeneratorPort;
+  readonly judge?: OpenAiJudgePort;
 }
 
 interface CapturedVendorResult {
@@ -107,6 +123,7 @@ interface CapturedVendorResult {
   readonly artifact: Artifact | null;
   readonly renderManifest: RenderManifest | null;
   readonly scorecard: ArtifactScorecard | null;
+  readonly judgeFailure?: JudgeFailureLineage | null;
   readonly attemptRecords: readonly RunRecord[];
 }
 
@@ -147,9 +164,7 @@ function vendorSlug(packageId: string): string {
 
 function runIdForPackage(packageId: string): string {
   const scenario = KNOWN_VENDOR_SCENARIOS.get(packageId);
-  return (
-    scenario?.runId ?? `MOCK-run-${vendorSlug(packageId)}-volcano-v1`
-  );
+  return scenario?.runId ?? `MOCK-run-${vendorSlug(packageId)}-volcano-v1`;
 }
 
 function isArtifact(
@@ -275,13 +290,15 @@ function attemptRecord(input: {
 async function executeVendor(
   selection: SelectedProductAdapter,
   caseId: string,
+  targetEnvironment: "test" | "production",
   attemptDeadline: AttemptDeadlinePort,
   jobDeadlineAtEpochMs: number,
+  referencePack: ReferencePack | null,
+  judge: OpenAiJudgePort | undefined,
+  onReferencePackUse: (evaluationAttemptId: string) => void,
 ): Promise<CapturedVendorResult> {
   const { adapter, productPackage, runId } = selection;
-  const scenario = KNOWN_VENDOR_SCENARIOS.get(
-    productPackage.packageId,
-  );
+  const scenario = KNOWN_VENDOR_SCENARIOS.get(productPackage.packageId);
   const attempts: RunRecord[] = [];
   let retryOfAttemptId: string | null = null;
   let attemptSeq = 1;
@@ -296,10 +313,7 @@ async function executeVendor(
     let vendorReportedElapsedMs: number | null = null;
     const attemptTimeoutMs = Math.max(
       0,
-      Math.min(
-        observedBudgetRemainingMs,
-        jobDeadlineAtEpochMs - Date.now(),
-      ),
+      Math.min(observedBudgetRemainingMs, jobDeadlineAtEpochMs - Date.now()),
     );
     if (attemptTimeoutMs === 0) {
       result = {
@@ -426,18 +440,92 @@ async function executeVendor(
   if (artifact.runId !== runId || artifact.provenance !== "MOCK") {
     throw new Error("Test Bakeoff Job requires MOCK Artifact lineage");
   }
+  assertEnvironmentOriginAllowed(
+    artifact.environmentOrigin,
+    targetEnvironment,
+    `Artifact ${artifact.artifactId}`,
+  );
   const renderManifest = renderStaticArtifact(
     artifact,
-    scenario?.renderManifestId ??
-      runId.replace(/^MOCK-run-/, "MOCK-render-"),
+    scenario?.renderManifestId ?? runId.replace(/^MOCK-run-/, "MOCK-render-"),
   );
-  const scorecard = scoreRenderedArtifact(artifact, renderManifest, {
-    jobId: MOCK_SCENARIO.jobId,
-    runId,
-    scorecardId:
-      scenario?.scorecardId ??
-      runId.replace(/^MOCK-run-/, "MOCK-scorecard-"),
-  });
+  const scorecardId =
+    scenario?.scorecardId ?? runId.replace(/^MOCK-run-/, "MOCK-scorecard-");
+  const evaluationAttemptKind =
+    judge === undefined ? "mock-score-attempt" : "judge-attempt";
+  const evaluationAttemptId = `${evaluationAttemptKind}:${MOCK_SCENARIO.jobId}:${runId}:${artifact.artifactId}`;
+  if (referencePack !== null) {
+    onReferencePackUse(evaluationAttemptId);
+  }
+  let scorecard: ArtifactScorecard | null;
+  let judgeFailure: JudgeFailureLineage | null = null;
+  if (judge === undefined) {
+    scorecard = scoreRenderedArtifact(artifact, renderManifest, {
+      jobId: MOCK_SCENARIO.jobId,
+      runId,
+      referencePack,
+      scorecardId,
+    });
+  } else {
+    try {
+      scorecard = await judge.score({
+        jobId: MOCK_SCENARIO.jobId,
+        runId,
+        scorecardId,
+        evaluationAttemptId,
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+        artifact,
+        renderManifest,
+        referencePack,
+      });
+    } catch (error) {
+      scorecard = null;
+      judgeFailure = Object.freeze({
+        failureClass: "judge_failure",
+        submissionStatus:
+          error instanceof OpenAiJudgeEvaluationError
+            ? error.submissionStatus
+            : "unknown",
+        message:
+          error instanceof Error ? error.message : "Unknown Judge failure",
+        egressAttempt:
+          error instanceof OpenAiJudgeEvaluationError
+            ? error.egressAttempt
+            : null,
+      });
+    }
+  }
+  if (
+    scorecard !== null &&
+    (scorecard.scorecardId !== scorecardId ||
+      scorecard.jobId !== MOCK_SCENARIO.jobId ||
+      scorecard.runId !== runId ||
+      scorecard.artifactId !== artifact.artifactId ||
+      scorecard.provenance !== artifact.provenance ||
+      scorecard.environmentOrigin !== artifact.environmentOrigin ||
+      scorecard.evaluationInputManifest.artifactHash !== artifact.contentHash ||
+      scorecard.evaluationInputManifest.renderManifestHash !==
+        renderManifest.contentHash ||
+      scorecard.evaluationInputManifest.referencePackHash !==
+        (referencePack?.contentHash ?? null) ||
+      (judge !== undefined &&
+        (scorecard.judgeLineage === null ||
+          scorecard.judgeLineage.provider !== "openai")))
+  ) {
+    const lineageError = new Error(
+      "Judge returned an inconsistent or non-OpenAI Scorecard lineage",
+    );
+    if (judge === undefined) {
+      throw lineageError;
+    }
+    scorecard = null;
+    judgeFailure = Object.freeze({
+      failureClass: "judge_failure",
+      submissionStatus: "unknown",
+      message: lineageError.message,
+      egressAttempt: null,
+    });
+  }
   return {
     productPackage,
     runId,
@@ -447,6 +535,7 @@ async function executeVendor(
     artifact,
     renderManifest,
     scorecard,
+    judgeFailure,
     attemptRecords: attempts.map((attempt, index) =>
       index === attempts.length - 1
         ? { ...attempt, artifactId: artifact.artifactId }
@@ -472,6 +561,11 @@ export function createBakeoffHarness({
   productAdapter,
   productAdapters,
   attemptDeadline = WALL_CLOCK_ATTEMPT_DEADLINE,
+  referencePackStore = new InMemoryReferencePackStore(
+    () => MOCK_SCENARIO.fixedTime,
+  ),
+  referencePackGenerator = new ReviewedReferencePackGenerator(),
+  judge,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const selectedProductAdapters = Object.freeze([
     ...(productAdapters ??
@@ -521,18 +615,60 @@ export function createBakeoffHarness({
         );
       }
 
-      const jobDeadlineAtEpochMs =
-        Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
-      const results = await Promise.all(
+      const referencePackSelection = resolveReferencePackForCase({
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+        ...(command.referencePackMode === undefined
+          ? {}
+          : { mode: command.referencePackMode }),
+        generator: referencePackGenerator,
+      });
+      const stagedReferencePack =
+        referencePackSelection.pack === null
+          ? null
+          : referencePackStore.stage(referencePackSelection.pack, {
+              jobId: MOCK_SCENARIO.jobId,
+            });
+      const jobDeadlineAtEpochMs = Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
+      const evaluationAttemptIdsThatUsedPack = new Set<string>();
+      const settledResults = await Promise.allSettled(
         selections.map((selection) =>
           executeVendor(
             selection,
             command.caseId,
+            command.environment,
             attemptDeadline,
             jobDeadlineAtEpochMs,
+            referencePackSelection.pack,
+            judge,
+            (evaluationAttemptId) => {
+              evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
+            },
           ),
         ),
       );
+      const completedResults = settledResults.flatMap((result) =>
+        result.status === "fulfilled" ? [result.value] : [],
+      );
+      if (stagedReferencePack !== null) {
+        if (evaluationAttemptIdsThatUsedPack.size === 0) {
+          referencePackStore.deleteUnused(stagedReferencePack.stagingId);
+        } else {
+          referencePackStore.retainUsed(stagedReferencePack.stagingId, {
+            jobId: MOCK_SCENARIO.jobId,
+            scorecardIds: completedResults.flatMap(({ scorecard }) =>
+              scorecard === null ? [] : [scorecard.scorecardId],
+            ),
+            evaluationAttemptIds: [...evaluationAttemptIdsThatUsedPack],
+          });
+        }
+      }
+      const rejectedResult = settledResults.find(
+        (result) => result.status === "rejected",
+      );
+      if (rejectedResult?.status === "rejected") {
+        throw rejectedResult.reason;
+      }
+      const results = completedResults;
       const artifactIds = results.flatMap(({ artifact }) =>
         artifact === null ? [] : [artifact.artifactId],
       );
@@ -552,16 +688,23 @@ export function createBakeoffHarness({
           result.renderManifest !== null &&
           result.scorecard !== null,
       );
-      const jobStatus =
-        results.some(({ status }) => status === "waiting_for_human")
-          ? "active"
-          : successful.length === results.length
+      const captured = results.filter(
+        (
+          result,
+        ): result is CapturedVendorResult & {
+          readonly artifact: Artifact;
+          readonly renderManifest: RenderManifest;
+        } => result.artifact !== null && result.renderManifest !== null,
+      );
+      const jobStatus = results.some(
+        ({ status }) => status === "waiting_for_human",
+      )
+        ? "active"
+        : successful.length === results.length
           ? "completed"
           : successful.length === 0
             ? "failed"
             : "partial";
-      const firstSuccessful = successful[0];
-
       await feishu.upsertCase(VOLCANO_EVALUATION_CASE);
       await feishu.appendRunRecord({
         recordId: MOCK_SCENARIO.jobId,
@@ -634,10 +777,28 @@ export function createBakeoffHarness({
           artifactId: result.artifact?.artifactId ?? null,
           renderManifestId: result.renderManifest?.renderManifestId ?? null,
           scorecardId: result.scorecard?.scorecardId ?? null,
+          judgeEgressAttempt:
+            result.scorecard?.judgeLineage?.egressAttempt ??
+            result.judgeFailure?.egressAttempt ??
+            null,
+          judgeFailure: result.judgeFailure ?? null,
           ...sharedRunFields(command.caseId),
         });
         for (const attempt of result.attemptRecords) {
           await feishu.appendRunRecord(attempt);
+        }
+        if (result.artifact !== null && result.renderManifest !== null) {
+          await feishu.appendCapturedArtifact({
+            recordId: `artifact-capture:${result.artifact.artifactId}`,
+            caseId: command.caseId,
+            jobId: MOCK_SCENARIO.jobId,
+            runId: result.runId,
+            artifactId: result.artifact.artifactId,
+            provenance: "MOCK",
+            environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+            artifact: result.artifact,
+            renderManifest: result.renderManifest,
+          });
         }
         if (
           result.artifact !== null &&
@@ -662,12 +823,8 @@ export function createBakeoffHarness({
       const leftResult = successful[0];
       for (const rightResult of successful.slice(1)) {
         if (leftResult === undefined) break;
-        const leftSlug = vendorSlug(
-          leftResult.productPackage.packageId,
-        );
-        const rightSlug = vendorSlug(
-          rightResult.productPackage.packageId,
-        );
+        const leftSlug = vendorSlug(leftResult.productPackage.packageId);
+        const rightSlug = vendorSlug(rightResult.productPackage.packageId);
         const comparisonId = `MOCK-comparison-${leftSlug}-${rightSlug}-volcano-v1`;
         await feishu.appendComparison({
           recordType: "comparison",
@@ -704,6 +861,7 @@ export function createBakeoffHarness({
             stateReason: result.terminalReason,
             artifact: result.artifact,
             scorecard: result.scorecard,
+            judgeFailure: result.judgeFailure ?? null,
           })),
         ),
       );
@@ -718,13 +876,11 @@ export function createBakeoffHarness({
           provenance: "MOCK",
           environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
         },
-        artifact: firstSuccessful?.artifact ?? null,
-        renderManifest: firstSuccessful?.renderManifest ?? null,
-        scorecard: firstSuccessful?.scorecard ?? null,
-        artifacts: successful.map(({ artifact }) => artifact),
-        renderManifests: successful.map(
-          ({ renderManifest }) => renderManifest,
-        ),
+        artifact: captured[0]?.artifact ?? null,
+        renderManifest: captured[0]?.renderManifest ?? null,
+        scorecard: captured[0]?.scorecard ?? null,
+        artifacts: captured.map(({ artifact }) => artifact),
+        renderManifests: captured.map(({ renderManifest }) => renderManifest),
         scorecards: successful.map(({ scorecard }) => scorecard),
         report,
       };

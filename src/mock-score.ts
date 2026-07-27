@@ -7,11 +7,13 @@ import type {
 } from "./domain.ts";
 import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
+import type { ReferencePack } from "./reference-pack.ts";
 
 export interface ScoreContext {
   readonly jobId: string;
   readonly runId: string;
   readonly scorecardId?: string;
+  readonly referencePack?: ReferencePack | null;
 }
 
 function boundedScore(passedChecks: number, totalChecks: number): ScoreValue {
@@ -24,6 +26,7 @@ function boundedScore(passedChecks: number, totalChecks: number): ScoreValue {
 
 function scoreDimensions(
   renderManifest: RenderManifest,
+  hasReferencePack: boolean,
 ): readonly DimensionScore[] {
   const pages = renderManifest.slides;
   const pageText = (pageNumber: number): string =>
@@ -44,14 +47,6 @@ function scoreDimensions(
   const factualCoverage = factualTerms.filter((term) =>
     allText.includes(term),
   ).length;
-  const factualValue: ScoreValue =
-    factualCoverage >= 5
-      ? 4
-      : factualCoverage >= 3
-        ? 3
-        : factualCoverage > 0
-          ? 2
-          : 1;
   const narrativeValue: ScoreValue =
     pageText(2).includes("认识火山") &&
     pageText(9).includes("压力") &&
@@ -60,8 +55,7 @@ function scoreDimensions(
       : 3;
   const consistentTheme = pages.every(
     ({ content }) =>
-      content.includes('fill="#211314"') &&
-      content.includes('fill="#ff6b35"'),
+      content.includes('fill="#211314"') && content.includes('fill="#ff6b35"'),
   );
   const aestheticsValue: ScoreValue = consistentTheme ? 4 : 2;
   const readableLayout = pages.every(
@@ -79,7 +73,12 @@ function scoreDimensions(
   return [
     {
       dimension: "requirement_understanding_and_content_coverage",
+      assessmentStatus: "ASSESSED",
       value: requirementValue,
+      deductionBasis:
+        requirementValue === 5
+          ? "no_deduction"
+          : "visible_requirement_or_coverage_gap",
       evidencePages: [1, 2, 3, 15, 16],
       rationale:
         requirementValue === 5
@@ -88,13 +87,21 @@ function scoreDimensions(
     },
     {
       dimension: "factual_accuracy_and_content_quality",
-      value: factualValue,
-      evidencePages: [3, 5, 7, 9, 13],
-      rationale: `静态文本覆盖 ${factualCoverage}/${factualTerms.length} 个核心机制证据词，表述保持测试级审慎。`,
+      assessmentStatus: hasReferencePack ? "ASSESSED" : "NOT_ASSESSABLE",
+      value: hasReferencePack ? 5 : null,
+      deductionBasis: hasReferencePack
+        ? "no_deduction"
+        : "not_assessable_no_reference_pack",
+      evidencePages: hasReferencePack ? [3, 5, 7, 9, 13] : [],
+      rationale: hasReferencePack
+        ? `静态文本覆盖 ${factualCoverage}/${factualTerms.length} 个核心机制证据词；无已验证知识错误，事实维度不扣分。`
+        : "未提供可辩护的知识包，事实维度不作评估。",
     },
     {
       dimension: "narrative_and_audience_fit",
+      assessmentStatus: "ASSESSED",
       value: narrativeValue,
+      deductionBasis: "visible_narrative_or_audience_gap",
       evidencePages: [2, 3, 9, 16],
       rationale:
         narrativeValue === 4
@@ -103,7 +110,9 @@ function scoreDimensions(
     },
     {
       dimension: "visual_aesthetics_and_professional_finish",
+      assessmentStatus: "ASSESSED",
       value: aestheticsValue,
+      deductionBasis: "visible_visual_finish_gap",
       evidencePages: [1, 10, 16],
       rationale: consistentTheme
         ? "所有静态渲染使用一致的暖色火山主题，完成度稳定但仍为测试级。"
@@ -111,7 +120,9 @@ function scoreDimensions(
     },
     {
       dimension: "layout_hierarchy_and_readability",
+      assessmentStatus: "ASSESSED",
       value: readabilityValue,
+      deductionBasis: "visible_layout_or_readability_gap",
       evidencePages: [2, 8, 14],
       rationale: readableLayout
         ? "标题、正文与页码字号层级稳定，静态文本长度适合直接阅读。"
@@ -119,7 +130,9 @@ function scoreDimensions(
     },
     {
       dimension: "imagery_chart_and_information_expression",
+      assessmentStatus: "ASSESSED",
       value: expressionValue,
+      deductionBasis: "visible_information_expression_gap",
       evidencePages: [4, 7, 13],
       rationale: hasRichVisualExpression
         ? "静态渲染包含文字之外的图形表达，信息呈现较完整。"
@@ -148,8 +161,14 @@ export function scoreRenderedArtifact(
       artifactHash: artifact.contentHash,
       renderManifestHash: renderManifest.contentHash,
       renderer: renderManifest.renderer,
+      referencePackHash: context.referencePack?.contentHash ?? null,
     },
-    dimensions: scoreDimensions(renderManifest),
+    dimensions: scoreDimensions(
+      renderManifest,
+      context.referencePack !== null && context.referencePack !== undefined,
+    ),
+    knowledgeErrors: [],
+    judgeLineage: null,
     deliveryQualityGates: [
       {
         gate: "artifact_captured_and_openable",

@@ -141,10 +141,16 @@ test("the completed Mock WPS Run captures one content-addressed PPT Artifact and
     Array.from(firstOutcome.artifact.content.subarray(0, 2)),
     [0x50, 0x4b],
   );
-  assert.equal(firstOutcome.artifact.contentHash, secondOutcome.artifact.contentHash);
+  assert.equal(
+    firstOutcome.artifact.contentHash,
+    secondOutcome.artifact.contentHash,
+  );
 
   assert.equal(firstOutcome.renderManifest.provenance, "MOCK");
-  assert.equal(firstOutcome.renderManifest.artifactId, firstOutcome.artifact.artifactId);
+  assert.equal(
+    firstOutcome.renderManifest.artifactId,
+    firstOutcome.artifact.artifactId,
+  );
   assert.equal(firstOutcome.renderManifest.renderer, "mock-static-svg@1");
   assert.equal(firstOutcome.renderManifest.pageCount, 16);
   assert.equal(
@@ -197,7 +203,10 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
   requireCaptured(secondOutcome);
 
   assert.equal(firstOutcome.scorecard.provenance, "MOCK");
-  assert.equal(firstOutcome.scorecard.artifactId, firstOutcome.artifact.artifactId);
+  assert.equal(
+    firstOutcome.scorecard.artifactId,
+    firstOutcome.artifact.artifactId,
+  );
   assert.deepEqual(
     firstOutcome.scorecard.dimensions.map(({ dimension, value }) => ({
       dimension,
@@ -208,7 +217,7 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
         dimension: "requirement_understanding_and_content_coverage",
         value: 5,
       },
-      { dimension: "factual_accuracy_and_content_quality", value: 4 },
+      { dimension: "factual_accuracy_and_content_quality", value: 5 },
       { dimension: "narrative_and_audience_fit", value: 4 },
       {
         dimension: "visual_aesthetics_and_professional_finish",
@@ -224,6 +233,7 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
   assert.ok(
     firstOutcome.scorecard.dimensions.every(
       ({ value, evidencePages, rationale }) =>
+        value !== null &&
         Number.isInteger(value) &&
         value >= 1 &&
         value <= 5 &&
@@ -249,7 +259,7 @@ test("the captured Artifact receives one deterministic six-dimension 1–5 score
   assert.deepEqual(artifactScoreRecord?.scorecard, firstOutcome.scorecard);
 });
 
-test("the four Feishu domain tables expose the completed MOCK lineage and the job links a minimal report", async () => {
+test("the Feishu domain tables keep Artifact capture independent from scoring and link a minimal report", async () => {
   const feishu = new InMemoryFeishuProjection();
   const outcome = await createFixedMockHarness(feishu).startBakeoffJob({
     environment: "test",
@@ -264,6 +274,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
       .sort(),
     [
       "artifactScoreTable",
+      "capturedArtifactTable",
       "caseTable",
       "productGapCardTable",
       "runRecordTable",
@@ -271,6 +282,7 @@ test("the four Feishu domain tables expose the completed MOCK lineage and the jo
   );
   assert.equal(projection.caseTable.length, 1);
   assert.equal(projection.runRecordTable.length, 3);
+  assert.equal(projection.capturedArtifactTable.length, 1);
   assert.equal(projection.artifactScoreTable.length, 1);
   assert.deepEqual(projection.productGapCardTable, []);
 
@@ -331,7 +343,10 @@ test("the public product adapter port can be replaced without changing the Bakeo
     feishu.snapshot().runRecordTable[1]?.productPackageId,
     "MOCK-replacement-package-v1",
   );
-  assert.equal(outcome.artifact.filename, "MOCK-replacement-wps-volcano-16.pptx");
+  assert.equal(
+    outcome.artifact.filename,
+    "MOCK-replacement-wps-volcano-16.pptx",
+  );
 });
 
 test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match its content hash", async () => {
@@ -402,7 +417,10 @@ test("Artifact byte changes with a valid new hash drive new static renders and e
   requireCaptured(fixedOutcome);
   requireCaptured(variantOutcome);
 
-  assert.notEqual(variantOutcome.artifact.contentHash, fixedOutcome.artifact.contentHash);
+  assert.notEqual(
+    variantOutcome.artifact.contentHash,
+    fixedOutcome.artifact.contentHash,
+  );
   assert.notEqual(
     variantOutcome.renderManifest.contentHash,
     fixedOutcome.renderManifest.contentHash,

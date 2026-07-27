@@ -74,10 +74,7 @@ export interface EvaluationCaseRecord {
 
 export interface RunRecord {
   readonly recordId: string;
-  readonly recordType:
-    | "bakeoff_job"
-    | "vendor_run"
-    | "evaluation_attempt";
+  readonly recordType: "bakeoff_job" | "vendor_run" | "evaluation_attempt";
   readonly jobId: string;
   readonly parentRecordId: string | null;
   readonly caseId: string;
@@ -110,6 +107,8 @@ export interface RunRecord {
   readonly artifactId: string | null;
   readonly renderManifestId: string | null;
   readonly scorecardId: string | null;
+  readonly judgeEgressAttempt?: JudgeEgressAttemptAudit | null;
+  readonly judgeFailure?: JudgeFailureLineage | null;
 }
 
 export interface Artifact {
@@ -156,17 +155,115 @@ export type ScoreDimension =
 
 export type ScoreValue = 1 | 2 | 3 | 4 | 5;
 
+export type DimensionAssessmentStatus = "ASSESSED" | "NOT_ASSESSABLE";
+
+export type DimensionDeductionBasis =
+  | "no_deduction"
+  | "visible_requirement_or_coverage_gap"
+  | "validated_reference_pack_errors"
+  | "not_assessable_no_reference_pack"
+  | "visible_narrative_or_audience_gap"
+  | "visible_visual_finish_gap"
+  | "visible_layout_or_readability_gap"
+  | "visible_information_expression_gap";
+
 export interface DimensionScore {
   readonly dimension: ScoreDimension;
-  readonly value: ScoreValue;
+  readonly assessmentStatus: DimensionAssessmentStatus;
+  readonly value: ScoreValue | null;
+  readonly deductionBasis: DimensionDeductionBasis;
   readonly evidencePages: readonly number[];
   readonly rationale: string;
+}
+
+export interface KnowledgeErrorDeduction {
+  readonly pageNumber: number;
+  readonly claim: string;
+  readonly correction: string;
+  readonly factId: string;
+  readonly sourceIds: readonly string[];
+}
+
+export interface RasterizedImageLineage {
+  readonly pageNumber: number;
+  readonly mimeType: "image/png";
+  readonly contentHash: `sha256:${string}`;
+}
+
+export type JudgeEgressContentField =
+  | "evaluation_case"
+  | "reference_pack"
+  | "extracted_slide_text"
+  | "static_slide_images";
+
+export interface JudgeEgressAuthorizationLineage {
+  readonly decisionId: string;
+  readonly decision: "approved";
+  readonly policyVersion: string;
+  readonly dataClassification: "public_or_synthetic";
+  readonly sourceOwner: string;
+  readonly processingPurpose: "presentation_artifact_evaluation";
+  readonly targetService: "openai";
+  readonly targetAccount: string;
+  readonly targetRegion: string;
+  readonly subprocessors: readonly string[];
+  readonly allowedContentFields: readonly JudgeEgressContentField[];
+  readonly requiredRedactions: readonly string[];
+  readonly legalSecurityBasis: string;
+  readonly approvedAt: string;
+  readonly expiresAt: string;
+}
+
+export interface JudgeEgressAttemptAudit {
+  readonly attemptId: string;
+  readonly jobId: string;
+  readonly runId: string;
+  readonly artifactId: string;
+  readonly scorecardId: string;
+  readonly payloadHash: `sha256:${string}`;
+  readonly idempotencyKey: `judge_${string}`;
+  readonly egressAuthorizationHash: `sha256:${string}`;
+  readonly egressAuthorization: JudgeEgressAuthorizationLineage;
+  readonly recordedAt: string;
+}
+
+export interface JudgeFailureLineage {
+  readonly failureClass: "judge_failure";
+  readonly submissionStatus: "submitted" | "unknown";
+  readonly message: string;
+  readonly egressAttempt: JudgeEgressAttemptAudit | null;
+}
+
+export interface JudgeLineage {
+  readonly provider: "openai";
+  readonly adapterVersion: "openai-responses-judge@1";
+  readonly requestedModel: "gpt-5.6-sol";
+  readonly responseModel: string;
+  readonly responseId: string;
+  readonly promptVersion: "query-six-dimension-judge-prompt-v1";
+  readonly promptHash: `sha256:${string}`;
+  readonly configHash: `sha256:${string}`;
+  readonly schemaHash: `sha256:${string}`;
+  readonly contextHash: `sha256:${string}`;
+  readonly payloadHash: `sha256:${string}`;
+  readonly egressAuthorizationHash: `sha256:${string}`;
+  readonly egressAuthorization: JudgeEgressAuthorizationLineage;
+  readonly egressAttemptId: string;
+  readonly egressAttempt: JudgeEgressAttemptAudit;
+  readonly inputHash: `sha256:${string}`;
+  readonly idempotencyKey: `judge_${string}`;
+  readonly rasterizerVersion: string;
+  readonly rasterizedImagesHash: `sha256:${string}`;
+  readonly rasterizedImageHashes: readonly RasterizedImageLineage[];
+  readonly imageDetail: "high";
+  readonly store: false;
 }
 
 export interface EvaluationInputManifest {
   readonly artifactHash: `sha256:${string}`;
   readonly renderManifestHash: `sha256:${string}`;
   readonly renderer: "mock-static-svg@1";
+  readonly referencePackHash: `sha256:${string}` | null;
 }
 
 export interface DeliveryQualityGate {
@@ -188,6 +285,8 @@ export interface ArtifactScorecard {
   readonly rubricVersion: "query-six-dimension-v1";
   readonly evaluationInputManifest: EvaluationInputManifest;
   readonly dimensions: readonly DimensionScore[];
+  readonly knowledgeErrors: readonly KnowledgeErrorDeduction[];
+  readonly judgeLineage: JudgeLineage | null;
   readonly deliveryQualityGates: readonly DeliveryQualityGate[];
   readonly createdAt: string;
 }
@@ -203,6 +302,18 @@ export interface ArtifactScoreTableRecord {
   readonly artifact: Artifact;
   readonly renderManifest: RenderManifest;
   readonly scorecard: ArtifactScorecard;
+}
+
+export interface CapturedArtifactTableRecord {
+  readonly recordId: string;
+  readonly caseId: string;
+  readonly jobId: string;
+  readonly runId: string;
+  readonly artifactId: string;
+  readonly provenance: ProvenanceLabel;
+  readonly environmentOrigin: EnvironmentOrigin;
+  readonly artifact: Artifact;
+  readonly renderManifest: RenderManifest;
 }
 
 export interface ComparisonRecord {
@@ -270,4 +381,5 @@ export interface BakeoffJobOutcome {
 export interface StartBakeoffJobCommand {
   readonly environment: "test" | "production";
   readonly caseId: string;
+  readonly referencePackMode?: "automatic" | "force" | "off";
 }
