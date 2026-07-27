@@ -10,8 +10,14 @@ import {
   MockWpsProductAdapter,
   createBakeoffHarness,
   createContentAddressedReferencePack,
+  defineProductAdapterExecutorFactory,
   resolveReferencePackForCase,
+  type ProductAdapterExecutor,
 } from "../src/index.ts";
+
+function testExecutorFactory(executor: ProductAdapterExecutor) {
+  return defineProductAdapterExecutorFactory(() => executor);
+}
 
 test("Reference Pack selection defaults to automatic and freezes the volcano pack", () => {
   const selection = resolveReferencePackForCase({
@@ -235,10 +241,10 @@ test("one Bakeoff Job shares one frozen automatic pack across three scorecards w
     executionConfigurationPackage:
       adapter.executionConfigurationPackage,
     productPackage: adapter.productPackage,
-    async execute(command: Parameters<typeof adapter.execute>[0]) {
+    executorFactory: testExecutorFactory(async (command) => {
       observedVendorPrompts.push(command.evaluationCase.vendorPrompt);
       return adapter.execute(command);
-    },
+    }),
   }));
   const outcome = await createBakeoffHarness({
     feishu: new InMemoryFeishuProjection(),

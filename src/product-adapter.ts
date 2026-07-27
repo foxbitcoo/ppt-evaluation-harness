@@ -46,64 +46,59 @@ export interface ProductAdapterImplementationPackage {
   readonly content: Uint8Array;
 }
 
-export type ProductAdapterExecutionConfiguration =
-  | null
-  | boolean
-  | number
-  | string
-  | readonly ProductAdapterExecutionConfiguration[]
-  | {
-      readonly [key: string]: ProductAdapterExecutionConfiguration;
-    };
+export interface ProductAdapterExecutionConfiguration {
+  readonly adapterKind: string;
+  readonly scenario: string;
+  readonly schemaVersion:
+    "product-adapter-execution-configuration-v1";
+}
 
-function normalizeExecutionConfiguration(
+const PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND = Symbol(
+  "ProductAdapterExecutorFactory",
+);
+
+export type ProductAdapterExecutor = (
+  this: void,
+  command: ProductRunCommand,
+) => Promise<Artifact | ProductAttemptResult>;
+
+export type ProductAdapterExecutorFactory = {
+  (
+    this: void,
+    executionConfiguration: ProductAdapterExecutionConfiguration,
+  ): ProductAdapterExecutor;
+  readonly [PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND]:
+    "product-adapter-executor-factory-v1";
+};
+
+export function defineProductAdapterExecutorFactory(
+  factory: (
+    this: void,
+    executionConfiguration: ProductAdapterExecutionConfiguration,
+  ) => ProductAdapterExecutor,
+): ProductAdapterExecutorFactory {
+  Object.defineProperty(
+    factory,
+    PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND,
+    {
+      configurable: false,
+      enumerable: false,
+      value: "product-adapter-executor-factory-v1",
+      writable: false,
+    },
+  );
+  return Object.freeze(factory) as ProductAdapterExecutorFactory;
+}
+
+export function isProductAdapterExecutorFactory(
   value: unknown,
-): ProductAdapterExecutionConfiguration {
-  if (
-    value === null ||
-    typeof value === "boolean" ||
-    typeof value === "string"
-  ) {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new Error(
-        "Adapter execution configuration requires finite numbers",
-      );
-    }
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return Object.freeze(
-      value.map(normalizeExecutionConfiguration),
-    );
-  }
-  if (typeof value === "object") {
-    return Object.freeze(
-      Object.fromEntries(
-        Object.entries(value as Record<string, unknown>)
-          .sort(([left], [right]) => left.localeCompare(right))
-          .map(([key, entry]) => {
-            if (
-              /(?:api.?key|credential|password|secret|token)/i.test(
-                key,
-              )
-            ) {
-              throw new Error(
-                `Adapter execution configuration cannot persist secret-bearing field: ${key}`,
-              );
-            }
-            return [
-              key,
-              normalizeExecutionConfiguration(entry),
-            ];
-          }),
-      ),
-    );
-  }
-  throw new Error(
-    "Adapter execution configuration must be canonical JSON",
+): value is ProductAdapterExecutorFactory {
+  return (
+    typeof value === "function" &&
+    (
+      value as Partial<ProductAdapterExecutorFactory>
+    )[PRODUCT_ADAPTER_EXECUTOR_FACTORY_BRAND] ===
+      "product-adapter-executor-factory-v1"
   );
 }
 
@@ -136,7 +131,42 @@ export function parseAdapterExecutionConfiguration(
       "Adapter execution configuration must be canonical JSON",
     );
   }
-  const normalized = normalizeExecutionConfiguration(parsed);
+  if (
+    parsed === null ||
+    Array.isArray(parsed) ||
+    typeof parsed !== "object"
+  ) {
+    throw new Error(
+      "Adapter execution configuration must match the recoverable allowlist schema",
+    );
+  }
+  const configuration = parsed as Record<string, unknown>;
+  if (
+    !(
+      Object.keys(configuration).sort().join(",") ===
+        "adapterKind,scenario,schemaVersion" &&
+      configuration.schemaVersion ===
+        "product-adapter-execution-configuration-v1" &&
+      typeof configuration.adapterKind === "string" &&
+      /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(
+        configuration.adapterKind,
+      ) &&
+      typeof configuration.scenario === "string" &&
+      /^[a-z0-9][a-z0-9._:-]{0,127}$/.test(
+        configuration.scenario,
+      )
+    )
+  ) {
+    throw new Error(
+      "Adapter execution configuration must match the recoverable allowlist schema",
+    );
+  }
+  const normalized = Object.freeze({
+    adapterKind: configuration.adapterKind,
+    scenario: configuration.scenario,
+    schemaVersion:
+      "product-adapter-execution-configuration-v1" as const,
+  });
   if (JSON.stringify(normalized) !== decoded) {
     throw new Error(
       "Adapter execution configuration must use canonical JSON encoding",
@@ -149,8 +179,5 @@ export interface ProductAdapterPort {
   readonly productPackage: ProductPackageSnapshot;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
-  execute(
-    command: ProductRunCommand,
-    executionConfiguration: ProductAdapterExecutionConfiguration,
-  ): Promise<Artifact | ProductAttemptResult>;
+  readonly executorFactory: ProductAdapterExecutorFactory;
 }

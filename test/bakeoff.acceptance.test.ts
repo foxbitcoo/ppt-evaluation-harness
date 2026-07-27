@@ -7,13 +7,19 @@ import {
   MockWpsProductAdapter,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
+  defineProductAdapterExecutorFactory,
   type Artifact,
   type BakeoffJobOutcome,
   type ArtifactScorecard,
   type RenderManifest,
   type ProductAdapterPort,
+  type ProductAdapterExecutor,
   type ProductRunCommand,
 } from "../src/index.ts";
+
+function testExecutorFactory(executor: ProductAdapterExecutor) {
+  return defineProductAdapterExecutorFactory(() => executor);
+}
 
 type CapturedBakeoffOutcome = BakeoffJobOutcome & {
   readonly artifact: Artifact;
@@ -326,13 +332,13 @@ test("the public product adapter port can be replaced without changing the Bakeo
       displayName: "Replacement Playwright-ready WPS Adapter",
       adapterVersion: "replacement-test@1",
     },
-    async execute(command: ProductRunCommand): Promise<Artifact> {
+    executorFactory: testExecutorFactory(async (command): Promise<Artifact> => {
       const artifact = await fixedMockAdapter.execute(command);
       return {
         ...artifact,
         filename: "MOCK-replacement-wps-volcano-16.pptx",
       };
-    },
+    }),
   };
   const feishu = new InMemoryFeishuProjection();
 
@@ -366,12 +372,12 @@ test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match it
     executionConfigurationPackage:
       fixedMockAdapter.executionConfigurationPackage,
     productPackage: fixedMockAdapter.productPackage,
-    async execute(command: ProductRunCommand): Promise<Artifact> {
+    executorFactory: testExecutorFactory(async (command): Promise<Artifact> => {
       const artifact = await fixedMockAdapter.execute(command);
       const content = artifact.content.slice();
       content[100] = (content[100] ?? 0) ^ 0xff;
       return { ...artifact, content };
-    },
+    }),
   };
   const feishu = new InMemoryFeishuProjection();
 
@@ -400,7 +406,7 @@ test("Artifact byte changes with a valid new hash drive new static renders and e
       ...fixedMockAdapter.productPackage,
       packageId: "MOCK-content-variant-package-v1",
     },
-    async execute(command: ProductRunCommand): Promise<Artifact> {
+    executorFactory: testExecutorFactory(async (command): Promise<Artifact> => {
       const artifact = await fixedMockAdapter.execute(command);
       const original = Buffer.from("火山为什么会喷发");
       const replacement = Buffer.from("岩浆为什么会上升");
@@ -414,7 +420,7 @@ test("Artifact byte changes with a valid new hash drive new static renders and e
         content,
         contentHash: `sha256:${createHash("sha256").update(content).digest("hex")}`,
       };
-    },
+    }),
   };
   const fixedOutcome = await createBakeoffHarness({
     feishu: new InMemoryFeishuProjection(),

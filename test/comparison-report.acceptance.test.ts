@@ -10,12 +10,18 @@ import {
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   createComparisonReportService,
+  defineProductAdapterExecutorFactory,
   type ArtifactScoreTableRecord,
   type ComparisonReportSource,
   type FeishuProjectionPort,
   type ProductAdapterPort,
+  type ProductAdapterExecutor,
   type ReferencePackGeneratorPort,
 } from "../src/index.ts";
+
+function testExecutorFactory(executor: ProductAdapterExecutor) {
+  return defineProductAdapterExecutorFactory(() => executor);
+}
 
 function withComparisonSourceOverride(
   feishu: InMemoryFeishuProjection,
@@ -364,7 +370,9 @@ test("default WPS-centered views follow stable vendor identity across package ve
       ...adapter.productPackage,
       packageId,
     },
-    execute: (command) => adapter.execute(command),
+    executorFactory: testExecutorFactory((command) =>
+      adapter.execute(command),
+    ),
   });
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
@@ -577,10 +585,10 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting audi
     executionConfigurationPackage:
       adapter.executionConfigurationPackage,
     productPackage: adapter.productPackage,
-    async execute(command) {
+    executorFactory: testExecutorFactory(async (command) => {
       adapterExecutions += 1;
       return adapter.execute(command);
-    },
+    }),
   }));
   const harness = createBakeoffHarness({
     feishu,
@@ -677,10 +685,10 @@ test("concurrent starts for one stable Bakeoff Job share one vendor execution", 
     executionConfigurationPackage:
       adapter.executionConfigurationPackage,
     productPackage: adapter.productPackage,
-    async execute(command) {
+    executorFactory: testExecutorFactory(async (command) => {
       adapterExecutions += 1;
       return adapter.execute(command);
-    },
+    }),
   }));
   const firstHarness = createBakeoffHarness({
     feishu,

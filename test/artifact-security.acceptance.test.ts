@@ -17,6 +17,7 @@ import {
   createRetentionService,
   createRunSpecificationVault,
   createScoreAdjudicationService,
+  defineProductAdapterExecutorFactory,
   InMemoryTombstoneLedger,
   approvedEgressAuthorizationHash,
   assertApprovedEgressAuthorizationCurrent,
@@ -30,6 +31,7 @@ import {
   type ClockPort,
   type EgressAuthorizationPort,
   type ImmutableBlobStorePort,
+  type ProductAdapterExecutor,
   type ProductAdapterPort,
   type RenderManifest,
   type RunSpecificationVault,
@@ -54,13 +56,22 @@ function testAdapterImplementationPackage(packageName: string) {
 
 function testAdapterExecutionConfigurationPackage(name: string) {
   const content = new TextEncoder().encode(
-    JSON.stringify({ name }),
+    JSON.stringify({
+      adapterKind: "test",
+      scenario: name,
+      schemaVersion:
+        "product-adapter-execution-configuration-v1",
+    }),
   );
   return {
     packageName: `test-execution-configuration:${name}`,
     contentHash: sha256Bytes(content),
     content,
   } as const;
+}
+
+function testExecutorFactory(executor: ProductAdapterExecutor) {
+  return defineProductAdapterExecutorFactory(() => executor);
 }
 
 const APPROVED_EGRESS: EgressAuthorizationPort = {
@@ -1021,10 +1032,10 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
         subprocessors: [],
       },
     },
-    async execute() {
+    executorFactory: testExecutorFactory(async () => {
       vendorCalls += 1;
       throw new Error("vendor must not be called");
-    },
+    }),
   };
   const authorization: EgressAuthorizationPort = {
     async authorize(request) {
@@ -1253,7 +1264,9 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
           executionConfigurationPackage:
             changedAdapterDelegate.executionConfigurationPackage,
           productPackage: changedAdapterDelegate.productPackage,
-          execute: (command) => changedAdapterDelegate.execute(command),
+          executorFactory: testExecutorFactory((command) =>
+            changedAdapterDelegate.execute(command),
+          ),
         },
       ],
       egressAuthorization: authorization,
@@ -1362,8 +1375,10 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
   assert.deepEqual(
     specification.adapterSpecification.executionConfiguration,
     {
-      adapterName: "MockWpsProductAdapter",
-      configuration: { scenario: "success" },
+      adapterKind: "mock-wps",
+      scenario: "success",
+      schemaVersion:
+        "product-adapter-execution-configuration-v1",
     },
   );
   assert.equal(
@@ -1906,11 +1921,11 @@ test("a tombstone racing a long vendor run prevents the final Feishu projection 
     executionConfigurationPackage:
       delegate.executionConfigurationPackage,
     productPackage: delegate.productPackage,
-    async execute(command) {
+    executorFactory: testExecutorFactory(async (command) => {
       signalStarted();
       await release;
       return delegate.execute(command);
-    },
+    }),
   };
   const tombstones = new InMemoryTombstoneLedger();
   const inventory = new InMemoryPayloadInventory(tombstones);

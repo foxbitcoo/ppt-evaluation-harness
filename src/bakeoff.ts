@@ -55,8 +55,10 @@ import {
   type OpenAiJudgePort,
 } from "./openai-judge.ts";
 import {
+  isProductAdapterExecutorFactory,
   parseAdapterExecutionConfiguration,
   type ProductAdapterExecutionConfiguration,
+  type ProductAdapterExecutor,
   type ProductAdapterImplementationPackage,
   type ProductAdapterPort,
   type ProductAttemptResult,
@@ -500,7 +502,7 @@ interface CapturedVendorResult {
 }
 
 interface SelectedProductAdapter {
-  readonly execute: ProductAdapterPort["execute"];
+  readonly execute: ProductAdapterExecutor;
   readonly executionConfiguration: ProductAdapterExecutionConfiguration;
   readonly executionEntrypointDigest: `sha256:${string}`;
   readonly executionConfigurationPackage: ProductAdapterImplementationPackage;
@@ -548,11 +550,25 @@ function snapshotProductSelections(
             adapter.executionConfigurationPackage.content,
           ),
         });
-      const selectedExecute = adapter.execute;
       const executionConfiguration =
         parseAdapterExecutionConfiguration(
           executionConfigurationPackage,
         );
+      const executorFactory = adapter.executorFactory;
+      if (!isProductAdapterExecutorFactory(executorFactory)) {
+        throw new Error(
+          `Product Adapter requires a trusted executor factory: ${productPackage.packageId}`,
+        );
+      }
+      Object.freeze(adapter);
+      const selectedExecute =
+        executorFactory(executionConfiguration);
+      if (typeof selectedExecute !== "function") {
+        throw new Error(
+          `Product Adapter executor factory is invalid: ${productPackage.packageId}`,
+        );
+      }
+      Object.freeze(selectedExecute);
       const executionEntrypointDigest = sha256Bytes(
         new TextEncoder().encode(selectedExecute.toString()),
       );
@@ -1031,7 +1047,6 @@ async function executeVendor(
 ): Promise<CapturedVendorResult> {
   const {
     execute,
-    executionConfiguration,
     productPackage,
     runId,
   } = selection;
@@ -1100,18 +1115,15 @@ async function executeVendor(
       try {
         const deadlineResult = await attemptDeadline.run(
           (signal) =>
-            execute(
-              {
-                jobId: MOCK_SCENARIO.jobId,
-                runId,
-                attemptId,
-                attemptSeq,
-                timeoutMs: attemptTimeoutMs,
-                signal,
-                evaluationCase: VOLCANO_EVALUATION_CASE,
-              },
-              executionConfiguration,
-            ),
+            execute({
+              jobId: MOCK_SCENARIO.jobId,
+              runId,
+              attemptId,
+              attemptSeq,
+              timeoutMs: attemptTimeoutMs,
+              signal,
+              evaluationCase: VOLCANO_EVALUATION_CASE,
+            }),
           attemptTimeoutMs,
         );
         observedBudgetRemainingMs = Math.max(

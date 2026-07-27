@@ -12,14 +12,20 @@ import {
   PRODUCTION_ENVIRONMENT_ORIGIN,
   VOLCANO_EVALUATION_CASE,
   createBakeoffHarness,
+  defineProductAdapterExecutorFactory,
   resolveReferencePackForCase,
   type JudgeEgressAuditPort,
   type JudgeEgressAuthorizationRequest,
   type OpenAiResponsesJudgeAdapterOptions,
   type OpenAiResponsesTransport,
   type ProductAdapterPort,
+  type ProductAdapterExecutor,
 } from "../src/index.ts";
 import { scoreRenderedArtifact } from "../src/mock-score.ts";
+
+function testExecutorFactory(executor: ProductAdapterExecutor) {
+  return defineProductAdapterExecutorFactory(() => executor);
+}
 
 const SIX_DIMENSIONS = [
   "requirement_understanding_and_content_coverage",
@@ -1026,12 +1032,12 @@ test("Bakeoff rejects an Artifact with the wrong environment origin before Judge
     executionConfigurationPackage:
       wps.executionConfigurationPackage,
     productPackage: wps.productPackage,
-    async execute(command) {
+    executorFactory: testExecutorFactory(async (command) => {
       return {
         ...(await wps.execute(command)),
         environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
       };
-    },
+    }),
   };
 
   await assert.rejects(

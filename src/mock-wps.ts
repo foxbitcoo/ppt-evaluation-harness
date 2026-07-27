@@ -16,11 +16,15 @@ import type {
   ProductAttemptResult,
   ProductAdapterImplementationPackage,
   ProductAdapterExecutionConfiguration,
+  ProductAdapterExecutorFactory,
   ProductAdapterPort,
   ProductPackageSnapshot,
   ProductRunCommand,
 } from "./product-adapter.ts";
-import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
+import {
+  defineProductAdapterExecutorFactory,
+  parseAdapterExecutionConfiguration,
+} from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
 
 const textEncoder = new TextEncoder();
@@ -61,14 +65,19 @@ function configuredMockAdapterImplementationPackage(
 }
 
 function mockAdapterExecutionConfigurationPackage(
-  adapterName: string,
-  configuration: unknown,
+  adapterKind: string,
+  scenario: MockAdapterScenario,
 ): ProductAdapterImplementationPackage {
   const content = textEncoder.encode(
-    JSON.stringify({ adapterName, configuration }),
+    JSON.stringify({
+      adapterKind,
+      scenario,
+      schemaVersion:
+        "product-adapter-execution-configuration-v1",
+    }),
   );
   return Object.freeze({
-    packageName: `mock-execution-configuration#${adapterName}`,
+    packageName: `mock-execution-configuration#${adapterKind}`,
     contentHash: `sha256:${createHash("sha256")
       .update(content)
       .digest("hex")}`,
@@ -78,34 +87,11 @@ function mockAdapterExecutionConfigurationPackage(
 
 function mockScenarioFromExecutionConfiguration(
   executionConfiguration: ProductAdapterExecutionConfiguration,
-  expectedAdapterName: string,
+  expectedAdapterKind: string,
 ): MockAdapterScenario {
+  const scenario = executionConfiguration.scenario;
   if (
-    executionConfiguration === null ||
-    Array.isArray(executionConfiguration) ||
-    typeof executionConfiguration !== "object"
-  ) {
-    throw new Error("Mock adapter execution configuration is invalid");
-  }
-  const executionRecord = executionConfiguration as {
-    readonly [key: string]: ProductAdapterExecutionConfiguration;
-  };
-  const adapterName = executionRecord.adapterName;
-  const configuration = executionRecord.configuration;
-  if (
-    configuration === null ||
-    Array.isArray(configuration) ||
-    typeof configuration !== "object"
-  ) {
-    throw new Error("Mock adapter execution configuration is invalid");
-  }
-  const scenario = (
-    configuration as {
-      readonly scenario?: ProductAdapterExecutionConfiguration;
-    }
-  ).scenario;
-  if (
-    adapterName !== expectedAdapterName ||
+    executionConfiguration.adapterKind !== expectedAdapterKind ||
     (scenario !== "success" &&
       scenario !== "timeout" &&
       scenario !== "quota_blocked" &&
@@ -708,8 +694,8 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
   readonly implementationPackage = MOCK_ADAPTER_IMPLEMENTATION_PACKAGE;
   readonly executionConfigurationPackage =
     mockAdapterExecutionConfigurationPackage(
-      "MockWpsProductAdapter",
-      { scenario: "success" },
+      "mock-wps",
+      "success",
     );
   readonly executionConfiguration =
     parseAdapterExecutionConfiguration(
@@ -729,28 +715,33 @@ export class MockWpsProductAdapter implements ProductAdapterPort {
       subprocessors: [],
     },
   });
-
-  async execute(
-    command: ProductRunCommand,
-    executionConfiguration: ProductAdapterExecutionConfiguration =
-      this.executionConfiguration,
-  ): Promise<Artifact> {
-    if (
-      mockScenarioFromExecutionConfiguration(
+  readonly executorFactory: ProductAdapterExecutorFactory =
+    defineProductAdapterExecutorFactory((executionConfiguration) => {
+      const scenario = mockScenarioFromExecutionConfiguration(
         executionConfiguration,
-        "MockWpsProductAdapter",
-      ) !== "success"
-    ) {
-      throw new Error("Mock WPS execution configuration is invalid");
-    }
-    if (command.evaluationCase.targetPageCount !== 16) {
-      throw new Error("Mock WPS fixture supports only the frozen 16-page Case");
-    }
-    return captureMockArtifact(
-      command.runId,
-      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].artifactId,
-      MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].filename,
-    );
+        "mock-wps",
+      );
+      return async (command) => {
+        if (scenario !== "success") {
+          throw new Error("Mock WPS execution configuration is invalid");
+        }
+        if (command.evaluationCase.targetPageCount !== 16) {
+          throw new Error(
+            "Mock WPS fixture supports only the frozen 16-page Case",
+          );
+        }
+        return captureMockArtifact(
+          command.runId,
+          MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].artifactId,
+          MOCK_SCENARIO.vendors["MOCK-wps-package-v1"].filename,
+        );
+      };
+    });
+
+  execute(command: ProductRunCommand): Promise<Artifact> {
+    return this.executorFactory(this.executionConfiguration)(
+      command,
+    ) as Promise<Artifact>;
   }
 }
 
@@ -786,37 +777,44 @@ export class MockQwenProductAdapter implements ProductAdapterPort {
       );
     this.executionConfigurationPackage =
       mockAdapterExecutionConfigurationPackage(
-        "MockQwenProductAdapter",
-        { scenario: this.#scenario },
+        "mock-qwen",
+        this.#scenario,
       );
     this.executionConfiguration =
       parseAdapterExecutionConfiguration(
         this.executionConfigurationPackage,
       );
   }
-
-  async execute(
-    command: ProductRunCommand,
-    executionConfiguration: ProductAdapterExecutionConfiguration =
-      this.executionConfiguration,
-  ): Promise<ProductAttemptResult> {
-    if (command.evaluationCase.targetPageCount !== 16) {
-      throw new Error("Mock Qwen fixture supports only the frozen 16-page Case");
-    }
-    return executeMockScenario(
-      mockScenarioFromExecutionConfiguration(
+  readonly executorFactory: ProductAdapterExecutorFactory =
+    defineProductAdapterExecutorFactory((executionConfiguration) => {
+      const scenario = mockScenarioFromExecutionConfiguration(
         executionConfiguration,
-        "MockQwenProductAdapter",
-      ),
-      captureMockArtifact(
-        command.runId,
-        MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].artifactId,
-        MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].filename,
-        MOCK_QWEN_VOLCANO_SLIDES,
-        "MOCK Qwen PPT",
-      ),
-      command.attemptSeq,
-    );
+        "mock-qwen",
+      );
+      return async (command) => {
+        if (command.evaluationCase.targetPageCount !== 16) {
+          throw new Error(
+            "Mock Qwen fixture supports only the frozen 16-page Case",
+          );
+        }
+        return executeMockScenario(
+          scenario,
+          captureMockArtifact(
+            command.runId,
+            MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].artifactId,
+            MOCK_SCENARIO.vendors["MOCK-qwen-package-v1"].filename,
+            MOCK_QWEN_VOLCANO_SLIDES,
+            "MOCK Qwen PPT",
+          ),
+          command.attemptSeq,
+        );
+      };
+    });
+
+  execute(command: ProductRunCommand): Promise<ProductAttemptResult> {
+    return this.executorFactory(this.executionConfiguration)(
+      command,
+    ) as Promise<ProductAttemptResult>;
   }
 }
 
@@ -852,38 +850,43 @@ export class MockDoubaoProductAdapter implements ProductAdapterPort {
       );
     this.executionConfigurationPackage =
       mockAdapterExecutionConfigurationPackage(
-        "MockDoubaoProductAdapter",
-        { scenario: this.#scenario },
+        "mock-doubao",
+        this.#scenario,
       );
     this.executionConfiguration =
       parseAdapterExecutionConfiguration(
         this.executionConfigurationPackage,
       );
   }
-
-  async execute(
-    command: ProductRunCommand,
-    executionConfiguration: ProductAdapterExecutionConfiguration =
-      this.executionConfiguration,
-  ): Promise<ProductAttemptResult> {
-    if (command.evaluationCase.targetPageCount !== 16) {
-      throw new Error(
-        "Mock Doubao fixture supports only the frozen 16-page Case",
-      );
-    }
-    return executeMockScenario(
-      mockScenarioFromExecutionConfiguration(
+  readonly executorFactory: ProductAdapterExecutorFactory =
+    defineProductAdapterExecutorFactory((executionConfiguration) => {
+      const scenario = mockScenarioFromExecutionConfiguration(
         executionConfiguration,
-        "MockDoubaoProductAdapter",
-      ),
-      captureMockArtifact(
-        command.runId,
-        MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].artifactId,
-        MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].filename,
-        MOCK_DOUBAO_VOLCANO_SLIDES,
-        "MOCK Doubao PPT",
-      ),
-      command.attemptSeq,
-    );
+        "mock-doubao",
+      );
+      return async (command) => {
+        if (command.evaluationCase.targetPageCount !== 16) {
+          throw new Error(
+            "Mock Doubao fixture supports only the frozen 16-page Case",
+          );
+        }
+        return executeMockScenario(
+          scenario,
+          captureMockArtifact(
+            command.runId,
+            MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].artifactId,
+            MOCK_SCENARIO.vendors["MOCK-doubao-package-v1"].filename,
+            MOCK_DOUBAO_VOLCANO_SLIDES,
+            "MOCK Doubao PPT",
+          ),
+          command.attemptSeq,
+        );
+      };
+    });
+
+  execute(command: ProductRunCommand): Promise<ProductAttemptResult> {
+    return this.executorFactory(this.executionConfiguration)(
+      command,
+    ) as Promise<ProductAttemptResult>;
   }
 }
