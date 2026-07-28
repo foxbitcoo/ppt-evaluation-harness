@@ -756,7 +756,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:f159be3361c970c9850a021905cc851136f3680a8b087c0eb524d3202c2687c2",
+        "sha256:dfcd975b700ec20e484ab2ccc38cc12f0f111c61e720a94bbd130856e0c3bab9",
       sourceArchiveEntryCount: 38,
     },
   );
@@ -1256,6 +1256,47 @@ test("the OPC validator rejects ActiveX content types on otherwise nonessential 
       jobId: "job-wps-activex-content-type",
       runId: "run-wps-activex-content-type",
       attemptId: "attempt-wps-activex-content-type-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*content type/i,
+  );
+});
+
+test("the OPC validator decodes XML entities before rejecting an ActiveX content type", async () => {
+  const originalType =
+    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+  const obfuscatedActiveType =
+    "application/vnd.ms-office.active&#88;+xml".padEnd(
+      originalType.length,
+      "x",
+    );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "[Content_Types].xml",
+    originalType,
+    obfuscatedActiveType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-content-type-entity",
+      runId: "run-wps-activex-content-type-entity",
+      attemptId: "attempt-wps-activex-content-type-entity-1",
       attemptSeq: 1,
       timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
       signal: new AbortController().signal,

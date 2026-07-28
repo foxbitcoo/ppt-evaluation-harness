@@ -17,6 +17,7 @@ import type {
   ProductAttemptResult,
   ProductRunCommand,
   ProductPackageSnapshot,
+  RealProviderCaptureReceiptEvidence,
   TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
 import { canonicalJsonBytes } from "./run-specification.ts";
@@ -392,12 +393,8 @@ export interface DoubaoRealProviderCapture {
   >;
 }
 
-export interface DoubaoRealProviderCaptureReceipt {
-  readonly captureId: string;
-  readonly artifactContentHash: `sha256:${string}`;
-  readonly traceDigest: `sha256:${string}`;
-  readonly renderDigest: `sha256:${string}`;
-}
+export interface DoubaoRealProviderCaptureReceipt
+  extends RealProviderCaptureReceiptEvidence {}
 
 export interface DoubaoBrowserDriverEvidence
   extends TrustedBrowserDriverEvidence {
@@ -414,8 +411,10 @@ const HARNESS_OWNED_DOUBAO_CAPTURE_RECEIPTS =
           "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
         traceDigest:
           "sha256:088d839e1a4abecd326622fbe334e640ef93996c27e59ccfecec3588216c0226",
-        renderDigest:
+        retainedPageDigest:
           "sha256:8f9453b0cf3b88525d2ad69d7f0d854efd24cc7e86108fcafb82727912b46c3f",
+        renderDigest:
+          "sha256:047f33568528b87be6abc3ce17898fdb98d36ed5f38742eed3d4b05db7e26826",
       }),
     ],
   ]);
@@ -508,7 +507,8 @@ export function createDoubaoRealProviderReplayPackage(input: {
     sha256(capture.artifact.content) !==
       receipt.artifactContentHash ||
     captureTraceDigest(capture) !== receipt.traceDigest ||
-    capturedRenderDigest(input.renderedPages) !== receipt.renderDigest
+    capturedRenderDigest(input.renderedPages) !==
+      receipt.retainedPageDigest
   ) {
     throw new Error(
       "Doubao replay requires a registered immutable capture receipt",
@@ -1430,6 +1430,13 @@ export function resolveDoubaoProductionExecutor(
             traceHash: sha256(
               encoder.encode(JSON.stringify(observableEvents)),
             ),
+            ...(driverEvidence.captureReceipt === undefined
+              ? {}
+              : {
+                  captureReceipt: Object.freeze(
+                    cloneValue(driverEvidence.captureReceipt),
+                  ),
+                }),
           })
         : undefined;
     const artifactCandidate = Object.freeze({

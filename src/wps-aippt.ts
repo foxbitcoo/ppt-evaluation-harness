@@ -705,6 +705,64 @@ function parseRelationships(xml: string): readonly ParsedRelationship[] {
   return Object.freeze(relationships);
 }
 
+function parseNormalizedContentTypes(xml: string): readonly string[] {
+  if (/<!DOCTYPE|<!ENTITY/i.test(xml)) {
+    throw new Error("WPS Artifact OPC XML declarations are unsafe");
+  }
+  const contentTypesNamespace =
+    "http://schemas.openxmlformats.org/package/2006/content-types";
+  const stack: Array<{ readonly uri: string; readonly local: string }> = [];
+  const contentTypes: string[] = [];
+  const parser = new SaxesParser({ xmlns: true });
+  parser.on("opentag", (tag) => {
+    stack.push({ uri: tag.uri, local: tag.local });
+    if (stack.length === 1) {
+      if (
+        tag.uri !== contentTypesNamespace ||
+        tag.local !== "Types"
+      ) {
+        throw new Error(
+          "WPS Artifact OPC content types root is malformed",
+        );
+      }
+      return;
+    }
+    if (
+      stack.length !== 2 ||
+      stack[0]?.uri !== contentTypesNamespace ||
+      stack[0]?.local !== "Types" ||
+      tag.uri !== contentTypesNamespace ||
+      (tag.local !== "Default" && tag.local !== "Override")
+    ) {
+      throw new Error(
+        "WPS Artifact OPC content types structure is malformed",
+      );
+    }
+    const contentType = Object.values(tag.attributes).find(
+      (attribute) =>
+        attribute.uri === "" &&
+        attribute.local === "ContentType",
+    )?.value;
+    if (
+      contentType === undefined ||
+      contentType.trim().length === 0
+    ) {
+      throw new Error(
+        "WPS Artifact OPC content type attribute is malformed",
+      );
+    }
+    contentTypes.push(contentType.trim().toLowerCase());
+  });
+  parser.on("closetag", () => {
+    stack.pop();
+  });
+  parser.write(xml).close();
+  if (stack.length !== 0 || contentTypes.length === 0) {
+    throw new Error("WPS Artifact OPC content types are missing");
+  }
+  return Object.freeze(contentTypes);
+}
+
 function parsePresentationSlideIds(
   xml: string,
 ): readonly { readonly id: string; readonly relationshipId: string }[] {
@@ -788,10 +846,14 @@ export function validatedOpcSlideNames(
     );
   }
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  const contentTypes = decoder.decode(byName.get("[Content_Types].xml"));
+  const contentTypes = parseNormalizedContentTypes(
+    decoder.decode(byName.get("[Content_Types].xml")),
+  );
   if (
-    /(?:activeX|oleObject|ms-office\.(?:activeX|oleObject)|vnd\.ms-office\.(?:activeX|oleObject))/i.test(
-      contentTypes,
+    contentTypes.some((contentType) =>
+      /(?:activex|oleobject|ms-office\.(?:activex|oleobject)|vnd\.ms-office\.(?:activex|oleobject))/i.test(
+        contentType,
+      ),
     )
   ) {
     throw new Error(
@@ -802,7 +864,9 @@ export function validatedOpcSlideNames(
     !contentTypes.includes(
       "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml",
     ) ||
-    /macroEnabled|vbaProject/i.test(contentTypes)
+    contentTypes.some((contentType) =>
+      /macroenabled|vbaproject/i.test(contentType),
+    )
   ) {
     throw new Error("WPS Artifact OPC content types are unsafe");
   }
