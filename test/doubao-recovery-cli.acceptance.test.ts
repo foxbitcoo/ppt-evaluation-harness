@@ -30,6 +30,8 @@ import {
   type TrustedDoubaoRecoveryCheckpoint,
 } from "../src/index.ts";
 import {
+  artifactManifestAttestedPayloadHash,
+  renderManifestAttestedPayloadHash,
   validateDoubaoRecoveryStoresAgainstCheckpoint,
 } from "../scripts/recover-doubao-production-run.ts";
 
@@ -120,7 +122,13 @@ type MalformedLineageCase =
   | "manifest_root_hidden_reasoning"
   | "run_spec_hidden_authorization"
   | "run_spec_prompt_swap"
-  | "render_manifest_extra_field";
+  | "render_manifest_extra_field"
+  | "checkpoint_duplicate_evidence_key"
+  | "manifest_nested_duplicate_key"
+  | "run_spec_nested_duplicate_key"
+  | "artifact_metadata_tamper"
+  | "render_manifest_metadata_tamper"
+  | "run_spec_package_tamper";
 
 interface FixtureDerivative {
   derivativeId: string;
@@ -298,13 +306,16 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         extractedTextHash: hash(textPayloads[index]!),
       })),
     };
+    const trustedRenderManifestAttestedPayloadHash =
+      renderManifestAttestedPayloadHash(renderManifestObject);
+    if (malformedCase === "render_manifest_metadata_tamper") {
+      renderManifestObject.renderer = "self-asserted-renderer-v99";
+    }
     if (malformedCase === "render_manifest_extra_field") {
       renderManifestObject.hiddenReasoning =
         "must-not-survive-schema-validation";
     }
-    const renderManifest = encoder.encode(
-      JSON.stringify(renderManifestObject),
-    );
+    const renderManifest = encoder.encode(JSON.stringify(renderManifestObject));
     const derivatives: FixtureDerivative[] = [
       ...staticPayloads.map((content, index) => ({
         derivativeId:
@@ -446,11 +457,28 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
       derivatives,
       productionExecutionEvidence,
     };
+    const trustedArtifactManifestAttestedPayloadHash =
+      artifactManifestAttestedPayloadHash(manifestObject);
+    if (malformedCase === "artifact_metadata_tamper") {
+      const artifactMetadata = manifestObject.artifact as Record<
+        string,
+        unknown
+      >;
+      artifactMetadata.capturedAt = "2026-07-28T10:45:58.000Z";
+      artifactMetadata.filename = "self-asserted-replacement.pptx";
+    }
     if (malformedCase === "manifest_root_hidden_reasoning") {
       manifestObject.hiddenReasoning =
         "must-not-survive-schema-validation";
     }
-    const manifest = encoder.encode(JSON.stringify(manifestObject));
+    let manifestJson = JSON.stringify(manifestObject);
+    if (malformedCase === "manifest_nested_duplicate_key") {
+      manifestJson = manifestJson.replace(
+        '"captureId":"doubao-volcano-fixture"',
+        '"captureId":"shadow-capture","captureId":"doubao-volcano-fixture"',
+      );
+    }
+    const manifest = encoder.encode(manifestJson);
     const evaluationCase: Record<string, unknown> = {
       audience: "初中生",
       caseId,
@@ -523,13 +551,29 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         },
       },
     };
+    const trustedRunSpecificationCanonicalHash = hash(
+      canonicalJsonBytes(runSpecificationObject),
+    );
+    if (malformedCase === "run_spec_package_tamper") {
+      const packageMetadata =
+        runSpecificationObject.productPackage as Record<
+          string,
+          unknown
+        >;
+      packageMetadata.packageId = "self-asserted-package-v99";
+    }
     if (malformedCase === "run_spec_hidden_authorization") {
       runSpecificationObject.hiddenAuthorization =
         "must-not-survive-schema-validation";
     }
-    const runSpecification = encoder.encode(
-      JSON.stringify(runSpecificationObject),
-    );
+    let runSpecificationJson = JSON.stringify(runSpecificationObject);
+    if (malformedCase === "run_spec_nested_duplicate_key") {
+      runSpecificationJson = runSpecificationJson.replace(
+        '"vendorPrompt":"',
+        '"vendorPrompt":"shadow","vendorPrompt":"',
+      );
+    }
+    const runSpecification = encoder.encode(runSpecificationJson);
     const runSpecificationHash = hash(runSpecification);
     const specificationKey =
       `run-specifications/${runSpecificationHash.slice("sha256:".length)}`;
@@ -652,12 +696,29 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
     }
     const checkpointFilename =
       `${createHash("sha256").update(attemptId).digest("hex")}.jsonl`;
+    let checkpointJsonl =
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+    if (malformedCase === "checkpoint_duplicate_evidence_key") {
+      checkpointJsonl = checkpointJsonl.replace(
+        '"evidenceRef":"ui://doubao/event-1-audit-anchor"',
+        '"evidenceRef":"authorization-material-must-not-be-authenticated","evidence\\u0052ef":"ui://doubao/event-1-audit-anchor"',
+      );
+    }
     await writeFile(
       join(checkpointRoot, checkpointFilename),
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      checkpointJsonl,
       { mode: 0o600 },
     );
 
+    const offlineCheckpointWithCanonicalMetadata = Object.freeze({
+      ...OFFLINE_RECOVERY_FIXTURE_CHECKPOINT,
+      artifactManifestAttestedPayloadHash:
+        trustedArtifactManifestAttestedPayloadHash,
+      renderManifestAttestedPayloadHash:
+        trustedRenderManifestAttestedPayloadHash,
+      runSpecificationCanonicalHash:
+        trustedRunSpecificationCanonicalHash,
+    });
     const result =
       await validateDoubaoRecoveryStoresAgainstCheckpoint(
         {
@@ -677,7 +738,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
           ? trustedDoubaoRecoveryCheckpoint(
               DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
             )
-          : OFFLINE_RECOVERY_FIXTURE_CHECKPOINT,
+          : offlineCheckpointWithCanonicalMetadata,
       );
     return result as {
       readonly jobId: string;
@@ -826,7 +887,7 @@ test("the recovery validator rejects unknown fields throughout authenticated man
     await context.test(malformedCase, async () => {
       await assert.rejects(
         runRecoveryFixture(malformedCase),
-        /schema|unexpected field/i,
+        /schema|unexpected field|canonical hash|attested payload hash/i,
       );
     });
   }
@@ -849,8 +910,38 @@ test("the recovery validator rejects a self-hashed replacement Query and unknown
 test("the recovery validator rejects unknown render-manifest fields", async () => {
   await assert.rejects(
     runRecoveryFixture("render_manifest_extra_field"),
-    /render manifest.*schema|unexpected field/i,
+    /render manifest.*(?:schema|canonical hash|attested payload hash)|unexpected field/i,
   );
+});
+
+test("the recovery validator recursively rejects duplicate keys in every authenticated JSON or JSONL input", async (context) => {
+  for (const malformedCase of [
+    "checkpoint_duplicate_evidence_key",
+    "manifest_nested_duplicate_key",
+    "run_spec_nested_duplicate_key",
+  ] as const) {
+    await context.test(malformedCase, async () => {
+      await assert.rejects(
+        runRecoveryFixture(malformedCase),
+        /duplicate object key|JSON is invalid|checkpoint line/i,
+      );
+    });
+  }
+});
+
+test("the recovery validator rejects self-hashed authenticated metadata changes not attested by checkpoint policy", async (context) => {
+  for (const malformedCase of [
+    "artifact_metadata_tamper",
+    "render_manifest_metadata_tamper",
+    "run_spec_package_tamper",
+  ] as const) {
+    await context.test(malformedCase, async () => {
+      await assert.rejects(
+        runRecoveryFixture(malformedCase),
+        /attested payload hash|canonical hash|trusted checkpoint/i,
+      );
+    });
+  }
 });
 
 test("the production CLI rejects the offline fixture checkpoint before reading recovery stores", async () => {

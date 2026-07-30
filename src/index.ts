@@ -4,6 +4,7 @@ export {
 export {
   FileSystemAttemptCheckpointStore,
 } from "./file-system-checkpoint-store.ts";
+export { parseStrictJson } from "./strict-json.ts";
 export {
   FileSystemBrowserProfileLock,
   InProcessBrowserProfileLock,

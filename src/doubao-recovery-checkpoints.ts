@@ -15,6 +15,10 @@ export interface TrustedDoubaoRecoveryCheckpoint {
     | "real_provider_recovery"
     | "offline_validation_fixture";
   readonly artifactContentHash: DoubaoRecoverySha256;
+  readonly artifactManifestAttestedPayloadHash?: DoubaoRecoverySha256;
+  readonly renderManifestAttestedPayloadHash?: DoubaoRecoverySha256;
+  readonly runSpecificationCanonicalHash?: DoubaoRecoverySha256;
+  readonly runnerCodeDigest?: DoubaoRecoverySha256;
   readonly checkpointTraceHash: DoubaoRecoverySha256;
   readonly caseId: "volcano-query-v1";
   readonly caseVersion: 1;
@@ -66,6 +70,14 @@ const TRUSTED_CHECKPOINTS = Object.freeze<
     purpose: "real_provider_recovery",
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    artifactManifestAttestedPayloadHash:
+      "sha256:34db8db99f661566eee70e025f7bd489fa8d795467f0b0ce647cd7d57bb56a37",
+    renderManifestAttestedPayloadHash:
+      "sha256:0055a88b71da5349212f8d1cab0c0472ec2b4e8600a2bf709c8b0621f6fb97c8",
+    runSpecificationCanonicalHash:
+      "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b",
+    runnerCodeDigest:
+      "sha256:ba691d59c346eb96f2cd68ba5d54bde341ffe0f2f4486aa3f765056d60732b18",
     checkpointTraceHash:
       "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
     caseId: "volcano-query-v1",

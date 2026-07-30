@@ -12,6 +12,7 @@ import {
   loadDurableRootRegistry,
   resolveDurableRoot,
   trustedDoubaoRecoveryCheckpoint,
+  parseStrictJson,
   type TrustedDoubaoRecoveryCheckpoint,
 } from "../src/index.ts";
 import { validatedSafePngDimensions } from "../src/safe-raster.ts";
@@ -191,11 +192,76 @@ function exactKeys(
 function json(bytes: Uint8Array, label: string): JsonRecord {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(decoder.decode(bytes));
+    parsed = parseStrictJson(
+      decoder.decode(bytes),
+      `Durable Doubao recovery ${label} JSON`,
+    );
   } catch {
     throw new Error(`Durable Doubao recovery ${label} JSON is invalid`);
   }
   return record(parsed, label);
+}
+
+function requireCanonicalAuthenticatedJson(
+  bytes: Uint8Array,
+  parsed: JsonRecord,
+  expectedHash: Sha256 | undefined,
+  label: string,
+): void {
+  const canonical = canonicalJsonBytes(parsed);
+  if (
+    expectedHash === undefined ||
+    hash(canonical) !== expectedHash
+  ) {
+    throw new Error(
+      `Durable Doubao recovery ${label} does not match the harness-owned trusted checkpoint canonical hash`,
+    );
+  }
+}
+
+/**
+ * Renderer authorization decision IDs bind the current verifier build and
+ * would make a policy checkpoint self-referential. The decision itself is
+ * schema-checked below; this attested view freezes every provider/render
+ * semantic while replacing only that separately verified runtime binding.
+ */
+export function renderManifestAttestedPayloadHash(
+  parsed: JsonRecord,
+): Sha256 {
+  return hash(
+    canonicalJsonBytes({
+      ...parsed,
+      rendererAuthorizationDecisionId:
+        "<runtime-authorization-decision-verified-separately>",
+    }),
+  );
+}
+
+/**
+ * The Artifact manifest points to the raw render-manifest hash, whose
+ * authorization decision is build-bound. Those two copies are replaced only
+ * in the attested view and remain cross-checked against the recovered render
+ * bytes below.
+ */
+export function artifactManifestAttestedPayloadHash(
+  parsed: JsonRecord,
+): Sha256 {
+  const execution = record(
+    parsed.productionExecutionEvidence,
+    "Artifact manifest.productionExecutionEvidence",
+  );
+  return hash(
+    canonicalJsonBytes({
+      ...parsed,
+      renderManifestHash:
+        "<render-manifest-bytes-verified-separately>",
+      productionExecutionEvidence: {
+        ...execution,
+        rasterManifestHash:
+          "<render-manifest-bytes-verified-separately>",
+      },
+    }),
+  );
 }
 
 function text(
@@ -211,6 +277,25 @@ function text(
     throw new Error(`Durable Doubao recovery ${label} schema is invalid`);
   }
   return value;
+}
+
+function safeEvidenceText(
+  value: unknown,
+  label: string,
+  expected?: string,
+): string {
+  const result = text(value, label, expected);
+  if (
+    result.length > 1_024 ||
+    /(?:bearer\s+[a-z0-9._~-]+|cookie\s*[:=]|authorization\s*[:=]|password\s*[:=]|access[_ -]?token|refresh[_ -]?token|localstorage|sessionstorage|(?:^|[^a-z])(?:pat|sk)_[a-z0-9_-]{12,}|eyJ[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{10,}\.|\/Users\/|\/tmp\/|file:\/\/|[a-z]:\\Users\\)/i.test(
+      result,
+    )
+  ) {
+    throw new Error(
+      `Durable Doubao recovery ${label} contains unsafe credential or local-path material`,
+    );
+  }
+  return result;
 }
 
 function sha(value: unknown, label: string): Sha256 {
@@ -231,8 +316,8 @@ function integer(value: unknown, label: string, expected?: number): number {
   return value as number;
 }
 
-function iso(value: unknown, label: string): string {
-  const result = text(value, label);
+function iso(value: unknown, label: string, expected?: string): string {
+  const result = text(value, label, expected);
   if (
     !Number.isFinite(Date.parse(result)) ||
     new Date(result).toISOString() !== result
@@ -246,7 +331,10 @@ function receipt(value: unknown, label: string): ValidatedReceipt {
   const candidate = record(value, label);
   exactKeys(candidate, RECEIPT_KEYS, label);
   return Object.freeze({
-    captureId: text(candidate.captureId, `${label}.captureId`),
+    captureId: safeEvidenceText(
+      candidate.captureId,
+      `${label}.captureId`,
+    ),
     artifactContentHash: sha(
       candidate.artifactContentHash,
       `${label}.artifactContentHash`,
@@ -335,6 +423,14 @@ if (
 }
 
 const manifestIdentity = json(manifest, "Artifact manifest");
+if (
+  artifactManifestAttestedPayloadHash(manifestIdentity) !==
+  trustedCheckpoint.artifactManifestAttestedPayloadHash
+) {
+  throw new Error(
+    "Durable Doubao recovery Artifact manifest does not match the harness-owned trusted checkpoint attested payload hash",
+  );
+}
 exactKeys(
   manifestIdentity,
   trustedCheckpoint.purpose === "real_provider_recovery"
@@ -405,8 +501,20 @@ integer(
   "Artifact manifest.artifact.pageCount",
   16,
 );
-iso(artifact.capturedAt, "Artifact manifest.artifact.capturedAt");
-text(artifact.filename, "Artifact manifest.artifact.filename");
+iso(
+  artifact.capturedAt,
+  "Artifact manifest.artifact.capturedAt",
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? "2026-07-27T10:45:58.000Z"
+    : undefined,
+);
+safeEvidenceText(
+  artifact.filename,
+  "Artifact manifest.artifact.filename",
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? "doubao-volcano-16.pptx"
+    : undefined,
+);
 if (trustedCheckpoint.purpose !== "real_provider_recovery") {
   text(
     artifact.provenance,
@@ -431,7 +539,13 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
   );
   if (
     !Array.isArray(fidelity.notes) ||
-    fidelity.notes.some((note) => typeof note !== "string")
+    fidelity.notes.some((note) => typeof note !== "string") ||
+    JSON.stringify(fidelity.notes) !==
+      JSON.stringify([
+        "slide 9 title clipping observed in retained render",
+        "overflow checker warning retained for slides 2-16",
+        "no quality retry was performed",
+      ])
   ) {
     throw new Error(
       "Durable Doubao recovery Artifact manifest.fidelity.notes schema is invalid",
@@ -519,7 +633,7 @@ const derivatives: ValidatedDerivative[] = rawDerivatives.map(
       ),
       derivativeType,
       pageNumber,
-      filename: text(
+      filename: safeEvidenceText(
         candidate.filename,
         `Artifact manifest.derivatives[${index}].filename`,
       ),
@@ -575,7 +689,7 @@ const adapterVersion = text(
   "Artifact manifest.adapterVersion",
   "doubao-web-ppt@1",
 );
-text(
+safeEvidenceText(
   executionEvidence.driverSessionId,
   "Artifact manifest.driverSessionId",
 );
@@ -624,6 +738,17 @@ const runSpecificationBundle = json(
   runSpecification,
   "Run Specification",
 );
+if (
+  trustedCheckpoint.purpose === "real_provider_recovery" ||
+  trustedCheckpoint.runSpecificationCanonicalHash !== undefined
+) {
+  requireCanonicalAuthenticatedJson(
+    runSpecification,
+    runSpecificationBundle,
+    trustedCheckpoint.runSpecificationCanonicalHash,
+    "Run Specification",
+  );
+}
 exactKeys(
   runSpecificationBundle,
   trustedCheckpoint.purpose === "real_provider_recovery"
@@ -910,6 +1035,16 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     "Run Specification.productPackage.evaluationConfiguration.requestedPageCount",
     16,
   );
+  text(
+    evaluationConfiguration.networking,
+    "Run Specification.productPackage.evaluationConfiguration.networking",
+    "enabled",
+  );
+  text(
+    evaluationConfiguration.modelSelection,
+    "Run Specification.productPackage.evaluationConfiguration.modelSelection",
+    "best_available_for_current_account",
+  );
 }
 const adapterSpecification = record(
   runSpecificationBundle.adapterSpecification,
@@ -1045,6 +1180,11 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     ["adapterKind", "scenario", "schemaVersion"],
     "Run Specification.adapterSpecification.executionConfiguration",
   );
+  text(
+    executionConfiguration.scenario,
+    "Run Specification.adapterSpecification.executionConfiguration.scenario",
+    "volcano-16-real-provider-replay",
+  );
   integer(
     adapterSpecification.executionConfigurationPackageByteSize,
     "Run Specification.adapterSpecification.executionConfigurationPackageByteSize",
@@ -1077,6 +1217,16 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     ],
     "Run Specification.environmentEvidence",
   );
+  text(
+    environmentEvidence.environmentOriginId,
+    "Run Specification.environmentEvidence.environmentOriginId",
+    "production:ppt-evaluation-v1",
+  );
+  text(
+    environmentEvidence.targetEnvironment,
+    "Run Specification.environmentEvidence.targetEnvironment",
+    "production",
+  );
   const estimatorSnapshot = record(
     runSpecificationBundle.estimatorSnapshot,
     "Run Specification.estimatorSnapshot",
@@ -1095,11 +1245,25 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     ["dimensions", "rubricVersion"],
     "Run Specification.rubricSnapshot",
   );
+  text(
+    rubricSnapshot.rubricVersion,
+    "Run Specification.rubricSnapshot.rubricVersion",
+    "query-six-dimension-v1",
+  );
   if (
     !Array.isArray(rubricSnapshot.dimensions) ||
     rubricSnapshot.dimensions.some(
       (dimension) => typeof dimension !== "string",
-    )
+    ) ||
+    JSON.stringify(rubricSnapshot.dimensions) !==
+      JSON.stringify([
+        "requirement_understanding_and_content_coverage",
+        "factual_accuracy_and_content_quality",
+        "narrative_and_audience_fit",
+        "visual_aesthetics_and_professional_finish",
+        "layout_hierarchy_and_readability",
+        "imagery_chart_and_information_expression",
+      ])
   ) {
     throw new Error(
       "Durable Doubao recovery rubric dimensions schema is invalid",
@@ -1133,11 +1297,55 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
       file.contentHash,
       `Run Specification.runnerCodeEvidence.files[${index}].contentHash`,
     );
-    text(
+    safeEvidenceText(
       file.path,
       `Run Specification.runnerCodeEvidence.files[${index}].path`,
     );
   });
+  const runnerFilesHash = hash(
+    canonicalJsonBytes(runnerCodeEvidence.files),
+  );
+  const runnerCodeDigest = sha(
+    runnerCodeEvidence.contentHash,
+    "Run Specification.runnerCodeEvidence.contentHash",
+  );
+  if (
+    text(
+      runnerCodeEvidence.entrypoint,
+      "Run Specification.runnerCodeEvidence.entrypoint",
+      "src/bakeoff.ts",
+    ) !== "src/bakeoff.ts" ||
+    text(
+      runnerCodeEvidence.specCommitSha,
+      "Run Specification.runnerCodeEvidence.specCommitSha",
+      BUILD_SPEC_COMMIT_SHA,
+    ) !== BUILD_SPEC_COMMIT_SHA ||
+    runnerFilesHash !== runnerCodeDigest ||
+    sha(
+      versionReferences.runnerCodeDigest,
+      "Run Specification.versionReferences.runnerCodeDigest",
+    ) !== runnerCodeDigest ||
+    runnerCodeDigest !== trustedCheckpoint.runnerCodeDigest
+  ) {
+    throw new Error(
+      "Durable Doubao recovery runner code evidence does not match the harness-owned trusted checkpoint",
+    );
+  }
+  const runnerPaths = runnerCodeEvidence.files.map((value) =>
+    text(
+      record(value, "Run Specification.runnerCodeEvidence.files").path,
+      "Run Specification.runnerCodeEvidence.files.path",
+    ),
+  );
+  if (
+    new Set(runnerPaths).size !== runnerPaths.length ||
+    runnerPaths.includes("src/doubao-recovery-checkpoints.ts") ||
+    runnerPaths.includes("src/embedded-build-manifest.ts")
+  ) {
+    throw new Error(
+      "Durable Doubao recovery runner code evidence contains circular or duplicate source claims",
+    );
+  }
   const runnerImageEvidence = record(
     runSpecificationBundle.runnerImageEvidence,
     "Run Specification.runnerImageEvidence",
@@ -1213,6 +1421,14 @@ if (
   throw new Error("Durable Doubao recovery render manifest hash mismatch");
 }
 const renderIdentity = json(renderManifest, "render manifest");
+if (
+  renderManifestAttestedPayloadHash(renderIdentity) !==
+  trustedCheckpoint.renderManifestAttestedPayloadHash
+) {
+  throw new Error(
+    "Durable Doubao recovery render manifest does not match the harness-owned trusted checkpoint attested payload hash",
+  );
+}
 exactKeys(
   renderIdentity,
   trustedCheckpoint.purpose === "real_provider_recovery"
@@ -1289,7 +1505,7 @@ const slides = rawSlides.map((value, index) => {
       slide.contentHash,
       `render manifest.slides[${index}].contentHash`,
     ),
-    filename: text(
+    filename: safeEvidenceText(
       slide.filename,
       `render manifest.slides[${index}].filename`,
     ),
@@ -1317,7 +1533,7 @@ const contactSheetHash = sha(
   contactSheet.contentHash,
   "render manifest.contactSheet.contentHash",
 );
-const contactSheetFilename = text(
+const contactSheetFilename = safeEvidenceText(
   contactSheet.filename,
   "render manifest.contactSheet.filename",
 );
@@ -1336,6 +1552,16 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     ENVIRONMENT_ORIGIN_KEYS,
     "render manifest.environmentOrigin",
   );
+  text(
+    renderEnvironmentOrigin.environment,
+    "render manifest.environmentOrigin.environment",
+    "production",
+  );
+  text(
+    renderEnvironmentOrigin.originId,
+    "render manifest.environmentOrigin.originId",
+    "production:ppt-evaluation-v1",
+  );
   const renderFidelity = record(
     renderIdentity.fidelity,
     "render manifest.fidelity",
@@ -1347,7 +1573,13 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
   );
   if (
     !Array.isArray(renderFidelity.notes) ||
-    renderFidelity.notes.some((note) => typeof note !== "string")
+    renderFidelity.notes.some((note) => typeof note !== "string") ||
+    JSON.stringify(renderFidelity.notes) !==
+      JSON.stringify([
+        "slide 9 title clipping observed in retained render",
+        "overflow checker warning retained for slides 2-16",
+        "no quality retry was performed",
+      ])
   ) {
     throw new Error(
       "Durable Doubao recovery render manifest fidelity notes schema is invalid",
@@ -1369,11 +1601,36 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     "render manifest.renderPolicy",
   );
   text(
+    renderPolicy.animationPolicy,
+    "render manifest.renderPolicy.animationPolicy",
+    "first_frame",
+  );
+  text(
+    renderPolicy.colorProfile,
+    "render manifest.renderPolicy.colorProfile",
+    "sRGB",
+  );
+  text(
+    renderPolicy.externalAssetPolicy,
+    "render manifest.renderPolicy.externalAssetPolicy",
+    "network_disabled",
+  );
+  text(
+    renderPolicy.fontPack,
+    "render manifest.renderPolicy.fontPack",
+    "local-observed",
+  );
+  text(
+    renderPolicy.resolution,
+    "render manifest.renderPolicy.resolution",
+    "1600x900",
+  );
+  text(
     renderIdentity.provenance,
     "render manifest.provenance",
     "PRODUCTION_REPLAY",
   );
-  text(
+  safeEvidenceText(
     renderIdentity.rendererAuthorizationDecisionId,
     "render manifest.rendererAuthorizationDecisionId",
   );
@@ -1638,7 +1895,12 @@ checkpoints.forEach((event, index) => {
     );
   }
   priorObservedAt = Date.parse(observedAt);
-  text(event.evidenceRef, `${eventLabel}.evidenceRef`);
+  safeEvidenceText(event.evidenceRef, `${eventLabel}.evidenceRef`);
+  safeEvidenceText(
+    event.sourceUrl,
+    `${eventLabel}.sourceUrl`,
+    "https://www.doubao.com/",
+  );
   if (
     event.sourceUrl !== "https://www.doubao.com/" ||
     (index === 0
