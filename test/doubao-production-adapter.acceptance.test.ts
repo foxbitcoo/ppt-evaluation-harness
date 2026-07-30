@@ -1046,9 +1046,9 @@ test("the exact-current public Doubao replay fixture records durable recovery an
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       specCommitSha:
-        "5475da01513f687c9a08c20d6e7fe5475ef4cdbf",
+        "fb08a1096bad8e63f33c27bd6add40e0ee6c792c",
       sourceArchiveDigest:
-        "sha256:5b07b2640feb4bb222141430758f28babcba01c9cd02e0a551e0953dc0d3ac8d",
+        "sha256:5b6709475e79b7d6fcc591d5ba4eef6a6716e79afb8aec28e77575d4cccf9982",
       sourceArchiveEntryCount: 43,
     },
   );
@@ -1107,7 +1107,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
   assert.equal(fixture.recovery.recoveredDerivativeCount, 33);
   assert.equal(
     fixture.recovery.cliArtifactIdentityHash,
-    "sha256:02611443b61f02b46471c3bb0402db91da53d5e5bd5ba92003ecea5d903641c5",
+    "sha256:d37a99031eb726a27a9baf02b053b130282f89d4508136c392524c428b742774",
   );
   assert.equal(fixture.recovery.cliDerivativeCount, 33);
   assert.equal(
@@ -1116,7 +1116,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
   );
   assert.equal(
     fixture.recovery.cliRenderManifestHash,
-    "sha256:3fcc7afcffb1075cd068417845d347a54ce44265c3bda51d0d0f56757deb3f22",
+    "sha256:11d68948fc4c200499af92b4acd4aed2a59bb2d22d7b47eaba6915f7c7db29d6",
   );
   assert.equal(
     fixture.recovery.cliDerivativeSetHash,
@@ -1157,7 +1157,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
     driverId: "doubao-real-provider-replay",
     driverVersion: "doubao-harness-browser-bridge@2",
     implementationDigest:
-      "sha256:ded8bd1cbfbee51ae5a4bf9a0429c5075d39470eff70ec19e04a7970786aa3ae",
+      "sha256:2317479ba1044dba3f3989b33445924bb5f6456b11d11dc56c0525403e1b7c6a",
     provenance: "PRODUCTION_REPLAY",
   });
   assert.equal(fixture.recovery.recoveryCliExecuted, true);

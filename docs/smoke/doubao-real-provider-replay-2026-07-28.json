@@ -33,12 +33,12 @@
   },
   "buildIdentity": {
     "schemaVersion": "ppt-evaluation-build-identity-v1",
-    "specCommitSha": "5475da01513f687c9a08c20d6e7fe5475ef4cdbf",
+    "specCommitSha": "fb08a1096bad8e63f33c27bd6add40e0ee6c792c",
     "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-    "sourceArchiveDigest": "sha256:5b07b2640feb4bb222141430758f28babcba01c9cd02e0a551e0953dc0d3ac8d",
+    "sourceArchiveDigest": "sha256:5b6709475e79b7d6fcc591d5ba4eef6a6716e79afb8aec28e77575d4cccf9982",
     "sourceArchiveEntryCount": 43,
-    "embeddedManifestHash": "sha256:7419560ea46a71ef5606b9a29b20231614cfac2012ba32430a64d86b70810646",
-    "manifestHash": "sha256:f017024a6e700e780928f26c55c30fe8b3e06ac77e269952431643cfd7136c89"
+    "embeddedManifestHash": "sha256:acef32cac1bc94abfdbe4f2a1bae4d33f5a875d94eac534391e2430320c1388e",
+    "manifestHash": "sha256:8b525975499890ce4beab5b8f9367a2b0faa7cc5db4443b4f654bc67c10a5a95"
   },
   "artifact": {
     "contentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
@@ -84,8 +84,8 @@
     ]
   },
   "recovery": {
-    "registryId": "doubao-real-provider-20260730-t09-v25",
-    "registryHash": "sha256:dfd622803fdde89c020ac8475252de7442c8a9d42e70ea87e599231830ba0263",
+    "registryId": "doubao-real-provider-20260730-t09-v28",
+    "registryHash": "sha256:ed0b955226c305e5575671f33ae0615e43037671760dcb48b50b5fcca221e2db",
     "rootReferences": {
       "artifactPrimary": "root:doubao-replay-artifact-primary",
       "artifactRecovery": "root:doubao-replay-artifact-recovery",
@@ -94,16 +94,16 @@
       "profileLock": "root:doubao-replay-profile-lock",
       "operational": "root:doubao-replay-operational"
     },
-    "artifactManifestHash": "sha256:6befe43c7b5175cd1bad36d7d17e4c0da7d9c0cdca6bbd3a72ed7111cf10b349",
-    "cliArtifactIdentityHash": "sha256:02611443b61f02b46471c3bb0402db91da53d5e5bd5ba92003ecea5d903641c5",
+    "artifactManifestHash": "sha256:5ed1ef141a11b0ad5658535777f786561cba01520f80f3c07582bb7f331c3ddd",
+    "cliArtifactIdentityHash": "sha256:d37a99031eb726a27a9baf02b053b130282f89d4508136c392524c428b742774",
     "recoveredOriginalHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
     "derivativeCount": 33,
     "recoveredDerivativeCount": 33,
-    "cliRenderManifestHash": "sha256:3fcc7afcffb1075cd068417845d347a54ce44265c3bda51d0d0f56757deb3f22",
+    "cliRenderManifestHash": "sha256:11d68948fc4c200499af92b4acd4aed2a59bb2d22d7b47eaba6915f7c7db29d6",
     "cliDerivativeCount": 33,
     "cliRecoveredDerivativeCount": 33,
     "cliDerivativeSetHash": "sha256:047f33568528b87be6abc3ce17898fdb98d36ed5f38742eed3d4b05db7e26826",
-    "runSpecificationHash": "sha256:f21f4d3a112d0592c08c478a1a3ae0aac9b6e0567592b1357aee245f00648222",
+    "runSpecificationHash": "sha256:bd398a6f1e54168d9a9b7f4fba317f6a3a92c777c8fe7a4368b17eefbd8f5c0d",
     "browserDriverEvidence": {
       "browserProfileDigest": "sha256:c6e451e70a930e80e799843cd8b1576d2bcaf47eb59c33ea1767e009fd599222",
       "captureReceipt": {
@@ -117,7 +117,7 @@
       "configurationDigest": "sha256:b79c9b95ad7e8180ee67ff1cc5554f604ec748871e71cc8da2b3334cd5310f7b",
       "driverId": "doubao-real-provider-replay",
       "driverVersion": "doubao-harness-browser-bridge@2",
-      "implementationDigest": "sha256:ded8bd1cbfbee51ae5a4bf9a0429c5075d39470eff70ec19e04a7970786aa3ae",
+      "implementationDigest": "sha256:2317479ba1044dba3f3989b33445924bb5f6456b11d11dc56c0525403e1b7c6a",
       "provenance": "PRODUCTION_REPLAY"
     },
     "checkpointCount": 4,
@@ -136,9 +136,9 @@
       "rootReference": "root:doubao-replay-profile-lock",
       "lockId": "doubao-replay-profile-lock-v1"
     },
-    "recoveryCommand": "node --import tsx scripts/recover-doubao-production-run.ts doubao-real-provider-20260730-t09-v25 root:doubao-replay-artifact-recovery root:doubao-replay-run-specification root:doubao-replay-checkpoint doubao-replay-artifact-recovery-v1 artifacts/artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4/manifest artifacts/artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4/original doubao-replay-run-specification-v1 run-specifications/f21f4d3a112d0592c08c478a1a3ae0aac9b6e0567592b1357aee245f00648222 doubao-replay-checkpoints-v1 production-replay-run-doubao-web-ppt-real-provider-rep-d77ffcfc6c17d7cf2ad9e9a7972fce90-volcano-v1-attempt-1 doubao-volcano-20260727-real-provider-v1",
+    "recoveryCommand": "node --import tsx scripts/recover-doubao-production-run.ts doubao-real-provider-20260730-t09-v28 root:doubao-replay-artifact-recovery root:doubao-replay-run-specification root:doubao-replay-checkpoint doubao-replay-artifact-recovery-v1 artifacts/artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4/manifest artifacts/artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4/original doubao-replay-run-specification-v1 run-specifications/bd398a6f1e54168d9a9b7f4fba317f6a3a92c777c8fe7a4368b17eefbd8f5c0d doubao-replay-checkpoints-v1 production-replay-run-doubao-web-ppt-real-provider-rep-d77ffcfc6c17d7cf2ad9e9a7972fce90-volcano-v1-attempt-1 doubao-volcano-20260727-real-provider-v1",
     "recoveryCliExecuted": true,
-    "recoveryCliResultHash": "sha256:03a515a59c3e5071211fe2d74d3170df44895e847beed07606b50485c623f37d",
+    "recoveryCliResultHash": "sha256:0e77e61c3dc9815513792f23cc847331e2bbe7f9592a2263571399eae492ba42",
     "recoveryCliResultReference": "root:doubao-replay-operational:recovery-cli-result.json"
   }
 }
