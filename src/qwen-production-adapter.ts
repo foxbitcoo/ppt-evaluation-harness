@@ -609,6 +609,31 @@ function reconcileRegisteredQwenTask(
   return Object.freeze(structuredClone(evidence));
 }
 
+function reconcileTestQwenTask(
+  driver: QwenBrowserDriverPort,
+  query: QwenTaskReconciliationQuery,
+): QwenTaskReconciliationEvidence {
+  if (driver.runtimeProvenance !== "TEST") {
+    throw new Error(
+      "Qwen test reconciliation requires a TEST browser driver",
+    );
+  }
+  const evidence = driver.reconciliations?.find(
+    (candidate) =>
+      JSON.stringify(candidate.query) === JSON.stringify(query),
+  );
+  if (evidence === undefined) {
+    throw new Error(
+      "Qwen test reconciliation fixture has no task/history/hash match",
+    );
+  }
+  assertIsoTimestamp(evidence.observedAt, "reconciliation time");
+  if (!/^ev_[a-f0-9]{16,64}$/.test(evidence.evidenceId)) {
+    throw new Error("Qwen reconciliation evidence ID must be opaque");
+  }
+  return Object.freeze(structuredClone(evidence));
+}
+
 function assertIsoTimestamp(value: string, field: string): void {
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) ||
@@ -1106,6 +1131,7 @@ function qwenExecutor(
   environmentOrigin: EnvironmentOrigin,
   checkpointStore?: AttemptCheckpointPort,
   reconciliationDriver?: QwenBrowserDriverPort,
+  testOnlyReconciliation = false,
 ): QwenProductAdapterExecutor {
   const executor: QwenProductAdapterExecutor = async (command) => {
     if (
@@ -1189,9 +1215,7 @@ function qwenExecutor(
           "Recovered Qwen checkpoints require vendor task identity and state version",
         );
       }
-      const reconciliation = reconcileRegisteredQwenTask(
-        reconciliationDriver,
-        {
+      const reconciliationQuery = {
           vendorTaskId:
             latestTaskCheckpoint.vendorTaskId as `task_${string}`,
           taskStateVersion:
@@ -1200,8 +1224,16 @@ function qwenExecutor(
             textEncoder.encode(JSON.stringify(recoveredEvents)),
           ),
           artifactContentHash: null,
-        },
-      );
+        };
+      const reconciliation = testOnlyReconciliation
+        ? reconcileTestQwenTask(
+            reconciliationDriver!,
+            reconciliationQuery,
+          )
+        : reconcileRegisteredQwenTask(
+            reconciliationDriver,
+            reconciliationQuery,
+          );
       const reconciliationEvent = Object.freeze({
         eventId: `${command.attemptId}-qwen-reconciliation-${recoveredEvents.length + 1}`,
         jobId: command.jobId,
@@ -1444,6 +1476,43 @@ export function createQwenProductAdapterExecutorForTest(
     driver,
     "MOCK",
     MOCK_TEST_ENVIRONMENT_ORIGIN,
+  );
+}
+
+export function createQwenReplayBehaviorExecutorForTest(input: {
+  readonly sessions: readonly QwenBrowserExecution[];
+  readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
+  readonly checkpointStore?: AttemptCheckpointPort;
+}): QwenProductAdapterExecutor {
+  const sessions = Object.freeze(
+    input.sessions.map((session) =>
+      Object.freeze(structuredClone(session)),
+    ),
+  );
+  const driver: QwenBrowserDriverPort = Object.freeze({
+    runtimeProvenance: "TEST",
+    reconciliations: Object.freeze(
+      (input.reconciliations ?? []).map((entry) =>
+        Object.freeze(structuredClone(entry)),
+      ),
+    ),
+    async execute(command: QwenBrowserExecutionCommand) {
+      const session = sessions[command.attemptSeq - 1];
+      if (session === undefined) {
+        throw new Error(
+          `Qwen TEST replay fixture has no session for attempt ${command.attemptSeq}`,
+        );
+      }
+      return Object.freeze(structuredClone(session));
+    },
+  });
+  return qwenExecutor(
+    driver,
+    "PRODUCTION_REPLAY",
+    PRODUCTION_ENVIRONMENT_ORIGIN,
+    input.checkpointStore,
+    driver,
+    true,
   );
 }
 

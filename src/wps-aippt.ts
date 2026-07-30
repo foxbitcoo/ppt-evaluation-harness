@@ -29,9 +29,11 @@ import {
   type SafeRasterCandidate,
 } from "./product-adapter.ts";
 import {
+  createWpsAiPptBrowserDriverPackage,
   reconcileRegisteredWpsAiPptTask,
   resolveRegisteredWpsAiPptBrowserDriver,
   type WpsAiPptBrowserDriverPort,
+  type WpsAiPptTaskReconciliationEvidence,
 } from "./wps-aippt-driver.ts";
 
 export const WPS_AIPPT_URL = "https://aippt.wps.cn/aippt/" as const;
@@ -1155,11 +1157,12 @@ function capturedResult(
   };
 }
 
-export function resolveWpsAiPptProductAdapterExecutor(
+function createWpsAiPptProductAdapterExecutor(
   implementation: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   browserDriver: WpsAiPptBrowserDriverPort | undefined,
   checkpointStore?: AttemptCheckpointPort,
+  testOnlyReplay = false,
 ): ProductAdapterExecutor {
   if (
     executionConfiguration.adapterKind !== "wps-aippt-browser" ||
@@ -1173,6 +1176,9 @@ export function resolveWpsAiPptProductAdapterExecutor(
     executionConfiguration.scenario === "production-replay"
       ? "replay"
       : "live";
+  const driverExecutionMode = testOnlyReplay
+    ? "test-replay" as const
+    : executionMode;
   assertRegisteredImplementationPackage(implementation);
   return Object.freeze(async (command: ProductRunCommand) => {
     if (
@@ -1249,7 +1255,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
               textEncoder.encode(JSON.stringify(persistedEvents)),
             ),
             artifactContentHash: null,
-          }, executionMode);
+          }, driverExecutionMode);
         persistedEvents.push(
           await observableEvent(
             command,
@@ -1325,7 +1331,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
         persistedEvents.push(checkpoint);
         return checkpoint;
       },
-      executionMode,
+      driverExecutionMode,
     );
     let result: WpsAiPptBrowserResult;
     try {
@@ -1370,7 +1376,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
             textEncoder.encode(JSON.stringify(persistedEvents)),
           ),
           artifactContentHash: null,
-        }, executionMode);
+        }, driverExecutionMode);
       persistedEvents.push(
         await observableEvent(
           command,
@@ -1445,7 +1451,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
           taskStateVersion: latest.taskStateVersion,
           eventHistoryHash,
           artifactContentHash: null,
-        }, executionMode);
+        }, driverExecutionMode);
       if (!Number.isFinite(Date.parse(reconciliation.observedAt))) {
         throw new Error(
           "WPS reconciliation API returned inconsistent task state",
@@ -1538,6 +1544,43 @@ export function resolveWpsAiPptProductAdapterExecutor(
       manualActions,
     };
   });
+}
+
+export function resolveWpsAiPptProductAdapterExecutor(
+  implementation: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  browserDriver: WpsAiPptBrowserDriverPort | undefined,
+  checkpointStore?: AttemptCheckpointPort,
+): ProductAdapterExecutor {
+  return createWpsAiPptProductAdapterExecutor(
+    implementation,
+    executionConfiguration,
+    browserDriver,
+    checkpointStore,
+  );
+}
+
+export function createWpsAiPptReplayBehaviorExecutorForTest(input: {
+  readonly sessions: readonly WpsAiPptBrowserResult[];
+  readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
+  readonly checkpointStore?: AttemptCheckpointPort;
+}): ProductAdapterExecutor {
+  const driver = createWpsAiPptBrowserDriverPackage({
+    provenance: "TEST_FAKE",
+    sessions: input.sessions,
+    ...(input.reconciliations === undefined
+      ? {}
+      : { reconciliations: input.reconciliations }),
+  });
+  return createWpsAiPptProductAdapterExecutor(
+    implementationPackage(),
+    parseAdapterExecutionConfiguration(
+      executionConfigurationPackage("production-replay"),
+    ),
+    driver,
+    input.checkpointStore,
+    true,
+  );
 }
 
 export class WpsAiPptProductAdapter implements ProductAdapterPort {

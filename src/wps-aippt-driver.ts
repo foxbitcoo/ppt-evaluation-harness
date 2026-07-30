@@ -383,7 +383,7 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
   checkpointSink: (
     event: WpsAiPptBrowserResult["events"][number],
   ) => Promise<ObservableAttemptEvent>,
-  executionMode: "live" | "replay",
+  executionMode: "live" | "replay" | "test-replay",
 ): (command: WpsAiPptBrowserCommand) => Promise<WpsAiPptBrowserResult> {
   registeredWpsAiPptBrowserDriverEvidence(driver);
   const frozenSessions = driver?.sessions ?? [];
@@ -477,7 +477,7 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
 export function reconcileRegisteredWpsAiPptTask(
   driver: WpsAiPptBrowserDriverPort | undefined,
   query: WpsAiPptTaskReconciliationQuery,
-  executionMode: "live" | "replay",
+  executionMode: "live" | "replay" | "test-replay",
 ): Promise<WpsAiPptTaskReconciliationEvidence> {
   registeredWpsAiPptBrowserDriverEvidence(driver);
   if (executionMode === "live" && driver === undefined) {
@@ -501,6 +501,16 @@ export function reconcileRegisteredWpsAiPptTask(
     return Promise.reject(
       new Error(
         "WPS production replay reconciliation requires REAL_PROVIDER_CAPTURE evidence",
+      ),
+    );
+  }
+  if (
+    executionMode === "test-replay" &&
+    driver?.provenance !== "TEST_FAKE"
+  ) {
+    return Promise.reject(
+      new Error(
+        "WPS TEST replay reconciliation requires a TEST_FAKE fixture",
       ),
     );
   }

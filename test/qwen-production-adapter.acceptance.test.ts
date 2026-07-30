@@ -15,7 +15,6 @@ import {
   createQwenRealProviderReplayPackage,
   createBakeoffHarness,
   parseAdapterExecutionConfiguration,
-  registeredQwenBrowserDriverEvidence,
   sha256Bytes,
   type Artifact,
   type ProductAdapterPort,
@@ -27,6 +26,9 @@ import {
   renderStaticArtifact,
   resolveHarnessProductAdapterExecutor,
 } from "../src/mock-wps.ts";
+import {
+  createQwenReplayBehaviorExecutorForTest,
+} from "../src/qwen-production-adapter.ts";
 
 type CallerExecutionKeys = Extract<
   keyof ProductAdapterPort,
@@ -94,41 +96,28 @@ test("Qwen retained captures are declared as PRODUCTION_REPLAY rather than LIVE_
   );
 });
 
-test("Qwen replay driver identity is frozen for Run Specification lineage", () => {
-  const replayDriver = createQwenRealProviderReplayPackage({
-    captureId: "unregistered-qwen-test-capture",
-    sessions: [],
-    reconciliations: [
-      {
-        query: {
-          vendorTaskId: "task_qwen_identity_1234",
-          taskStateVersion: "submitted@1",
-          eventHistoryHash:
-            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-          artifactContentHash: null,
-        },
-        observedState: "submitted",
-        observedAt: "2026-07-27T10:01:00.000Z",
-        evidenceId: "ev_3333333333333333",
-      },
-    ],
-  });
-
-  assert.deepEqual(
-    registeredQwenBrowserDriverEvidence(replayDriver),
-    {
-      driverId: "qwen-real-provider-replay",
-      provenance: "PRODUCTION_REPLAY",
-      captureSource: "REAL_PROVIDER_CAPTURE",
-      driverVersion: "qwen-harness-browser-bridge@1",
-      browserProfileDigest:
-        registeredQwenBrowserDriverEvidence(replayDriver)
-          .browserProfileDigest,
-      implementationDigest:
-        replayDriver.implementationPackage?.contentHash,
-      configurationDigest:
-        replayDriver.configurationPackage?.contentHash,
-    },
+test("Qwen replay identity cannot be minted without a registered capture receipt", () => {
+  assert.throws(
+    () =>
+      createQwenRealProviderReplayPackage({
+        captureId: "unregistered-qwen-test-capture",
+        sessions: [],
+        reconciliations: [
+          {
+            query: {
+              vendorTaskId: "task_qwen_identity_1234",
+              taskStateVersion: "submitted@1",
+              eventHistoryHash:
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              artifactContentHash: null,
+            },
+            observedState: "submitted",
+            observedAt: "2026-07-27T10:01:00.000Z",
+            evidenceId: "ev_3333333333333333",
+          },
+        ],
+      }),
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
@@ -688,34 +677,24 @@ test("a restarted Qwen replay reuses its durable reconciliation result idempoten
   const eventHistoryHash = sha256Bytes(
     new TextEncoder().encode(JSON.stringify([checkpoint])),
   );
-  const replayDriver = createQwenRealProviderReplayPackage({
-    captureId: "unregistered-qwen-test-capture",
-    sessions: [],
-    reconciliations: [
-      {
-        query: {
-          vendorTaskId: "task_qwen_recovery_1234",
-          taskStateVersion: "generating@7",
-          eventHistoryHash,
-          artifactContentHash: null,
-        },
-        observedState: "artifact_ready",
-        observedAt: "2026-07-27T10:05:00.000Z",
-        evidenceId: "ev_2222222222222222",
-      },
-    ],
-  });
-  const descriptor = new QwenReplayProductAdapter();
-  const executor = resolveHarnessProductAdapterExecutor(
-    descriptor.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      descriptor.executionConfigurationPackage,
-    ),
+  const reconciliations = [
     {
-      qwenBrowserDriver: replayDriver,
-      attemptCheckpointStore: checkpointStore,
+      query: {
+        vendorTaskId: "task_qwen_recovery_1234" as const,
+        taskStateVersion: "generating@7",
+        eventHistoryHash,
+        artifactContentHash: null,
+      },
+      observedState: "artifact_ready" as const,
+      observedAt: "2026-07-27T10:05:00.000Z",
+      evidenceId: "ev_2222222222222222" as const,
     },
-  );
+  ];
+  const executor = createQwenReplayBehaviorExecutorForTest({
+    sessions: [],
+    reconciliations,
+    checkpointStore,
+  });
 
   const command = {
     jobId: checkpoint.jobId,
@@ -751,20 +730,12 @@ test("a restarted Qwen replay reuses its durable reconciliation result idempoten
   );
 });
 
-test("Qwen replay rejects unknown final evidence after a durable submission checkpoint", async () => {
-  const descriptor = new QwenReplayProductAdapter();
+test("Qwen TEST replay behavior rejects unknown final evidence after a durable submission checkpoint", async () => {
   const checkpointStore = new InMemoryAttemptCheckpointStore(
     "qwen-unknown-after-submission-checkpoints",
   );
-  const executor = resolveHarnessProductAdapterExecutor(
-    descriptor.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      descriptor.executionConfigurationPackage,
-    ),
-    {
-      qwenBrowserDriver: createQwenRealProviderReplayPackage({
-        captureId: "unregistered-qwen-test-capture",
-        sessions: [
+  const executor = createQwenReplayBehaviorExecutorForTest({
+    sessions: [
           {
             status: "terminal",
             terminalReason: "task_state_unknown",
@@ -785,11 +756,9 @@ test("Qwen replay rejects unknown final evidence after a durable submission chec
             ],
             manualActions: [],
           },
-        ],
-      }),
-      attemptCheckpointStore: checkpointStore,
-    },
-  );
+    ],
+    checkpointStore,
+  });
 
   await assert.rejects(
     executor({
@@ -813,17 +782,9 @@ test("Qwen replay rejects unknown final evidence after a durable submission chec
   );
 });
 
-test("Qwen replay treats generation-ready evidence as submitted and rejects an unknown final claim", async () => {
-  const descriptor = new QwenReplayProductAdapter();
-  const executor = resolveHarnessProductAdapterExecutor(
-    descriptor.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      descriptor.executionConfigurationPackage,
-    ),
-    {
-      qwenBrowserDriver: createQwenRealProviderReplayPackage({
-        captureId: "unregistered-qwen-test-capture",
-        sessions: [
+test("Qwen TEST replay behavior treats generation-ready evidence as submitted and rejects an unknown final claim", async () => {
+  const executor = createQwenReplayBehaviorExecutorForTest({
+    sessions: [
           {
             status: "terminal",
             terminalReason: "technical_failure",
@@ -844,13 +805,11 @@ test("Qwen replay treats generation-ready evidence as submitted and rejects an u
             ],
             manualActions: [],
           },
-        ],
-      }),
-      attemptCheckpointStore: new InMemoryAttemptCheckpointStore(
-        "qwen-generation-ready-checkpoints",
-      ),
-    },
-  );
+    ],
+    checkpointStore: new InMemoryAttemptCheckpointStore(
+      "qwen-generation-ready-checkpoints",
+    ),
+  });
 
   await assert.rejects(
     executor({
@@ -866,7 +825,7 @@ test("Qwen replay treats generation-ready evidence as submitted and rejects an u
   );
 });
 
-test("Qwen replay rejects unsafe structured evidence before persisting any checkpoint", async (t) => {
+test("Qwen TEST replay behavior rejects unsafe structured evidence before persisting any checkpoint", async (t) => {
   const observedAt = "2026-07-27T10:01:30.000Z";
   const baseExecution = {
     status: "terminal",
@@ -944,22 +903,12 @@ test("Qwen replay rejects unsafe structured evidence before persisting any check
       const checkpointStore = new InMemoryAttemptCheckpointStore(
         `qwen-unsafe-${label}`,
       );
-      const descriptor = new QwenReplayProductAdapter();
-      const executor = resolveHarnessProductAdapterExecutor(
-        descriptor.implementationPackage,
-        parseAdapterExecutionConfiguration(
-          descriptor.executionConfigurationPackage,
-        ),
-        {
-          qwenBrowserDriver: createQwenRealProviderReplayPackage({
-            captureId: "unregistered-qwen-test-capture",
-            sessions: [
-              execution as unknown as QwenBrowserExecution,
-            ],
-          }),
-          attemptCheckpointStore: checkpointStore,
-        },
-      );
+      const executor = createQwenReplayBehaviorExecutorForTest({
+        sessions: [
+          execution as unknown as QwenBrowserExecution,
+        ],
+        checkpointStore,
+      });
       const attemptId = `attempt-qwen-unsafe-${label}`;
 
       await assert.rejects(
@@ -982,31 +931,21 @@ test("Qwen replay rejects unsafe structured evidence before persisting any check
   }
 });
 
-test("Qwen configuration evidence cannot be borrowed from a submission milestone", async () => {
+test("Qwen TEST replay behavior rejects configuration evidence borrowed from a submission milestone", async () => {
   const fixture = await qwenPptxFixture();
   const replaySession = await retainedQwenReplaySession(fixture, {
     package: "ev_2222222222222222",
     model: "ev_5555555555555555",
     configuration: "ev_4444444444444444",
   });
-  const descriptor = new QwenReplayProductAdapter();
 
   await assert.rejects(
-    resolveHarnessProductAdapterExecutor(
-      descriptor.implementationPackage,
-      parseAdapterExecutionConfiguration(
-        descriptor.executionConfigurationPackage,
+    createQwenReplayBehaviorExecutorForTest({
+      sessions: [replaySession],
+      checkpointStore: new InMemoryAttemptCheckpointStore(
+        "qwen-misbound-configuration-checkpoints",
       ),
-      {
-        qwenBrowserDriver: createQwenRealProviderReplayPackage({
-          captureId: "unregistered-qwen-test-capture",
-          sessions: [replaySession],
-        }),
-        attemptCheckpointStore: new InMemoryAttemptCheckpointStore(
-          "qwen-misbound-configuration-checkpoints",
-        ),
-      },
-    )({
+    })({
       jobId: "job-qwen-misbound-configuration",
       runId: "run-qwen-misbound-configuration",
       attemptId: "attempt-qwen-misbound-configuration-1",
@@ -1019,61 +958,20 @@ test("Qwen configuration evidence cannot be borrowed from a submission milestone
   );
 });
 
-test("a retained Qwen capture produces PRODUCTION_REPLAY Artifact and bound opaque execution evidence", async () => {
+test("a synthetic retained Qwen capture cannot produce a PRODUCTION_REPLAY Artifact", async () => {
   const fixture = await qwenPptxFixture();
   const replaySession = await retainedQwenReplaySession(fixture, {
     package: "ev_2222222222222222",
     model: "ev_3333333333333333",
     configuration: "ev_4444444444444444",
   });
-  const descriptor = new QwenReplayProductAdapter();
-  const checkpointStore = new InMemoryAttemptCheckpointStore(
-    "qwen-capture-checkpoints",
-  );
-  const result = await resolveHarnessProductAdapterExecutor(
-    descriptor.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      descriptor.executionConfigurationPackage,
-    ),
-    {
-      qwenBrowserDriver: createQwenRealProviderReplayPackage({
+  assert.throws(
+    () =>
+      createQwenRealProviderReplayPackage({
         captureId: "unregistered-qwen-test-capture",
         sessions: [replaySession],
       }),
-      attemptCheckpointStore: checkpointStore,
-    },
-  )({
-    jobId: "job-qwen-capture",
-    runId: "run-qwen-capture",
-    attemptId: "attempt-qwen-capture-1",
-    attemptSeq: 1,
-    timeoutMs: 30 * 60 * 1_000,
-    signal: new AbortController().signal,
-    evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
-  });
-
-  assert.ok(!("content" in result));
-  const candidate = result.artifactCandidates[0];
-  assert.ok(candidate);
-  assert.equal(candidate.artifact.provenance, "PRODUCTION_REPLAY");
-  assert.equal(
-    candidate.productionExecutionEvidence?.captureSource,
-    "REAL_PROVIDER_CAPTURE",
-  );
-  assert.equal(
-    candidate.productionExecutionEvidence?.traceHash,
-    sha256Bytes(
-      new TextEncoder().encode(
-        JSON.stringify(result.observableEvents),
-      ),
-    ),
-  );
-  assert.ok(
-    result.observableEvents?.every(
-      ({ evidenceRef, sourceUrl }) =>
-        /^ev_[a-f0-9]{16,64}$/.test(evidenceRef) &&
-        sourceUrl === `urn:qwen-evidence:${evidenceRef}`,
-    ),
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
