@@ -152,6 +152,7 @@ export {
 } from "./environment-origin.ts";
 export {
   InMemoryFeishuProjection,
+  ProjectionStaleBaselineError,
   type AdjudicationEventTablePort,
   type ArtifactScoreTablePort,
   type CapturedArtifactTablePort,
@@ -162,6 +163,7 @@ export {
   type FeishuProjectionPort,
   type FeishuProjectionSnapshot,
   type InMemoryFeishuProjectionOptions,
+  type ProjectionCommitBaseline,
   type ProductGapCardTablePort,
   type ProductGapCardWorkflowTablePort,
   type ReportDocumentPort,
@@ -330,6 +332,7 @@ export {
   registeredWpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverPort,
+  type WpsAiPptRetainedRenderedPage,
   type WpsAiPptTaskReconciliationEvidence,
   type WpsAiPptTaskReconciliationQuery,
 } from "./wps-aippt-driver.ts";

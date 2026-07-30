@@ -288,9 +288,26 @@ export function rendererSystemRuntimeAttestationDigestForTest(
 }
 
 function codeDirectoryHash(path: string): `sha256:${string}` {
+  const resolvedPath = resolve(path);
+  const verified = spawnSync(
+    "/usr/bin/codesign",
+    [
+      "--verify",
+      "--strict",
+      "--all-architectures",
+      "--verbose=2",
+      resolvedPath,
+    ],
+    { encoding: "utf8" },
+  );
+  if (verified.status !== 0) {
+    throw new Error(
+      `Frozen Artifact renderer system runtime actual bytes failed strict signature verification for ${path}`,
+    );
+  }
   const inspected = spawnSync(
     "/usr/bin/codesign",
-    ["-dvvv", resolve(path)],
+    ["-dvvv", resolvedPath],
     { encoding: "utf8" },
   );
   const output = `${inspected.stdout ?? ""}\n${inspected.stderr ?? ""}`;
@@ -302,6 +319,12 @@ function codeDirectoryHash(path: string): `sha256:${string}` {
     );
   }
   return `sha256:${match[1]}`;
+}
+
+export function rendererVerifiedCodeDirectoryHashForTest(
+  path: string,
+): `sha256:${string}` {
+  return codeDirectoryHash(path);
 }
 
 function currentRendererSystemRuntimeAttestation():

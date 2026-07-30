@@ -198,11 +198,30 @@ export interface FeishuProjectionPort
   commitAuthorizedSnapshot(
     snapshot: FeishuProjectionSnapshot,
     authorization: ApprovedEgressAuthorization,
+    baseline?: ProjectionCommitBaseline,
   ): Promise<void>;
-  forkForStaging(): FeishuProjectionPort;
+  captureCommitBaseline(
+    jobId: string,
+  ): Promise<ProjectionCommitBaseline>;
+  forkForStaging(
+    baselineSnapshot?: FeishuProjectionSnapshot,
+  ): FeishuProjectionPort;
   snapshot(): FeishuProjectionSnapshot;
   scrubPayloadsForJob(jobId: string): Promise<void>;
   hasPayloadsForJob(jobId: string): Promise<boolean>;
+}
+
+export interface ProjectionCommitBaseline {
+  readonly jobId: string;
+  readonly localSnapshot: FeishuProjectionSnapshot;
+  readonly remoteBatchHash: `sha256:${string}` | null;
+}
+
+export class ProjectionStaleBaselineError extends Error {
+  constructor(message = "Operational ledger projection baseline is stale") {
+    super(message);
+    this.name = "ProjectionStaleBaselineError";
+  }
 }
 
 export interface FeishuProjectionSnapshot {
@@ -270,17 +289,54 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   protected async materializeAuthorizedSnapshot(
     snapshot: FeishuProjectionSnapshot,
     _authorization: ApprovedEgressAuthorization,
+    _baseline?: ProjectionCommitBaseline,
   ): Promise<FeishuProjectionSnapshot> {
     return snapshot;
   }
 
-  forkForStaging(): FeishuProjectionPort {
+  protected async captureRemoteBatchHash(
+    _jobId: string,
+  ): Promise<`sha256:${string}` | null> {
+    return null;
+  }
+
+  protected didCommitAuthorizedSnapshot(
+    _snapshot: FeishuProjectionSnapshot,
+  ): void {}
+
+  async captureCommitBaseline(
+    jobId: string,
+  ): Promise<ProjectionCommitBaseline> {
+    return this.#runProjectionExclusive(async () => {
+      this.#assertJobActive(jobId);
+      const localSnapshot = this.snapshot();
+      if (
+        !localSnapshot.runRecordTable.some(
+          (record) =>
+            record.recordType === "bakeoff_job" &&
+            record.jobId === jobId,
+        )
+      ) {
+        throw new Error(`Bakeoff Job record not found: ${jobId}`);
+      }
+      return {
+        jobId,
+        localSnapshot,
+        remoteBatchHash:
+          await this.captureRemoteBatchHash(jobId),
+      };
+    });
+  }
+
+  forkForStaging(
+    baselineSnapshot: FeishuProjectionSnapshot = this.snapshot(),
+  ): FeishuProjectionPort {
     const staging = new InMemoryFeishuProjection({
       targetEnvironment: this.targetEnvironment,
       egressDestination: this.egressDestination,
       clock: this.#clock,
     });
-    staging.#replaceSnapshot(this.snapshot());
+    staging.#replaceSnapshot(baselineSnapshot);
     return staging;
   }
 
@@ -1035,6 +1091,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async commitAuthorizedSnapshot(
     snapshot: FeishuProjectionSnapshot,
     authorization: ApprovedEgressAuthorization,
+    baseline?: ProjectionCommitBaseline,
   ): Promise<void> {
     const batchJobIds = new Set([
       ...snapshot.runRecordTable.map(({ jobId }) => jobId),
@@ -1056,6 +1113,16 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     return this.#runProjectionExclusive(async () => {
       this.#assertJobActive(jobId);
+      if (
+        baseline !== undefined &&
+        (baseline.jobId !== jobId ||
+          !isDeepStrictEqual(
+            this.snapshot(),
+            baseline.localSnapshot,
+          ))
+      ) {
+        throw new ProjectionStaleBaselineError();
+      }
       const job = snapshot.runRecordTable.find(
         (record) =>
           record.recordType === "bakeoff_job" &&
@@ -1135,6 +1202,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         await this.materializeAuthorizedSnapshot(
           snapshot,
           authorization,
+          baseline,
         );
       const stableMaterializationView = (
         candidate: FeishuProjectionSnapshot,
@@ -1265,6 +1333,15 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
           ),
         );
         const currentBeforeMaterialization = working.snapshot();
+        if (
+          baseline !== undefined &&
+          !isDeepStrictEqual(
+            currentBeforeMaterialization,
+            baseline.localSnapshot,
+          )
+        ) {
+          throw new ProjectionStaleBaselineError();
+        }
         for (const current of currentBeforeMaterialization.runRecordTable) {
           if (!materializedRunRecordIds.has(current.recordId)) continue;
           const staged = snapshot.runRecordTable.find(
@@ -1393,6 +1470,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
           this.#clock,
         );
         this.#replaceSnapshot(working.snapshot());
+        this.didCommitAuthorizedSnapshot(snapshot);
         return;
       }
     });

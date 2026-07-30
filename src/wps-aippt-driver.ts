@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 
 import type {
   ProductAdapterImplementationPackage,
+  RealProviderCaptureReceiptEvidence,
   TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
 import type { ObservableAttemptEvent } from "./domain.ts";
@@ -89,11 +90,23 @@ export interface WpsAiPptBrowserDriverPort {
 }
 
 export interface WpsAiPptReplayCaptureReceipt {
-  readonly captureId: string;
-  readonly artifactContentHash: `sha256:${string}`;
-  readonly traceDigest: `sha256:${string}`;
-  readonly renderDigest: `sha256:${string}`;
+  readonly captureId: RealProviderCaptureReceiptEvidence["captureId"];
+  readonly artifactContentHash:
+    RealProviderCaptureReceiptEvidence["artifactContentHash"];
+  readonly traceDigest:
+    RealProviderCaptureReceiptEvidence["traceDigest"];
+  readonly retainedPageDigest:
+    RealProviderCaptureReceiptEvidence["retainedPageDigest"];
+  readonly renderDigest:
+    RealProviderCaptureReceiptEvidence["renderDigest"];
   readonly packageIdentityDigest: `sha256:${string}`;
+}
+
+export interface WpsAiPptRetainedRenderedPage {
+  readonly pageNumber: number;
+  readonly filename: string;
+  readonly mimeType: "image/png";
+  readonly content: Uint8Array;
 }
 
 export interface WpsAiPptTaskReconciliationQuery {
@@ -184,8 +197,10 @@ const HARNESS_OWNED_WPS_CAPTURE_RECEIPTS = new Map<
         "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
       traceDigest:
         "sha256:4476b77bca87f6487296fc091c524a20de6f5b021c9541572b1512d074771df0",
+      retainedPageDigest:
+        "sha256:ef89bf6b7d58020fca3045b2a819781e8e5d42f3d3085a3bed00ea06e7568387",
       renderDigest:
-        "sha256:7585511f9d4f166a817e19c8d8b599888fef702a5b574b942a82d9b2cd6232e2",
+        "sha256:846a0ab1b828ffff54ec4288e27e9d332c6e48046bdb0bf83870cd71e9143163",
       packageIdentityDigest:
         "sha256:3960d4ff788421be816b69925092236f659f8e3623190bab7772172ab65d5467",
     }),
@@ -193,9 +208,46 @@ const HARNESS_OWNED_WPS_CAPTURE_RECEIPTS = new Map<
 ]);
 const harnessOwnedWpsReplayPackages = new WeakSet<object>();
 
+function wpsRetainedPageDigest(
+  pages: readonly WpsAiPptRetainedRenderedPage[],
+): `sha256:${string}` {
+  if (
+    pages.length !== 16 ||
+    new Set(pages.map(({ pageNumber }) => pageNumber)).size !== 16 ||
+    pages.some(
+      ({ pageNumber, filename, mimeType, content }) =>
+        pageNumber < 1 ||
+        pageNumber > 16 ||
+        filename !==
+          `slide-${String(pageNumber).padStart(2, "0")}.png` ||
+        mimeType !== "image/png" ||
+        content.byteLength === 0,
+    )
+  ) {
+    throw new Error(
+      "WPS harness-owned capture receipt requires 16 retained PNG renders",
+    );
+  }
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify(
+        [...pages]
+          .sort((left, right) => left.pageNumber - right.pageNumber)
+          .map(({ pageNumber, filename, mimeType, content }) => ({
+            pageNumber,
+            filename,
+            mimeType,
+            contentHash: sha256(content),
+          })),
+      ),
+    ),
+  );
+}
+
 export function createWpsAiPptRealProviderReplayPackage(input: {
   readonly captureId: string;
   readonly sessions: readonly WpsAiPptBrowserResult[];
+  readonly renderedPages: readonly WpsAiPptRetainedRenderedPage[];
   readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
 }): WpsAiPptBrowserDriverPort {
   if (
@@ -244,6 +296,14 @@ export function createWpsAiPptRealProviderReplayPackage(input: {
   ) {
     throw new Error(
       "WPS trace does not match the harness-owned capture receipt",
+    );
+  }
+  if (
+    wpsRetainedPageDigest(input.renderedPages) !==
+    receipt.retainedPageDigest
+  ) {
+    throw new Error(
+      "WPS retained PNG render does not match the harness-owned capture receipt",
     );
   }
   const replayPackage = Object.freeze({
@@ -303,12 +363,7 @@ export interface WpsAiPptBrowserDriverEvidence
   readonly browserProfileDigest: `sha256:${string}`;
   readonly implementationDigest: `sha256:${string}`;
   readonly configurationDigest: `sha256:${string}`;
-  readonly captureReceipt?: {
-    readonly captureId: string;
-    readonly artifactContentHash: `sha256:${string}`;
-    readonly traceDigest: `sha256:${string}`;
-    readonly renderDigest: `sha256:${string}`;
-  };
+  readonly captureReceipt?: WpsAiPptReplayCaptureReceipt;
 }
 
 const HARNESS_OWNED_PRODUCTION_DRIVER_EVIDENCE:
@@ -467,6 +522,7 @@ export function resolveRegisteredWpsAiPptBrowserDriver(
           traceHash: sha256(
             textEncoder.encode(JSON.stringify(persistedEvents)),
           ),
+          captureReceipt: driver.captureReceipt!,
         }),
       });
     }

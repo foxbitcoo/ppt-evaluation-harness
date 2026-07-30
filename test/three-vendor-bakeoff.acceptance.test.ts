@@ -213,6 +213,11 @@ test("the Feishu projections preserve stable Case, Run, Artifact, score, and pro
         caseId: VOLCANO_CASE_ID,
         jobId: "MOCK-job-volcano-v1",
       },
+      {
+        comparisonId: "MOCK-comparison-qwen-doubao-volcano-v1",
+        caseId: VOLCANO_CASE_ID,
+        jobId: "MOCK-job-volcano-v1",
+      },
     ],
   );
   assert.equal(gapCardRecords.length, 3);
@@ -847,6 +852,13 @@ test("Comparison and Gap Card are separate neutral lineage records without a per
         leftRunId: "MOCK-run-wps-volcano-v1",
         rightRunId: "MOCK-run-doubao-volcano-v1",
         leftScorecardId: "MOCK-scorecard-wps-volcano-v1",
+        rightScorecardId: "MOCK-scorecard-doubao-volcano-v1",
+      },
+      {
+        comparisonId: "MOCK-comparison-qwen-doubao-volcano-v1",
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        rightRunId: "MOCK-run-doubao-volcano-v1",
+        leftScorecardId: "MOCK-scorecard-qwen-volcano-v1",
         rightScorecardId: "MOCK-scorecard-doubao-volcano-v1",
       },
     ],

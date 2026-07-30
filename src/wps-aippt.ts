@@ -1552,6 +1552,11 @@ export function resolveWpsAiPptProductAdapterExecutor(
   browserDriver: WpsAiPptBrowserDriverPort | undefined,
   checkpointStore?: AttemptCheckpointPort,
 ): ProductAdapterExecutor {
+  if (browserDriver?.provenance === "TEST_FAKE") {
+    throw new Error(
+      "WPS production resolver rejects TEST_FAKE browser drivers",
+    );
+  }
   return createWpsAiPptProductAdapterExecutor(
     implementation,
     executionConfiguration,

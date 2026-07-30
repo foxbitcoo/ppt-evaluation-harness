@@ -85,6 +85,25 @@ const registry = await registerDurableRoots({
 
 const pptx = Uint8Array.from(await readFile(pptxPath));
 const artifactContentHash = sha256(pptx);
+const retainedRenderedPages = await Promise.all(
+  Array.from({ length: 16 }, async (_, index) => {
+    const pageNumber = index + 1;
+    return {
+      pageNumber,
+      filename:
+        `slide-${String(pageNumber).padStart(2, "0")}.png`,
+      mimeType: "image/png" as const,
+      content: Uint8Array.from(
+        await readFile(
+          join(
+            slidesDirectory,
+            `slide-${String(pageNumber).padStart(2, "0")}.png`,
+          ),
+        ),
+      ),
+    };
+  }),
+);
 const tombstones = new InMemoryTombstoneLedger(
   "wps-real-provider-replay-tombstones-v3",
 );
@@ -256,6 +275,7 @@ const outcome = await createBakeoffHarness({
       captureId:
         "wps-real-provider-20260728-round5-resolution-final",
       sessions: [replayResult],
+      renderedPages: retainedRenderedPages,
     }),
   egressAuthorization: authorization,
   egressAudit,

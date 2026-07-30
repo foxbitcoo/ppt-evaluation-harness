@@ -98,7 +98,7 @@ test("an already-scored compatible Qwen–Doubao pair can be selected without re
   assert.deepEqual(parentJob?.auxiliaryReportUrls, [report.report.url]);
 });
 
-test("the report view defaults to WPS–Qwen and WPS–Doubao without making WPS a stored baseline", async () => {
+test("the report view defaults to every compatible pair without making any product a stored baseline", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
     feishu,
@@ -130,6 +130,10 @@ test("the report view defaults to WPS–Qwen and WPS–Doubao without making WPS
       ],
       [
         "MOCK-run-wps-volcano-v1",
+        "MOCK-run-doubao-volcano-v1",
+      ],
+      [
+        "MOCK-run-qwen-volcano-v1",
         "MOCK-run-doubao-volcano-v1",
       ],
     ],
@@ -350,7 +354,42 @@ test("a partial default report keeps every selected vendor delivery outcome besi
   ]);
 });
 
-test("default WPS-centered views follow stable vendor identity across package versions", async () => {
+test("a partial Bakeoff automatically compares Qwen and Doubao when WPS has no assessable Artifact", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter({ scenario: "quota_blocked" }),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+
+  assert.equal(outcome.job.status, "partial");
+  assert.match(outcome.report.markdown, /Mock WPS AI PPT/);
+  assert.match(
+    outcome.report.markdown,
+    /^## Mock Qwen PPT–Mock Doubao PPT$/m,
+  );
+  assert.deepEqual(
+    feishu.snapshot().productGapCardTable.flatMap((record) =>
+      record.recordType === "comparison"
+        ? [[record.leftRunId, record.rightRunId]]
+        : [],
+    ),
+    [
+      [
+        "MOCK-run-qwen-volcano-v1",
+        "MOCK-run-doubao-volcano-v1",
+      ],
+    ],
+  );
+});
+
+test("default all-pairs views follow stable vendor identity across package versions", async () => {
   const versionedAdapter = (
     adapter:
       | MockWpsProductAdapter
@@ -404,6 +443,7 @@ test("default WPS-centered views follow stable vendor identity across package ve
     [
       ["Mock WPS AI PPT", "Mock Qwen PPT"],
       ["Mock WPS AI PPT", "Mock Doubao PPT"],
+      ["Mock Qwen PPT", "Mock Doubao PPT"],
     ],
   );
 });
@@ -490,6 +530,152 @@ test("comparison rejects mismatched persisted compatibility fingerprints before 
     before.productGapCardTable.length,
   );
   assert.equal(after.reports.length, before.reports.length);
+});
+
+test("comparison rejects LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards even when every other compatibility field matches", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const provenanceForRun = (runId: string) =>
+    runId === "MOCK-run-qwen-volcano-v1"
+      ? ("LIVE_PRODUCTION" as const)
+      : runId === "MOCK-run-doubao-volcano-v1"
+        ? ("PRODUCTION_REPLAY" as const)
+        : ("MOCK" as const);
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    vendorRuns: source.vendorRuns.map((run) => ({
+      ...run,
+      provenance: provenanceForRun(run.recordId),
+    })),
+    artifactScores: source.artifactScores.map((record) => ({
+      ...record,
+      provenance: provenanceForRun(record.runId),
+      artifact: {
+        ...record.artifact,
+        provenance: provenanceForRun(record.runId),
+      },
+      scorecard: {
+        ...record.scorecard,
+        provenance: provenanceForRun(record.runId),
+      },
+    })),
+  }));
+
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /provenance|compatible for direct comparison/i,
+  );
+});
+
+test("comparison rejects Codex Judge scorecards produced by different stable execution identities", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const hash = (value: string) =>
+    `sha256:${value.repeat(64)}` as `sha256:${string}`;
+  const lineage = (
+    binaryHash: `sha256:${string}`,
+  ): NonNullable<
+    ArtifactScoreTableRecord["scorecard"]["judgeLineage"]
+  > =>
+    ({
+      provider: "codex_cli",
+      adapterVersion: "codex-cli-judge@1",
+      requestedModel: "gpt-5.6-sol",
+      responseModel: "gpt-5.6-sol",
+      responseId: "codex_cli_test",
+      promptVersion: "query-six-dimension-judge-prompt-v1",
+      promptHash: hash("1"),
+      configHash: hash("2"),
+      schemaHash: hash("3"),
+      contextHash: hash("4"),
+      payloadHash: hash("5"),
+      egressAuthorizationHash: hash("6"),
+      egressAuthorization: {},
+      egressAttemptId: "judge-egress-test",
+      egressAttempt: {},
+      inputHash: hash("7"),
+      idempotencyKey: "judge_test",
+      rasterizerVersion: "static-render-rasterizer@1",
+      rasterizedImagesHash: hash("8"),
+      rasterizedImageHashes: [],
+      imageDetail: "high",
+      store: false,
+      executionEvidence: {
+        schemaVersion: "codex-cli-judge-execution-v1",
+        binaryPath:
+          "/Applications/ChatGPT.app/Contents/Resources/codex",
+        binaryHash,
+        fixedArgumentsHash: hash("a"),
+        sandboxBinaryPath: "/usr/bin/sandbox-exec",
+        sandboxBinaryHash: hash("b"),
+        sandboxProfileHash: hash("c"),
+        isolationAttestationHash: hash("d"),
+        invocationHash: hash("e"),
+        transcriptHash: hash("f"),
+        resultHash: hash("0"),
+      },
+    }) as unknown as NonNullable<
+      ArtifactScoreTableRecord["scorecard"]["judgeLineage"]
+    >;
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    artifactScores: source.artifactScores.map((record) => ({
+      ...record,
+      scorecard: {
+        ...record.scorecard,
+        judgeLineage: lineage(
+          record.runId === "MOCK-run-doubao-volcano-v1"
+            ? hash("9")
+            : hash("1"),
+        ),
+      },
+    })),
+  }));
+
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /judge|execution|compatible for direct comparison/i,
+  );
 });
 
 test("append-only reevaluations require explicit scorecard selection and bind comparison identity to it", async () => {

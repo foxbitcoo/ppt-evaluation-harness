@@ -8,6 +8,7 @@ import {
   MockDoubaoProductAdapter,
   MockQwenProductAdapter,
   MockWpsProductAdapter,
+  ProjectionStaleBaselineError,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   VOLCANO_CASE_ID,
   canonicalJsonBytes,
@@ -139,6 +140,7 @@ async function authorizeSnapshot(
 
 const LARK_TEST_CONFIGURATION = {
   concurrencyBoundary: "single_workstation_durable_mutex",
+  lockRootPath: "/tmp/ppt-evaluation-lark-atomicity-test-locks",
   baseTokenEnvironmentVariable: "PPT_EVAL_ATOMICITY_TEST_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_ATOMICITY_TEST_REPORT_DOC_TOKEN",
@@ -454,6 +456,92 @@ test("a response-loss retry converges the local projection and preserves dynamic
     ).length,
     1,
   );
+});
+
+test("two dynamic reports staged from one baseline cannot overwrite each other and converge after a stale retry", async () => {
+  const projection = new HttpsMaterializingProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const baseline = await projection.captureCommitBaseline(
+    bakeoff.job.jobId,
+  );
+  const stage = async (
+    pairs: NonNullable<Parameters<
+      ReturnType<typeof createComparisonReportService>["createReport"]
+    >[0]["pairs"]>,
+  ) => {
+    const staged = projection.forkForStaging(
+      baseline.localSnapshot,
+    );
+    const outcome = await createComparisonReportService({
+      feishu: staged,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs,
+    });
+    return { staged, outcome };
+  };
+  const first = await stage(dynamicPair);
+  const reversePair = [
+    {
+      leftRunId: "MOCK-run-doubao-volcano-v1",
+      rightRunId: "MOCK-run-qwen-volcano-v1",
+    },
+  ] as const;
+  const second = await stage(reversePair);
+
+  await projection.commitAuthorizedSnapshot(
+    first.staged.snapshot(),
+    await authorizeSnapshot(projection, first.staged.snapshot()),
+    baseline,
+  );
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      second.staged.snapshot(),
+      await authorizeSnapshot(projection, second.staged.snapshot()),
+      baseline,
+    ),
+    ProjectionStaleBaselineError,
+  );
+
+  const retryBaseline = await projection.captureCommitBaseline(
+    bakeoff.job.jobId,
+  );
+  const retry = projection.forkForStaging(
+    retryBaseline.localSnapshot,
+  );
+  const retried = await createComparisonReportService({
+    feishu: retry,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: reversePair,
+  });
+  await projection.commitAuthorizedSnapshot(
+    retry.snapshot(),
+    await authorizeSnapshot(projection, retry.snapshot()),
+    retryBaseline,
+  );
+
+  const job = projection.snapshot().runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  assert.deepEqual(
+    new Set(job?.auxiliaryReportUrls),
+    new Set([
+      `https://example.test/docx/${first.outcome.report.reportId}`,
+      `https://example.test/docx/${retried.report.reportId}`,
+    ]),
+  );
+  assert.equal(projection.snapshot().reports.length, 3);
 });
 
 test("production dynamic comparison without persistence authorization leaves the local projection unchanged", async () => {

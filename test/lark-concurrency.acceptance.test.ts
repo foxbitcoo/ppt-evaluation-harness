@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +14,7 @@ import test from "node:test";
 import {
   acquireLarkSingleWorkstationMutexForTest,
   createLarkCliTransportForMutationBoundaryTest,
+  createVerifiedLarkCliTransport,
   type LarkCliProjectionConfiguration,
 } from "../src/lark-base-projection.ts";
 import {
@@ -24,6 +30,7 @@ import {
 const FIXED_TIME = "2020-01-01T00:00:00.000Z";
 const LARK_TEST_CONFIGURATION = {
   concurrencyBoundary: "single_workstation_durable_mutex",
+  lockRootPath: "/tmp/ppt-evaluation-lark-concurrency-test-locks",
   baseTokenEnvironmentVariable: "PPT_EVAL_CONCURRENCY_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_CONCURRENCY_REPORT_TOKEN",
@@ -62,7 +69,7 @@ const allowLarkMutation = {
   },
 } satisfies EgressAuthorizationPort;
 
-test("the single-workstation mutex is recovered after its owning process crashes", async () => {
+test("the single-workstation mutex is recovered after its owner crashes and its PID is reused", async () => {
   const lockRoot = await mkdtemp(
     join(tmpdir(), "ppt-lark-crash-mutex-test-"),
   );
@@ -105,11 +112,28 @@ test("the single-workstation mutex is recovered after its owning process crashes
     await new Promise<void>((resolveClose) => {
       child.once("close", () => resolveClose());
     });
+    const lockName = readdirSync(lockRoot).find((name) =>
+      name.endsWith(".lock"),
+    );
+    assert.ok(lockName);
+    const lockPath = join(lockRoot, lockName);
+    const crashedOwner = JSON.parse(
+      readFileSync(lockPath, "utf8"),
+    ) as Record<string, unknown>;
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        ...crashedOwner,
+        processId: process.pid,
+      }),
+      "utf8",
+    );
 
     const release =
       await acquireLarkSingleWorkstationMutexForTest({
         lockRoot,
         scope: "crash-recovery",
+        waitTimeoutMs: 1_000,
       });
     await release();
   } finally {
@@ -119,6 +143,121 @@ test("the single-workstation mutex is recovered after its owning process crashes
       // The expected crash path already terminated it.
     }
     await rm(lockRoot, { recursive: true, force: true });
+  }
+});
+
+test("the single-workstation mutex never steals an incomplete owner from a live creator", async () => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-incomplete-owner-test-"),
+  );
+  const scope = "incomplete-live-owner";
+  const lockPath = join(
+    lockRoot,
+    `${createHash("sha256").update(scope).digest("hex")}.lock`,
+  );
+  const incompleteOwner = await open(lockPath, "wx", 0o600);
+  try {
+    await assert.rejects(
+      acquireLarkSingleWorkstationMutexForTest({
+        lockRoot,
+        scope,
+        waitTimeoutMs: 2_250,
+      } as Parameters<
+        typeof acquireLarkSingleWorkstationMutexForTest
+      >[0] & { readonly waitTimeoutMs: number }),
+      /mutex wait timed out/i,
+    );
+  } finally {
+    await incompleteOwner.close();
+    await rm(lockRoot, { recursive: true, force: true });
+  }
+});
+
+test("verified Lark production rejects a configuration without one fixed machine lock root", async () => {
+  const {
+    lockRootPath: _lockRootPath,
+    ...configurationWithoutLockRoot
+  } = LARK_TEST_CONFIGURATION;
+  await assert.rejects(
+    createVerifiedLarkCliTransport({
+      configuration:
+        configurationWithoutLockRoot as unknown as LarkCliProjectionConfiguration,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+    }),
+    /fixed machine lock root/i,
+  );
+});
+
+test("workers with different TMPDIR values still share the configured machine lock root", async () => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-fixed-root-test-"),
+  );
+  const workerTmp = await mkdtemp(
+    join(tmpdir(), "ppt-lark-worker-tmp-"),
+  );
+  const releaseFirst =
+    await acquireLarkSingleWorkstationMutexForTest({
+      lockRoot,
+      scope: "fixed-root-across-tmpdir",
+    });
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const childScript = [
+    `import { acquireLarkSingleWorkstationMutexForTest } from ${JSON.stringify(moduleUrl)};`,
+    `const release = await acquireLarkSingleWorkstationMutexForTest({ lockRoot: ${JSON.stringify(lockRoot)}, scope: "fixed-root-across-tmpdir" });`,
+    'process.stdout.write("acquired\\n");',
+    "await release();",
+  ].join("\n");
+  const child = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      childScript,
+    ],
+    {
+      env: { ...process.env, TMPDIR: workerTmp },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  try {
+    let childOutput = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (value: string) => {
+      childOutput += value;
+    });
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, 100);
+    });
+    assert.equal(childOutput, "");
+    await releaseFirst();
+    await new Promise<void>((resolveClose, rejectClose) => {
+      child.once("error", rejectClose);
+      child.once("close", (code) => {
+        if (code !== 0) {
+          rejectClose(
+            new Error(`fixed-root worker exited with code ${String(code)}`),
+          );
+          return;
+        }
+        resolveClose();
+      });
+    });
+    assert.equal(childOutput, "acquired\n");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // The expected path already exited.
+    }
+    await releaseFirst();
+    await rm(lockRoot, { recursive: true, force: true });
+    await rm(workerTmp, { recursive: true, force: true });
   }
 });
 
@@ -493,7 +632,7 @@ test("a concurrent recovery during the Docx-owner-only window has exactly one ru
   assert.equal(reportRevision, 1);
 });
 
-test("a crashed Base-backed claim is recovered by one new lease epoch", async (context) => {
+test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by one new lease epoch", async (context) => {
   const baseTokenVariable = "PPT_EVAL_CLAIM_LEASE_BASE_TOKEN";
   const reportTokenVariable = "PPT_EVAL_CLAIM_LEASE_REPORT_TOKEN";
   const previousBaseToken = process.env[baseTokenVariable];
@@ -518,7 +657,16 @@ test("a crashed Base-backed claim is recovered by one new lease epoch", async (c
   let reportContent = "";
   let storedFields: Record<string, unknown> | null = null;
   let loseFirstBaseResponse = true;
-  const activeLeases = new Set(["lease-a", "lease-b"]);
+  const activeLeases = new Set([
+    "lease-a",
+    "lease-b",
+    "lease-c",
+    "lease-d",
+  ]);
+  const observedProcessStarts = new Map<number, string>([
+    [1001, "process-start-a"],
+    [1002, "process-start-b"],
+  ]);
   const emptySearch = () => ({
     ok: true,
     data: {
@@ -617,6 +765,7 @@ test("a crashed Base-backed claim is recovered by one new lease epoch", async (c
   const createTransport = (
     leaseId: string,
     processId: number,
+    processStartIdentity: string,
   ) =>
     createLarkCliTransportForMutationBoundaryTest({
       configuration: {
@@ -631,8 +780,16 @@ test("a crashed Base-backed claim is recovered by one new lease epoch", async (c
       claimLeaseForTest: {
         leaseId,
         processId,
-        isActive: async (candidateLeaseId: string) =>
-          activeLeases.has(candidateLeaseId),
+        processStartIdentity,
+        isActive: async (
+          candidateLeaseId: string,
+          candidateProcessId: number,
+          candidateProcessStartIdentity?: string,
+        ) =>
+          activeLeases.has(candidateLeaseId) &&
+          (candidateProcessStartIdentity === undefined ||
+            observedProcessStarts.get(candidateProcessId) ===
+              candidateProcessStartIdentity),
       },
     } as Parameters<
       typeof createLarkCliTransportForMutationBoundaryTest
@@ -640,9 +797,11 @@ test("a crashed Base-backed claim is recovered by one new lease epoch", async (c
       readonly claimLeaseForTest: {
         readonly leaseId: string;
         readonly processId: number;
+        readonly processStartIdentity: string;
         readonly isActive: (
           leaseId: string,
           processId: number,
+          processStartIdentity?: string,
         ) => Promise<boolean>;
       };
     });
@@ -678,20 +837,73 @@ test("a crashed Base-backed claim is recovered by one new lease epoch", async (c
     authorization,
     claimedAt: FIXED_TIME,
   };
-  const first = createTransport("lease-a", 1001);
+  const first = createTransport("lease-a", 1001, "process-start-a");
   assert.equal(
     await first.claimProductionJob!(claim),
     "claimed",
   );
 
   activeLeases.delete("lease-a");
-  const replacement = createTransport("lease-b", 1002);
+  observedProcessStarts.delete(1001);
+  const replacement = createTransport(
+    "lease-b",
+    1002,
+    "process-start-b",
+  );
   assert.equal(
     await replacement.claimProductionJob!(claim),
     "claimed",
   );
+  observedProcessStarts.set(1002, "process-start-c");
+  const pidReuseReplacement = createTransport(
+    "lease-c",
+    1002,
+    "process-start-c",
+  );
   assert.equal(
-    await createTransport("lease-c", 1003).claimProductionJob!(claim),
+    await pidReuseReplacement.claimProductionJob!(claim),
+    "claimed",
+  );
+  assert.ok(
+    pidReuseReplacement.abortProductionJobClaimBeforeSubmission,
+  );
+  await assert.rejects(
+    pidReuseReplacement.abortProductionJobClaimBeforeSubmission({
+      ...claim,
+      notSubmittedAttemptIds: [],
+      abortedAt: "2020-01-01T00:00:01.000Z",
+    }),
+    /abort proof is incomplete/i,
+  );
+  assert.equal(
+    await createTransport(
+      "lease-unproven",
+      1005,
+      "process-start-unproven",
+    ).claimProductionJob!(claim),
+    "already_claimed",
+  );
+  await pidReuseReplacement.abortProductionJobClaimBeforeSubmission({
+    ...claim,
+    notSubmittedAttemptIds: ["run-claim-lease-attempt-1"],
+    abortedAt: "2020-01-01T00:00:01.000Z",
+  });
+  observedProcessStarts.set(1003, "process-start-d");
+  const safeAbortReplacement = createTransport(
+    "lease-d",
+    1003,
+    "process-start-d",
+  );
+  assert.equal(
+    await safeAbortReplacement.claimProductionJob!(claim),
+    "claimed",
+  );
+  assert.equal(
+    await createTransport(
+      "lease-e",
+      1004,
+      "process-start-e",
+    ).claimProductionJob!(claim),
     "already_claimed",
   );
   assert.ok(storedFields);
@@ -699,9 +911,14 @@ test("a crashed Base-backed claim is recovered by one new lease epoch", async (c
     storedFields["载荷"] as string,
   ) as Record<string, unknown>;
   assert.equal(storedClaim.schemaVersion, "lark-production-job-claim-v3");
-  assert.equal(storedClaim.claimEpoch, 2);
-  assert.equal(storedClaim.executionLeaseId, "lease-b");
-  assert.equal(storedClaim.executionProcessId, 1002);
+  assert.equal(storedClaim.claimEpoch, 4);
+  assert.equal(storedClaim.claimState, "claimed");
+  assert.equal(storedClaim.executionLeaseId, "lease-d");
+  assert.equal(storedClaim.executionProcessId, 1003);
+  assert.equal(
+    storedClaim.executionProcessStartIdentity,
+    "process-start-d",
+  );
 });
 
 test("a late rev1 marker cannot overwrite a concurrent rev2 Docx projection", async (context) => {

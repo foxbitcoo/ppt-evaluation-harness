@@ -454,6 +454,27 @@ test("the public browser-driver fixture factory cannot mint PRODUCTION sessions"
   );
 });
 
+test("the public WPS production resolver rejects TEST_FAKE before any command provenance is considered", () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const driver = browserDriverPackage({
+    outcome: "technical_failure",
+    submissionEvidence: "not_submitted",
+    elapsedMs: 1,
+    events: [],
+    manualActions: [],
+  });
+
+  assert.throws(
+    () =>
+      resolveHarnessProductAdapterExecutor(
+        adapter.implementationPackage,
+        adapter.executionConfiguration,
+        { wpsAiPptBrowserDriver: driver },
+      ),
+    /production resolver.*TEST_FAKE|TEST_FAKE.*production resolver/i,
+  );
+});
+
 test("synthetic WPS capture cannot be ingested as PRODUCTION_REPLAY", async () => {
   const pptx = await knownGoodPptxBytes();
   const { render: _render, ...captured } =
@@ -480,6 +501,7 @@ test("synthetic WPS capture cannot be ingested as PRODUCTION_REPLAY", async () =
       createWpsAiPptRealProviderReplayPackage({
           captureId: "unregistered-wps-test-capture",
           sessions: [replayResult],
+          renderedPages: [],
       }),
     /harness-owned capture receipt.*unregistered/i,
   );
@@ -497,6 +519,7 @@ test("WPS Mock replay fails closed at its receipt before default durability pref
       createWpsAiPptRealProviderReplayPackage({
         captureId: "unregistered-wps-durability-test-capture",
         sessions: [capturedBrowserResult(pptx)],
+        renderedPages: [],
       }),
     /harness-owned capture receipt.*unregistered/i,
   );
@@ -509,6 +532,7 @@ test("WPS Mock replay fails closed at its receipt before caller-claimed capabili
       createWpsAiPptRealProviderReplayPackage({
         captureId: "unregistered-wps-capability-test-capture",
         sessions: [capturedBrowserResult(pptx)],
+        renderedPages: [],
       }),
     /harness-owned capture receipt.*unregistered/i,
   );
@@ -1895,6 +1919,7 @@ test("public production replay rejects a synthetic REAL_PROVIDER_CAPTURE before 
       createWpsAiPptRealProviderReplayPackage({
         captureId: "unregistered-wps-test-capture",
         sessions: [capturedBrowserResult(pptx)],
+        renderedPages: [],
       }),
     /harness-owned capture receipt.*unregistered/i,
   );

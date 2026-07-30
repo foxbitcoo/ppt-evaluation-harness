@@ -10,6 +10,7 @@ import {
   MockDoubaoProductAdapter,
   MockQwenProductAdapter,
   MockWpsProductAdapter,
+  ProjectionStaleBaselineError,
   VOLCANO_CASE_ID,
   createBakeoffHarness,
   createHarnessOwnedLarkBaseProjection,
@@ -42,6 +43,7 @@ import {
 const FIXED_TIME = "2020-01-01T00:00:00.000Z";
 const LARK_TEST_CONFIGURATION = {
   concurrencyBoundary: "single_workstation_durable_mutex",
+  lockRootPath: "/tmp/ppt-evaluation-lark-projection-test-locks",
   baseTokenEnvironmentVariable: "PPT_EVAL_TEST_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_TEST_REPORT_DOC_TOKEN",
@@ -383,6 +385,55 @@ async function authorizedSnapshot() {
   return { projection, snapshot, authorization, transport };
 }
 
+async function authorizationForStaleBaselineSnapshot(
+  projection: ReturnType<typeof createLarkBaseProjectionForTest>,
+  snapshot: ReturnType<
+    ReturnType<typeof createLarkBaseProjectionForTest>["snapshot"]
+  >,
+) {
+  const job = snapshot.runRecordTable.find(
+    (record) => record.recordType === "bakeoff_job",
+  );
+  const evaluationCase = snapshot.caseTable[0];
+  assert.ok(job);
+  assert.ok(evaluationCase);
+  const payloadHash = sha256Bytes(canonicalJsonBytes(snapshot));
+  return await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId:
+        `operational-ledger-projection:${job.jobId}:${payloadHash}`,
+      jobId: job.jobId,
+      runId: null,
+      attemptId: null,
+      dataClassification: evaluationCase.dataClassification,
+      sourceOwner: evaluationCase.sourceOwner,
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: projection.egressDestination.targetService,
+      targetAccount: projection.egressDestination.targetAccount,
+      targetRegion: projection.egressDestination.targetRegion,
+      subprocessors: projection.egressDestination.subprocessors,
+      contentFields: [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    { clockId: "test-clock", now: () => FIXED_TIME },
+  );
+}
+
 test("Lark Base projection materializes a transport-verified HTTPS Docx report URL and recovers idempotently", async () => {
   const { projection, snapshot, authorization } =
     await authorizedSnapshot();
@@ -400,6 +451,63 @@ test("Lark Base projection materializes a transport-verified HTTPS Docx report U
   assert.match(
     projection.artifactPageEvidenceUrl("artifact-volcano-v1", 1),
     /^https:\/\//,
+  );
+});
+
+test("a remote commit marker that advanced beyond the captured staging baseline rejects a stale projection", async () => {
+  const { projection, snapshot, authorization, transport } =
+    await authorizedSnapshot();
+  await projection.commitAuthorizedSnapshot(snapshot, authorization);
+  const baseline = await projection.captureCommitBaseline(
+    "job-volcano-v1",
+  );
+  const marker = transport.markers.get("job-volcano-v1");
+  assert.ok(marker);
+  transport.markers.set("job-volcano-v1", {
+    ...marker,
+    batchHash:
+      "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    previousBatchHash: marker.batchHash,
+    revision: marker.revision + 1,
+  });
+  const staged = projection.forkForStaging(
+    baseline.localSnapshot,
+  );
+  const report = await staged.createReport({
+    reportId: "report-stale-baseline-v1",
+    provenance: "MOCK",
+    environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+    title: "stale baseline",
+    jobId: "job-volcano-v1",
+    runIds: [],
+    artifactIds: [],
+    claimLevel: "case_sample",
+    markdown: "# stale baseline",
+    createdAt: FIXED_TIME,
+  });
+  await staged.linkReportToBakeoffJob(
+    "job-volcano-v1",
+    report.url,
+    "auxiliary",
+  );
+  const stagedSnapshot = staged.snapshot();
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      stagedSnapshot,
+      await authorizationForStaleBaselineSnapshot(
+        projection,
+        stagedSnapshot,
+      ),
+      baseline,
+    ),
+    ProjectionStaleBaselineError,
+  );
+  assert.equal(
+    projection.snapshot().reports.some(
+      ({ reportId }) => reportId === report.reportId,
+    ),
+    false,
   );
 });
 

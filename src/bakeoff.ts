@@ -56,6 +56,7 @@ import type {
 } from "./feishu.ts";
 import { InMemoryFeishuProjection } from "./feishu.ts";
 import {
+  abortHarnessOwnedLarkProductionJobBeforeSubmission,
   assertHarnessOwnedLarkBaseProjection,
   claimHarnessOwnedLarkProductionJob,
   preflightHarnessOwnedLarkBaseProjection,
@@ -1293,6 +1294,22 @@ function comparisonCompatibilityFingerprint(
             promptHash: judge.promptHash,
             configHash: judge.configHash,
             schemaHash: judge.schemaHash,
+            executionIdentity:
+              judge.provider === "codex_cli" &&
+              judge.executionEvidence !== undefined
+                ? {
+                    schemaVersion:
+                      judge.executionEvidence.schemaVersion,
+                    binaryHash:
+                      judge.executionEvidence.binaryHash,
+                    fixedArgumentsHash:
+                      judge.executionEvidence.fixedArgumentsHash,
+                    sandboxBinaryHash:
+                      judge.executionEvidence.sandboxBinaryHash,
+                    sandboxProfileHash:
+                      judge.executionEvidence.sandboxProfileHash,
+                  }
+                : null,
           }),
     renderPipelineHash: sha256Json({
       renderer: scorecard.evaluationInputManifest.renderer,
@@ -2249,6 +2266,10 @@ export function createBakeoffHarness({
           "Production Bakeoff requires the isolated offline PNG renderer destination",
         );
       }
+      let productionClaim: {
+        readonly claimHash: `sha256:${string}`;
+        readonly authorization: ApprovedEgressAuthorization;
+      } | null = null;
       if (command.environment === "production") {
         if (command.executionMode !== "capture_only") {
           await preflightHarnessOwnedProductionJudge(judge!);
@@ -2374,57 +2395,162 @@ export function createBakeoffHarness({
             "Production Bakeoff remote claim already exists; provider execution suppressed",
           );
         }
+        productionClaim = Object.freeze({
+          claimHash,
+          authorization: claimAuthorization,
+        });
       }
 
-      const runSpecificationReferences = new Map<
-        string,
-        RunSpecificationReference
-      >(
-        await Promise.all(
-          selections.map(async ({
-            implementationPackage,
-            executionEntrypointDigest,
-            executionConfigurationPackage,
-            browserDriverEvidence,
-            productPackage,
-            runId,
-          }) => {
-            const reference = await runSpecificationVault.capture({
-              jobId: context.jobId,
-              runId,
-              specCommitSha,
-              evaluationCase: context.evaluationCase,
-              productPackage,
-              protocolSnapshot,
-              adapterImplementationPackage:
+      const {
+        runSpecificationReferences,
+        referencePackSelection,
+        stagedReferencePack,
+      } = await (async () => {
+        try {
+          if (productionClaim !== null) {
+            const checkpointedAt = clock.now();
+            await Promise.all(
+              selectedRunIds.map(async (runId) => {
+                const attemptId = `${runId}-attempt-1`;
+                await attemptCheckpointStore.append({
+                  eventId: `${attemptId}-provider-not-started`,
+                  jobId: context.jobId,
+                  caseId: command.caseId,
+                  runId,
+                  attemptId,
+                  attemptSeq: 1,
+                  eventType: "provider_execution_not_started",
+                  sourceAt: context.fixedTime,
+                  observedAt: checkpointedAt,
+                  writerId: "bakeoff-harness@1",
+                  evidenceRef:
+                    `harness://${context.jobId}/${attemptId}/provider-not-started`,
+                  submissionEvidenceAtCheckpoint:
+                    "not_submitted",
+                  vendorTaskId: null,
+                  taskStateVersion: "pre_provider@1",
+                  artifactId: null,
+                });
+              }),
+            );
+          }
+          const runSpecificationReferences = new Map<
+            string,
+            RunSpecificationReference
+          >(
+            await Promise.all(
+              selections.map(async ({
                 implementationPackage,
-              adapterExecutionEntrypointDigest:
                 executionEntrypointDigest,
-              adapterExecutionConfigurationPackage:
                 executionConfigurationPackage,
-              browserDriverEvidence,
-            });
-            return [runId, reference] as const;
-          }),
-        ),
-      );
-
-      const referencePackSelection =
-        command.executionMode === "capture_only"
-          ? { mode: "off" as const, pack: null }
-          : resolveReferencePackForCase({
-              evaluationCase: context.evaluationCase,
-              ...(command.referencePackMode === undefined
-                ? {}
-                : { mode: command.referencePackMode }),
-              generator: referencePackGenerator,
-            });
-      const stagedReferencePack =
-        referencePackSelection.pack === null
-          ? null
-          : referencePackStore.stage(referencePackSelection.pack, {
-              jobId: context.jobId,
-            });
+                browserDriverEvidence,
+                productPackage,
+                runId,
+              }) => {
+                const reference =
+                  await runSpecificationVault.capture({
+                    jobId: context.jobId,
+                    runId,
+                    specCommitSha,
+                    evaluationCase: context.evaluationCase,
+                    productPackage,
+                    protocolSnapshot,
+                    adapterImplementationPackage:
+                      implementationPackage,
+                    adapterExecutionEntrypointDigest:
+                      executionEntrypointDigest,
+                    adapterExecutionConfigurationPackage:
+                      executionConfigurationPackage,
+                    browserDriverEvidence,
+                  });
+                return [runId, reference] as const;
+              }),
+            ),
+          );
+          const referencePackSelection =
+            command.executionMode === "capture_only"
+              ? { mode: "off" as const, pack: null }
+              : resolveReferencePackForCase({
+                  evaluationCase: context.evaluationCase,
+                  ...(command.referencePackMode === undefined
+                    ? {}
+                    : { mode: command.referencePackMode }),
+                  generator: referencePackGenerator,
+                });
+          const stagedReferencePack =
+            referencePackSelection.pack === null
+              ? null
+              : referencePackStore.stage(
+                  referencePackSelection.pack,
+                  { jobId: context.jobId },
+                );
+          return {
+            runSpecificationReferences,
+            referencePackSelection,
+            stagedReferencePack,
+          };
+        } catch (error) {
+          if (
+            productionClaim !== null &&
+            attemptCheckpointStore.readAttempt !== undefined
+          ) {
+            const notSubmittedAttemptIds: string[] = [];
+            let abortIsProvenSafe = true;
+            for (const runId of selectedRunIds) {
+              const attemptId = `${runId}-attempt-1`;
+              let checkpoints: readonly ObservableAttemptEvent[];
+              try {
+                checkpoints =
+                  await attemptCheckpointStore.readAttempt(
+                    attemptId,
+                  );
+              } catch {
+                abortIsProvenSafe = false;
+                break;
+              }
+              if (
+                checkpoints.length === 0 ||
+                !checkpoints.every(
+                  ({ submissionEvidenceAtCheckpoint }) =>
+                    submissionEvidenceAtCheckpoint ===
+                    "not_submitted",
+                )
+              ) {
+                abortIsProvenSafe = false;
+                break;
+              }
+              notSubmittedAttemptIds.push(attemptId);
+            }
+            if (
+              abortIsProvenSafe &&
+              notSubmittedAttemptIds.length ===
+                selectedRunIds.length
+            ) {
+              try {
+                await abortHarnessOwnedLarkProductionJobBeforeSubmission(
+                  feishu,
+                  {
+                    jobId: context.jobId,
+                    runIds: selectedRunIds,
+                    claimHash: productionClaim.claimHash,
+                    authorization:
+                      productionClaim.authorization,
+                    notSubmittedAttemptIds,
+                    abortedAt: clock.now(),
+                    clock,
+                  },
+                );
+              } catch (abortError) {
+                throw new AggregateError(
+                  [error, abortError],
+                  "Production Bakeoff failed before provider submission and could not persist its safe claim abort",
+                );
+              }
+            }
+          }
+          throw error;
+        }
+      })();
       const jobDeadlineAtEpochMs = Date.now() + VENDOR_GENERATION_TIMEOUT_MS;
       const evaluationAttemptIdsThatUsedPack = new Set<string>();
       const settledResults = await Promise.allSettled(
@@ -2662,16 +2788,21 @@ export function createBakeoffHarness({
         }
       }
 
-      const successfulVendorIds = new Set(
-        successful.map(({ productPackage }) => productPackage.vendorId),
-      );
+      const defaultComparisonCandidates = successful.filter(
+          ({ renderManifest, scorecard }) =>
+            renderManifest.renderOutcome === "faithful" &&
+            scorecard !== null,
+        );
       const hasDefaultComparison =
-        successfulVendorIds.has("wps") &&
-        (successfulVendorIds.has("qwen") ||
-          successfulVendorIds.has("doubao")) &&
-        successful.every(
-          ({ renderManifest }) =>
-            renderManifest.renderOutcome === "faithful",
+        defaultComparisonCandidates.some(
+          (left, leftIndex) =>
+            defaultComparisonCandidates
+              .slice(leftIndex + 1)
+              .some(
+                (right) =>
+                  right.productPackage.provenance ===
+                  left.productPackage.provenance,
+              ),
         );
       let report;
       if (command.executionMode === "capture_only") {

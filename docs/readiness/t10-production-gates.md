@@ -32,13 +32,17 @@ payload. Recovery, attachment readback, replay, and marker lookup use the same
 physical identity. A single-table acceptance fake retains all entity kinds
 simultaneously and proves replay does not add duplicates.
 
-Production Base mutation is deliberately limited to one workstation. A
-durable cross-process mutex covers each stable-ID search, create, and readback;
-an already-corrupt duplicate set fails closed and is never “repaired” by
-deleting a record another process may already use. The same boundary covers a
-complete Job projection from marker read through Docx CAS, Base rows and
-attachments, and the final marker. This does not claim distributed multi-host
-transaction safety.
+Production Base mutation is deliberately limited to one workstation. Operators
+must configure one explicit, canonical, machine-level lock root shared by every
+local process; production never derives it from `TMPDIR` or another
+process-scoped directory. Lock ownership is published atomically with a
+no-replace link and is bound to an unpredictable owner token, device/inode,
+PID, and OS-observed process-start identity. A durable cross-process mutex
+covers each stable-ID search, create, and readback; an already-corrupt
+duplicate set fails closed and is never “repaired” by deleting a record another
+process may already use. The same boundary covers a complete Job projection
+from marker read through Docx CAS, Base rows and attachments, and the final
+marker. This does not claim distributed multi-host transaction safety.
 
 This proves schema availability only. No real evaluation record, page
 evidence record, or commit marker has yet been accepted as a production run.
@@ -58,6 +62,12 @@ The claim payload and document owner use a versioned claim-v3 state machine
 with an execution lease, process identity, and monotonic epoch. A live lease
 cannot yield a second winner; after a dead local owner is observed, one new
 lease can take over under the durable Job mutex and increments the epoch.
+Before provider submission, the active owner can transition its current lease
+to `aborted_before_submission` only when every selected attempt has at least
+one durable checkpoint and every checkpoint is still `not_submitted`. The
+abort records the exact not-submitted attempt IDs, abort time, claim epoch,
+owner token, PID, and OS process-start identity. A later claimant must create a
+new epoch; an old owner cannot revive or overwrite the aborted epoch.
 After that binding, production writes the document once per projection
 revision as a complete report collection: one Chinese H1, then the primary
 report and every current auxiliary A/B report as independently identified
@@ -178,8 +188,12 @@ LibreOffice and Poppler roots, system/local/user fonts, and system/local color
 profiles, including directory and file modes, file contents, and symlink
 targets. Renderer identity also binds the macOS build, `/usr/lib/dyld` code
 directory, architecture-specific dyld shared-cache identities, and the system
-runtime closure. Any dylib, plugin, configuration, font, color profile, OS
-runtime, mode, or symlink drift fails closed.
+runtime closure. Every Mach-O runtime object is verified with
+`codesign --verify --strict --all-architectures`; its code-directory identity
+and CDHash are bound into the attestation and rechecked immediately before
+render. Same-size byte mutation is therefore rejected. Any dylib, plugin,
+configuration, font, color profile, OS runtime, mode, signature, or symlink
+drift fails closed.
 
 Canonical 16-page, 1920x1080, sRGB raster structure is necessary but not enough
 for visual fidelity. A `faithful` render additionally requires a
@@ -188,10 +202,13 @@ evidence at
 `<private-evidence-root>/<artifact-sha256-without-prefix>/manifest.json` plus
 the 16 ordered PNGs. The receipt and manifest bind the exact Artifact hash,
 native capture-tool identity, native surface class, viewport/resolution, crop
-and completion-frame policies, and each PNG hash. Every native PNG must be a
-regular non-symlink 1920x1080 file whose bytes are identical to its canonical
-renderer page. Copying canonical PNGs into a caller-selected directory cannot
-register a receipt. Missing evidence
+and completion-frame policies, each retained PNG byte hash, the ordered
+16-page derivative set, and its aggregate digest. The WPS retained capture
+receipt is subject to the same binding and cannot attest only a source PPTX or
+an unverified render directory. Every native PNG must be a regular non-symlink
+1920x1080 file whose bytes are identical to its canonical renderer page.
+Copying canonical PNGs into a caller-selected directory cannot register a
+receipt. Missing evidence
 always yields `degraded` and prohibits Judge visual scoring; malformed,
 misbound, or tampered evidence fails closed rather than degrading silently.
 
@@ -216,6 +233,28 @@ deadline.
 The local attestation is implementation evidence. A successful real Judge call
 and persisted non-Mock score lineage are still required for production
 acceptance.
+
+## Comparison compatibility and concurrent reports — implementation ready
+
+Every Artifact is scored independently and comparisons are derived only from
+compatible score lineages. Compatibility requires equal Case and evaluation
+mode, scoring schema and rubric, static-render contract, source/capture
+provenance, and Judge execution identity. Judge identity includes the exact
+binary, fixed arguments, Seatbelt binary and profile hashes, and sandbox
+configuration. A `LIVE_PRODUCTION` capture and a `PRODUCTION_REPLAY` capture
+are never treated as the same provenance merely because their PPTX bytes
+match.
+
+Unless the caller selects explicit pairs, the report includes every unordered
+compatible vendor pair. It therefore still emits a Qwen–Doubao comparison when
+WPS is absent or incompatible; no vendor is a hard-coded baseline.
+
+Concurrent auxiliary-report publication stages each writer against the exact
+locally committed report collection and its cached remote marker hash. Marker
+publication is compare-and-swap. A stale writer rereads the committed
+collection, performs a deterministic three-way merge, restages the complete
+collection, and retries the marker CAS. It cannot silently overwrite a report
+that another writer committed after its original read.
 
 ## Lark mutation authorization boundary — implementation ready
 

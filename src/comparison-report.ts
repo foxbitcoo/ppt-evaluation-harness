@@ -19,7 +19,10 @@ import type {
   VendorComparisonSummary,
   VendorFinding,
 } from "./domain.ts";
-import type { FeishuProjectionPort } from "./feishu.ts";
+import {
+  ProjectionStaleBaselineError,
+  type FeishuProjectionPort,
+} from "./feishu.ts";
 import type {
   ClockPort,
   EgressAuthorizationAuditPort,
@@ -110,6 +113,28 @@ function compatibleJudgeConfiguration(
   if (leftJudge === null || rightJudge === null) {
     return leftJudge === rightJudge;
   }
+  const stableCodexExecutionIdentityMatches = () => {
+    if (
+      leftJudge.provider !== "codex_cli" ||
+      rightJudge.provider !== "codex_cli"
+    ) {
+      return true;
+    }
+    const leftExecution = leftJudge.executionEvidence;
+    const rightExecution = rightJudge.executionEvidence;
+    return (
+      leftExecution !== undefined &&
+      rightExecution !== undefined &&
+      leftExecution.schemaVersion === rightExecution.schemaVersion &&
+      leftExecution.binaryHash === rightExecution.binaryHash &&
+      leftExecution.fixedArgumentsHash ===
+        rightExecution.fixedArgumentsHash &&
+      leftExecution.sandboxBinaryHash ===
+        rightExecution.sandboxBinaryHash &&
+      leftExecution.sandboxProfileHash ===
+        rightExecution.sandboxProfileHash
+    );
+  };
   return (
     leftJudge.provider === rightJudge.provider &&
     leftJudge.adapterVersion === rightJudge.adapterVersion &&
@@ -120,7 +145,8 @@ function compatibleJudgeConfiguration(
     leftJudge.configHash === rightJudge.configHash &&
     leftJudge.schemaHash === rightJudge.schemaHash &&
     leftJudge.rasterizerVersion === rightJudge.rasterizerVersion &&
-    leftJudge.imageDetail === rightJudge.imageDetail
+    leftJudge.imageDetail === rightJudge.imageDetail &&
+    stableCodexExecutionIdentityMatches()
   );
 }
 
@@ -154,6 +180,9 @@ function comparePair(
     left.score.renderManifest.renderer !==
       right.score.renderManifest.renderer ||
     left.score.environmentOrigin !== right.score.environmentOrigin ||
+    left.run.provenance !== left.score.provenance ||
+    right.run.provenance !== right.score.provenance ||
+    left.score.provenance !== right.score.provenance ||
     !isDeepStrictEqual(
       left.score.comparisonCompatibilityFingerprint,
       right.score.comparisonCompatibilityFingerprint,
@@ -162,6 +191,7 @@ function comparePair(
   ) {
     throw new Error("Selected Runs are not compatible for direct comparison");
   }
+  const sharedProvenance = left.score.provenance;
 
   const rightDimensions = dimensionsByName(
     right.score.effectiveScorecard.dimensions,
@@ -263,7 +293,7 @@ function comparePair(
     rightRunId: pair.rightRunId,
     leftScorecardId: left.score.scorecard.scorecardId,
     rightScorecardId: right.score.scorecard.scorecardId,
-    provenance: left.score.provenance,
+    provenance: sharedProvenance,
     environmentOrigin: left.score.environmentOrigin,
     leftProduct: left.run.product,
     rightProduct: right.run.product,
@@ -800,20 +830,26 @@ function defaultViewPairs(
   scores: readonly EffectiveArtifactScoreTableRecord[],
 ): readonly ComparisonPairSelection[] {
   const scoredRunIds = new Set(scores.map(({ runId }) => runId));
-  const runIdForVendor = (vendorId: string): string | null =>
-    vendorRuns.find(
-      (run) =>
-        run.productVendorId === vendorId &&
-        scoredRunIds.has(run.recordId),
-    )?.recordId ??
-    null;
-  const wpsRunId = runIdForVendor("wps");
-  if (wpsRunId === null) return [];
-  return [
-    runIdForVendor("qwen"),
-    runIdForVendor("doubao"),
-  ].flatMap((rightRunId) =>
-    rightRunId === null ? [] : [{ leftRunId: wpsRunId, rightRunId }],
+  const vendorOrder = new Map([
+    ["wps", 0],
+    ["qwen", 1],
+    ["doubao", 2],
+  ]);
+  const scoredRuns = vendorRuns
+    .filter((run) => scoredRunIds.has(run.recordId))
+    .sort(
+      (left, right) =>
+        (vendorOrder.get(left.productVendorId ?? "") ??
+          Number.MAX_SAFE_INTEGER) -
+          (vendorOrder.get(right.productVendorId ?? "") ??
+            Number.MAX_SAFE_INTEGER) ||
+        left.recordId.localeCompare(right.recordId),
+    );
+  return scoredRuns.flatMap((left, leftIndex) =>
+    scoredRuns.slice(leftIndex + 1).map((right) => ({
+      leftRunId: left.recordId,
+      rightRunId: right.recordId,
+    })),
   );
 }
 
@@ -836,115 +872,151 @@ export function createComparisonReportService({
           "Production dynamic comparison requires authorized Lark persistence",
         );
       }
-      const source = await feishu.loadComparisonReportSource(command.jobId);
-      const adjudicationService = createScoreAdjudicationService({
-        feishu,
-      });
-      const effectiveScores: readonly EffectiveArtifactScoreTableRecord[] =
-        await Promise.all(
-          source.artifactScores.map(async (score) => ({
-            ...score,
-            effectiveScorecard:
-              await adjudicationService.getEffectiveScorecardForRecord(
-                score,
-              ),
-          })),
-        );
-      const pairs =
-        command.pairs ??
-        defaultViewPairs(source.vendorRuns, effectiveScores);
-      if (pairs.length === 0) {
-        throw new Error("A comparison report requires at least one pair");
-      }
-      const comparisons = pairs.map((pair) =>
-        comparePair(
-          command.jobId,
-          pair,
-          source.vendorRuns,
-          effectiveScores,
-        ),
-      );
-      const writeProjection = requiresAuthorizedPersistence
-        ? feishu.forkForStaging()
-        : feishu;
-      for (const comparison of comparisons) {
-        await writeProjection.appendComparison({
-          recordType: comparison.recordType,
-          comparisonId: comparison.comparisonId,
-          caseId: comparison.caseId,
-          jobId: comparison.jobId,
-          leftRunId: comparison.leftRunId,
-          rightRunId: comparison.rightRunId,
-          leftScorecardId: comparison.leftScorecardId,
-          rightScorecardId: comparison.rightScorecardId,
-          provenance: comparison.provenance,
-          environmentOrigin: comparison.environmentOrigin,
-        });
-      }
-      const gapCards = createGapCards(
-        feishu,
-        comparisons,
-        source.vendorRuns,
-        effectiveScores,
-      );
-      for (const gapCard of gapCards) {
-        await writeProjection.appendProductGapCard(gapCard);
-      }
-      const vendorSummaries = createVendorSummaries(
-        feishu,
-        comparisons,
-        source.vendorRuns,
-        effectiveScores,
-      );
-      const report = await writeProjection.createReport(
-        reportDraft(
-          feishu,
-          source.job,
-          source.vendorRuns,
-          source.capturedArtifacts,
-          comparisons,
-          gapCards,
-          vendorSummaries,
-          effectiveScores,
-        ),
-      );
-      await writeProjection.linkReportToBakeoffJob(
-        command.jobId,
-        report.url,
-        command.pairs === undefined ? "primary" : "auxiliary",
-      );
-      let materializedReport = report;
-      if (requiresAuthorizedPersistence) {
-        const snapshot =
-          await persistHarnessOwnedLarkProjectionSnapshot({
-            projection: feishu,
-            stagedSnapshot: writeProjection.snapshot(),
-            jobId: command.jobId,
-            egressAuthorization: egressAuthorization!,
-            egressAudit: egressAudit!,
-            ...(clock === undefined ? {} : { clock }),
-          });
-        const readback = snapshot.reports.find(
-          ({ reportId }) => reportId === report.reportId,
-        );
-        if (
-          readback === undefined ||
-          !/^https:\/\/[^/\s]+\/docx\/[a-zA-Z0-9_-]+$/.test(
-            readback.url,
-          )
-        ) {
-          throw new Error(
-            "Production dynamic comparison report was not materialized",
+      for (let staleRetry = 0; ; staleRetry += 1) {
+        try {
+          const baseline = requiresAuthorizedPersistence
+            ? await feishu.captureCommitBaseline(command.jobId)
+            : undefined;
+          const writeProjection = requiresAuthorizedPersistence
+            ? feishu.forkForStaging(baseline!.localSnapshot)
+            : feishu;
+          const source = await writeProjection.loadComparisonReportSource(
+            command.jobId,
           );
+          const adjudicationService = createScoreAdjudicationService({
+            feishu: writeProjection,
+          });
+          const effectiveScores: readonly EffectiveArtifactScoreTableRecord[] =
+            await Promise.all(
+              source.artifactScores.map(async (score) => ({
+                ...score,
+                effectiveScorecard:
+                  await adjudicationService.getEffectiveScorecardForRecord(
+                    score,
+                  ),
+              })),
+            );
+          const pairs =
+            command.pairs ??
+            defaultViewPairs(source.vendorRuns, effectiveScores);
+          if (pairs.length === 0) {
+            throw new Error("A comparison report requires at least one pair");
+          }
+          const comparisons = pairs.flatMap((pair) => {
+            try {
+              return [
+                comparePair(
+                  command.jobId,
+                  pair,
+                  source.vendorRuns,
+                  effectiveScores,
+                ),
+              ];
+            } catch (error) {
+              if (
+                command.pairs === undefined &&
+                error instanceof Error &&
+                /not compatible for direct comparison/i.test(error.message)
+              ) {
+                return [];
+              }
+              throw error;
+            }
+          });
+          if (comparisons.length === 0) {
+            throw new Error(
+              "A comparison report requires at least one compatible pair",
+            );
+          }
+          for (const comparison of comparisons) {
+            await writeProjection.appendComparison({
+              recordType: comparison.recordType,
+              comparisonId: comparison.comparisonId,
+              caseId: comparison.caseId,
+              jobId: comparison.jobId,
+              leftRunId: comparison.leftRunId,
+              rightRunId: comparison.rightRunId,
+              leftScorecardId: comparison.leftScorecardId,
+              rightScorecardId: comparison.rightScorecardId,
+              provenance: comparison.provenance,
+              environmentOrigin: comparison.environmentOrigin,
+            });
+          }
+          const gapCards = createGapCards(
+            feishu,
+            comparisons,
+            source.vendorRuns,
+            effectiveScores,
+          );
+          for (const gapCard of gapCards) {
+            await writeProjection.appendProductGapCard(gapCard);
+          }
+          const vendorSummaries = createVendorSummaries(
+            feishu,
+            comparisons,
+            source.vendorRuns,
+            effectiveScores,
+          );
+          const report = await writeProjection.createReport(
+            reportDraft(
+              feishu,
+              source.job,
+              source.vendorRuns,
+              source.capturedArtifacts,
+              comparisons,
+              gapCards,
+              vendorSummaries,
+              effectiveScores,
+            ),
+          );
+          await writeProjection.linkReportToBakeoffJob(
+            command.jobId,
+            report.url,
+            command.pairs === undefined ? "primary" : "auxiliary",
+          );
+          let materializedReport = report;
+          if (requiresAuthorizedPersistence) {
+            const snapshot =
+              await persistHarnessOwnedLarkProjectionSnapshot({
+                projection: feishu,
+                stagedSnapshot: writeProjection.snapshot(),
+                baseline: baseline!,
+                jobId: command.jobId,
+                egressAuthorization: egressAuthorization!,
+                egressAudit: egressAudit!,
+                ...(clock === undefined ? {} : { clock }),
+              });
+            const readback = snapshot.reports.find(
+              ({ reportId }) => reportId === report.reportId,
+            );
+            if (
+              readback === undefined ||
+              !/^https:\/\/[^/\s]+\/docx\/[a-zA-Z0-9_-]+$/.test(
+                readback.url,
+              )
+            ) {
+              throw new Error(
+                "Production dynamic comparison report was not materialized",
+              );
+            }
+            materializedReport = readback;
+          }
+          return {
+            comparisons,
+            gapCards,
+            vendorSummaries,
+            report: materializedReport,
+          };
+        } catch (error) {
+          if (
+            !requiresAuthorizedPersistence ||
+            !(error instanceof ProjectionStaleBaselineError) ||
+            staleRetry >= 2
+          ) {
+            throw error;
+          }
         }
-        materializedReport = readback;
       }
-      return {
-        comparisons,
-        gapCards,
-        vendorSummaries,
-        report: materializedReport,
-      };
     },
   };
 }

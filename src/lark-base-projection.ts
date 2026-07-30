@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
+  link,
   lstat,
   mkdtemp,
   open,
@@ -13,8 +14,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { join, resolve, sep } from "node:path";
+import { execFileSync, spawn } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
@@ -23,8 +24,10 @@ import type {
 } from "./domain.ts";
 import {
   InMemoryFeishuProjection,
+  ProjectionStaleBaselineError,
   type FeishuProjectionPort,
   type FeishuProjectionSnapshot,
+  type ProjectionCommitBaseline,
 } from "./feishu.ts";
 import type {
   ApprovedEgressAuthorization,
@@ -172,6 +175,16 @@ export interface LarkBaseProjectionTransportPort {
     readonly authorization: ApprovedEgressAuthorization;
     readonly claimedAt: string;
   }): Promise<"claimed" | "already_claimed">;
+  abortProductionJobClaimBeforeSubmission?(command: {
+    readonly jobId: string;
+    readonly runIds: readonly string[];
+    readonly claimHash: `sha256:${string}`;
+    readonly claimantId: string;
+    readonly claimAttemptId: string;
+    readonly authorization: ApprovedEgressAuthorization;
+    readonly notSubmittedAttemptIds: readonly string[];
+    readonly abortedAt: string;
+  }): Promise<void>;
   commitBatch(command: {
     readonly schemaVersion: "lark-projection-commit-v2";
     readonly jobId: string;
@@ -267,10 +280,10 @@ export interface LarkCliProjectionConfiguration {
    */
   readonly concurrencyBoundary: "single_workstation_durable_mutex";
   /**
-   * Tests may isolate the mutex root. Production defaults to one deterministic
-   * directory below the operating-system temporary directory.
+   * One explicit, normalized machine-local directory shared by every worker.
+   * Verified production never derives this boundary from TMPDIR.
    */
-  readonly singleWorkstationLockRoot?: string;
+  readonly lockRootPath: string;
   readonly baseTokenEnvironmentVariable: string;
   /**
    * Logical record kinds may intentionally share one physical Base table.
@@ -304,15 +317,26 @@ function sha256(value: string | Uint8Array): `sha256:${string}` {
 }
 
 const LARK_PROCESS_INSTANCE_ID = randomUUID();
+const LARK_PROCESS_START_IDENTITY: string = (() => {
+  const identity = readProcessStartIdentity(process.pid);
+  if (identity === null) {
+    throw new Error("Current Lark process start identity is unavailable");
+  }
+  return identity;
+})();
 const LARK_MUTEX_WAIT_TIMEOUT_MS = 35 * 60 * 1_000;
-const LARK_MUTEX_INCOMPLETE_OWNER_GRACE_MS = 2_000;
 const LOCAL_LARK_MUTEX_TAILS = new Map<string, Promise<void>>();
 const ACTIVE_LARK_EXECUTION_LEASES = new Set<string>();
 
 interface LarkExecutionLeasePort {
   readonly leaseId: string;
   readonly processId: number;
-  isActive(leaseId: string, processId: number): Promise<boolean>;
+  readonly processStartIdentity: string;
+  isActive(
+    leaseId: string,
+    processId: number,
+    processStartIdentity: string,
+  ): Promise<boolean>;
 }
 
 function createProcessLarkExecutionLease(): LarkExecutionLeasePort {
@@ -321,22 +345,32 @@ function createProcessLarkExecutionLease(): LarkExecutionLeasePort {
   return Object.freeze({
     leaseId,
     processId: process.pid,
+    processStartIdentity: LARK_PROCESS_START_IDENTITY,
     async isActive(
       candidateLeaseId: string,
       candidateProcessId: number,
+      candidateProcessStartIdentity: string,
     ): Promise<boolean> {
       if (candidateProcessId === process.pid) {
-        return ACTIVE_LARK_EXECUTION_LEASES.has(candidateLeaseId);
+        return (
+          candidateProcessStartIdentity ===
+            LARK_PROCESS_START_IDENTITY &&
+          ACTIVE_LARK_EXECUTION_LEASES.has(candidateLeaseId)
+        );
       }
-      return processIsAlive(candidateProcessId);
+      return processIsSameInstance(
+        candidateProcessId,
+        candidateProcessStartIdentity,
+      );
     },
   });
 }
 
 interface LarkMutexOwner {
-  readonly schemaVersion: "lark-single-workstation-mutex-v1";
+  readonly schemaVersion: "lark-single-workstation-mutex-v2";
   readonly processId: number;
   readonly processInstanceId: string;
+  readonly processStartIdentity: string;
   readonly acquisitionId: string;
   readonly acquiredAt: string;
 }
@@ -344,10 +378,16 @@ interface LarkMutexOwner {
 function larkMutexRoot(
   configuration: LarkCliProjectionConfiguration,
 ): string {
-  return resolve(
-    configuration.singleWorkstationLockRoot ??
-      join(tmpdir(), "ppt-evaluation-lark-single-workstation-v1"),
-  );
+  const root = resolve(configuration.lockRootPath);
+  if (
+    configuration.lockRootPath !== root ||
+    root === sep
+  ) {
+    throw new Error(
+      "Lark production concurrency requires one normalized fixed machine lock root",
+    );
+  }
+  return root;
 }
 
 function processIsAlive(processId: number): boolean {
@@ -365,6 +405,45 @@ function processIsAlive(processId: number): boolean {
     }
     throw error;
   }
+}
+
+function readProcessStartIdentity(processId: number): string | null {
+  if (!processIsAlive(processId)) return null;
+  let output: string;
+  try {
+    output = execFileSync(
+      "/bin/ps",
+      ["-o", "lstart=", "-p", String(processId)],
+      {
+        encoding: "utf8",
+        timeout: 2_000,
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+  } catch (error) {
+    if (!processIsAlive(processId)) return null;
+    throw new Error(
+      `Lark process start identity lookup failed for PID ${processId}`,
+      { cause: error },
+    );
+  }
+  if (output.length === 0) {
+    if (!processIsAlive(processId)) return null;
+    throw new Error(
+      `Lark process start identity is empty for PID ${processId}`,
+    );
+  }
+  return sha256(
+    `lark-process-start-v1\u0000${processId}\u0000${output}`,
+  );
+}
+
+function processIsSameInstance(
+  processId: number,
+  processStartIdentity: string,
+): boolean {
+  if (processStartIdentity.trim().length === 0) return false;
+  return readProcessStartIdentity(processId) === processStartIdentity;
 }
 
 function isAlreadyExists(error: unknown): boolean {
@@ -429,11 +508,13 @@ async function readLarkMutexOwner(
       ? (parsed as Record<string, unknown>)
       : {};
   if (
-    owner.schemaVersion !== "lark-single-workstation-mutex-v1" ||
+    owner.schemaVersion !== "lark-single-workstation-mutex-v2" ||
     !Number.isSafeInteger(owner.processId) ||
     (owner.processId as number) < 1 ||
     typeof owner.processInstanceId !== "string" ||
     owner.processInstanceId.trim().length === 0 ||
+    typeof owner.processStartIdentity !== "string" ||
+    owner.processStartIdentity.trim().length === 0 ||
     typeof owner.acquisitionId !== "string" ||
     owner.acquisitionId.trim().length === 0 ||
     typeof owner.acquiredAt !== "string" ||
@@ -461,6 +542,9 @@ async function reclaimStaleLarkMutex(
 async function acquireLarkSingleWorkstationMutex(
   configuration: LarkCliProjectionConfiguration,
   scope: string,
+  options: {
+    readonly waitTimeoutMs?: number;
+  } = {},
 ): Promise<() => Promise<void>> {
   if (
     configuration.concurrencyBoundary !==
@@ -475,44 +559,66 @@ async function acquireLarkSingleWorkstationMutex(
   const lockPath = join(root, `${sha256(scope).slice("sha256:".length)}.lock`);
   const releaseLocal = await acquireLocalLarkMutex(lockPath);
   const owner: LarkMutexOwner = Object.freeze({
-    schemaVersion: "lark-single-workstation-mutex-v1",
+    schemaVersion: "lark-single-workstation-mutex-v2",
     processId: process.pid,
     processInstanceId: LARK_PROCESS_INSTANCE_ID,
+    processStartIdentity: LARK_PROCESS_START_IDENTITY,
     acquisitionId: randomUUID(),
     acquiredAt: new Date().toISOString(),
   });
-  const deadline = Date.now() + LARK_MUTEX_WAIT_TIMEOUT_MS;
+  const ownerContent = JSON.stringify(owner);
+  const ownerTemporaryPath =
+    `${lockPath}.owner-${process.pid}-${owner.acquisitionId}.tmp`;
+  const ownerHandle = await open(ownerTemporaryPath, "wx", 0o600);
+  try {
+    await ownerHandle.writeFile(ownerContent, "utf8");
+    await ownerHandle.sync();
+  } finally {
+    await ownerHandle.close();
+  }
+  const deadline =
+    Date.now() +
+    (options.waitTimeoutMs ?? LARK_MUTEX_WAIT_TIMEOUT_MS);
+  let acquiredDevice: bigint | number | null = null;
+  let acquiredInode: bigint | number | null = null;
+  let publishedOurOwner = false;
   try {
     for (;;) {
       try {
-        const handle = await open(lockPath, "wx", 0o600);
-        try {
-          await handle.writeFile(JSON.stringify(owner), "utf8");
-        } finally {
-          await handle.close();
+        await link(ownerTemporaryPath, lockPath);
+        publishedOurOwner = true;
+        const [publishedMetadata, ownerMetadata, publishedOwner] =
+          await Promise.all([
+            stat(lockPath, { bigint: true }),
+            stat(ownerTemporaryPath, { bigint: true }),
+            readLarkMutexOwner(lockPath),
+          ]);
+        if (
+          publishedOwner?.processId !== owner.processId ||
+          publishedOwner.processInstanceId !== owner.processInstanceId ||
+          publishedOwner.acquisitionId !== owner.acquisitionId ||
+          publishedMetadata.dev !== ownerMetadata.dev ||
+          publishedMetadata.ino !== ownerMetadata.ino
+        ) {
+          throw new Error(
+            "Lark single-workstation durable mutex owner publication was replaced",
+          );
         }
+        acquiredDevice = publishedMetadata.dev;
+        acquiredInode = publishedMetadata.ino;
+        publishedOurOwner = false;
         break;
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
         const existingOwner = await readLarkMutexOwner(lockPath);
         if (
           existingOwner !== null &&
-          !processIsAlive(existingOwner.processId)
+          !processIsSameInstance(
+            existingOwner.processId,
+            existingOwner.processStartIdentity,
+          )
         ) {
           if (await reclaimStaleLarkMutex(lockPath)) continue;
-        } else if (existingOwner === null) {
-          try {
-            const metadata = await stat(lockPath);
-            if (
-              Date.now() - metadata.mtimeMs >
-              LARK_MUTEX_INCOMPLETE_OWNER_GRACE_MS
-            ) {
-              if (await reclaimStaleLarkMutex(lockPath)) continue;
-            }
-          } catch (metadataError) {
-            if (isMissing(metadataError)) continue;
-            throw metadataError;
-          }
         }
         if (Date.now() >= deadline) {
           throw new Error(
@@ -523,19 +629,59 @@ async function acquireLarkSingleWorkstationMutex(
       }
     }
   } catch (error) {
-    releaseLocal();
+    try {
+      if (publishedOurOwner) {
+        const [publishedMetadata, ownerMetadata] = await Promise.all([
+          stat(lockPath, { bigint: true }).catch(
+            (metadataError: unknown) => {
+              if (isMissing(metadataError)) return null;
+              throw metadataError;
+            },
+          ),
+          stat(ownerTemporaryPath, { bigint: true }),
+        ]);
+        if (
+          publishedMetadata?.dev === ownerMetadata.dev &&
+          publishedMetadata.ino === ownerMetadata.ino
+        ) {
+          await unlink(lockPath).catch((unlinkError: unknown) => {
+            if (!isMissing(unlinkError)) throw unlinkError;
+          });
+        }
+      }
+    } finally {
+      releaseLocal();
+    }
     throw error;
+  } finally {
+    await rm(ownerTemporaryPath, { force: true });
+  }
+  if (acquiredDevice === null || acquiredInode === null) {
+    releaseLocal();
+    throw new Error(
+      "Lark single-workstation durable mutex has no acquired inode",
+    );
   }
   let released = false;
   return async () => {
     if (released) return;
     released = true;
     try {
-      const currentOwner = await readLarkMutexOwner(lockPath);
+      const [currentOwner, currentMetadata] = await Promise.all([
+        readLarkMutexOwner(lockPath),
+        stat(lockPath, { bigint: true }).catch((error: unknown) => {
+          if (isMissing(error)) return null;
+          throw error;
+        }),
+      ]);
       if (
         currentOwner?.processId === owner.processId &&
         currentOwner.processInstanceId === owner.processInstanceId &&
-        currentOwner.acquisitionId === owner.acquisitionId
+        currentOwner.processStartIdentity ===
+          owner.processStartIdentity &&
+        currentOwner.acquisitionId === owner.acquisitionId &&
+        currentMetadata?.dev === acquiredDevice &&
+        currentMetadata.ino === acquiredInode
       ) {
         try {
           await unlink(lockPath);
@@ -556,13 +702,14 @@ async function acquireLarkSingleWorkstationMutex(
 export async function acquireLarkSingleWorkstationMutexForTest(options: {
   readonly lockRoot: string;
   readonly scope: string;
+  readonly waitTimeoutMs?: number;
 }): Promise<() => Promise<void>> {
   nonEmpty(options.lockRoot, "Lark mutex test root");
   nonEmpty(options.scope, "Lark mutex test scope");
   return await acquireLarkSingleWorkstationMutex(
     {
       concurrencyBoundary: "single_workstation_durable_mutex",
-      singleWorkstationLockRoot: options.lockRoot,
+      lockRootPath: resolve(options.lockRoot),
       baseTokenEnvironmentVariable: "PPT_LARK_MUTEX_TEST_UNUSED",
       reportDocumentTokenEnvironmentVariable:
         "PPT_LARK_MUTEX_TEST_UNUSED",
@@ -586,6 +733,9 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
       targetRegion: "test",
     },
     options.scope,
+    options.waitTimeoutMs === undefined
+      ? {}
+      : { waitTimeoutMs: options.waitTimeoutMs },
   );
 }
 
@@ -830,6 +980,7 @@ interface LarkReportClaimBinding {
   readonly claimEpoch: number;
   readonly executionLeaseId: string | null;
   readonly executionProcessId: number | null;
+  readonly executionProcessStartIdentity: string | null;
 }
 
 function reportClaimBindingMetadata(
@@ -847,7 +998,9 @@ function reportClaimBindingMetadata(
     binding.executionLeaseId.trim().length === 0 ||
     binding.executionProcessId === null ||
     !Number.isSafeInteger(binding.executionProcessId) ||
-    binding.executionProcessId < 1
+    binding.executionProcessId < 1 ||
+    binding.executionProcessStartIdentity === null ||
+    binding.executionProcessStartIdentity.trim().length === 0
   ) {
     throw new Error("Lark report owner execution lease is invalid");
   }
@@ -857,7 +1010,8 @@ function reportClaimBindingMetadata(
     `Owner claim hash: \`${binding.claimHash}\`\n\n` +
     `Owner claim epoch: \`${binding.claimEpoch}\`\n\n` +
     `Owner execution lease: \`${encodeURIComponent(binding.executionLeaseId)}\`\n\n` +
-    `Owner execution process: \`${binding.executionProcessId}\``
+    `Owner execution process: \`${binding.executionProcessId}\`\n\n` +
+    `Owner execution process start: \`${encodeURIComponent(binding.executionProcessStartIdentity)}\``
   );
 }
 
@@ -890,7 +1044,7 @@ function parseReportClaimBinding(
   const owner = parseReportOwner(normalized);
   if (owner === null) return null;
   const match =
-    /\n\nOwner claimant: `([^`\n]+)`\n\nOwner claim attempt: `([^`\n]+)`\n\nOwner claim hash: `(sha256:[a-f0-9]{64})`(?:\n\nOwner claim epoch: `([1-9]\d*)`\n\nOwner execution lease: `([^`\n]+)`\n\nOwner execution process: `([1-9]\d*)`)?(?:\n|$)/.exec(
+    /\n\nOwner claimant: `([^`\n]+)`\n\nOwner claim attempt: `([^`\n]+)`\n\nOwner claim hash: `(sha256:[a-f0-9]{64})`(?:\n\nOwner claim epoch: `([1-9]\d*)`\n\nOwner execution lease: `([^`\n]+)`\n\nOwner execution process: `([1-9]\d*)`(?:\n\nOwner execution process start: `([^`\n]+)`)?)?(?:\n|$)/.exec(
       normalized,
     );
   if (match === null) return null;
@@ -901,6 +1055,8 @@ function parseReportClaimBinding(
       match[5] === undefined ? null : decodeURIComponent(match[5]);
     const executionProcessId =
       match[6] === undefined ? null : Number(match[6]);
+    const executionProcessStartIdentity =
+      match[7] === undefined ? null : decodeURIComponent(match[7]);
     const claimEpoch =
       match[4] === undefined ? 0 : Number(match[4]);
     if (
@@ -908,6 +1064,8 @@ function parseReportClaimBinding(
       encodeURIComponent(claimAttemptId) !== match[2] ||
       (executionLeaseId !== null &&
         encodeURIComponent(executionLeaseId) !== match[5]) ||
+      (executionProcessStartIdentity !== null &&
+        encodeURIComponent(executionProcessStartIdentity) !== match[7]) ||
       !Number.isSafeInteger(claimEpoch) ||
       claimEpoch < 0 ||
       (executionProcessId !== null &&
@@ -923,6 +1081,7 @@ function parseReportClaimBinding(
       claimEpoch,
       executionLeaseId,
       executionProcessId,
+      executionProcessStartIdentity,
     });
   } catch {
     throw new Error("Lark report document claim binding is invalid");
@@ -1438,6 +1597,7 @@ function serializedRow(value: Record<string, unknown>): {
 class LarkBaseProjection extends InMemoryFeishuProjection {
   readonly #transport: LarkBaseProjectionTransportPort;
   readonly #clock: ClockPort;
+  #committedRemoteBatchHash: `sha256:${string}` | null = null;
   #materializationTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -1471,9 +1631,24 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
     )}/pages/${pageNumber}`;
   }
 
+  protected override async captureRemoteBatchHash(
+    _jobId: string,
+  ): Promise<`sha256:${string}` | null> {
+    return this.#committedRemoteBatchHash;
+  }
+
+  protected override didCommitAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+  ): void {
+    this.#committedRemoteBatchHash = sha256Bytes(
+      canonicalJsonBytes(snapshot),
+    );
+  }
+
   protected override async materializeAuthorizedSnapshot(
     snapshot: FeishuProjectionSnapshot,
     authorization: ApprovedEgressAuthorization,
+    baseline?: ProjectionCommitBaseline,
   ): Promise<FeishuProjectionSnapshot> {
     const jobId =
       snapshot.runRecordTable.find(
@@ -1536,6 +1711,16 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       const existingMarker =
         await this.#transport.readCommitMarker({ jobId });
       assertAuthorizationCurrent();
+      if (
+        baseline !== undefined &&
+        existingMarker?.batchHash !== batchHash &&
+        (existingMarker?.batchHash ?? null) !==
+          baseline.remoteBatchHash
+      ) {
+        throw new ProjectionStaleBaselineError(
+          "Lark projection commit marker advanced beyond the staging baseline",
+        );
+      }
       if (existingMarker !== null) {
         if (
           existingMarker.jobId !== jobId ||
@@ -2187,6 +2372,44 @@ export async function claimHarnessOwnedLarkProductionJob(
   return result;
 }
 
+export async function abortHarnessOwnedLarkProductionJobBeforeSubmission(
+  projection: object,
+  command: {
+    readonly jobId: string;
+    readonly runIds: readonly string[];
+    readonly claimHash: `sha256:${string}`;
+    readonly authorization: ApprovedEgressAuthorization;
+    readonly notSubmittedAttemptIds: readonly string[];
+    readonly abortedAt: string;
+    readonly clock?: ClockPort;
+  },
+): Promise<void> {
+  const transport = HARNESS_OWNED_LARK_PROJECTIONS.get(projection);
+  if (
+    transport === undefined ||
+    transport.abortProductionJobClaimBeforeSubmission === undefined
+  ) {
+    throw new Error(
+      "Production Job pre-submission abort requires a verified remote claim transport",
+    );
+  }
+  const clock = command.clock ?? SYSTEM_CLOCK;
+  assertApprovedEgressAuthorizationCurrent(command.authorization, clock);
+  await transport.abortProductionJobClaimBeforeSubmission({
+    jobId: command.jobId,
+    runIds: command.runIds,
+    claimHash: command.claimHash,
+    claimantId: command.authorization.request.sourceOwner,
+    claimAttemptId:
+      command.authorization.request.attemptId ??
+      command.authorization.request.requestId,
+    authorization: command.authorization,
+    notSubmittedAttemptIds: command.notSubmittedAttemptIds,
+    abortedAt: command.abortedAt,
+  });
+  assertApprovedEgressAuthorizationCurrent(command.authorization, clock);
+}
+
 export function isHarnessOwnedLarkBaseProjection(
   projection: object,
 ): boolean {
@@ -2210,6 +2433,7 @@ const OPERATIONAL_LEDGER_CONTENT_FIELDS = Object.freeze([
 export async function persistHarnessOwnedLarkProjectionSnapshot(options: {
   readonly projection: FeishuProjectionPort;
   readonly stagedSnapshot: FeishuProjectionSnapshot;
+  readonly baseline: ProjectionCommitBaseline;
   readonly jobId: string;
   readonly egressAuthorization: EgressAuthorizationPort;
   readonly egressAudit: EgressAuthorizationAuditPort;
@@ -2263,6 +2487,7 @@ export async function persistHarnessOwnedLarkProjectionSnapshot(options: {
   await options.projection.commitAuthorizedSnapshot(
     snapshot,
     authorization,
+    options.baseline,
   );
   return options.projection.snapshot();
 }
@@ -3688,8 +3913,16 @@ class VerifiedLarkCliTransport
     },
   ): {
     readonly claimEpoch: number;
+    readonly claimState:
+      | "claimed"
+      | "aborted_before_submission";
     readonly executionLeaseId: string | null;
     readonly executionProcessId: number | null;
+    readonly executionProcessStartIdentity: string | null;
+    readonly authorizationDecisionId: string;
+    readonly claimedAt: string;
+    readonly abortedAt: string | null;
+    readonly notSubmittedAttemptIds: readonly string[];
   } {
     const fields =
       record.fields !== null && typeof record.fields === "object"
@@ -3737,8 +3970,15 @@ class VerifiedLarkCliTransport
     if (isV2) {
       return {
         claimEpoch: 0,
+        claimState: "claimed",
         executionLeaseId: null,
         executionProcessId: null,
+        executionProcessStartIdentity: null,
+        authorizationDecisionId:
+          claim.authorizationDecisionId as string,
+        claimedAt: claim.claimedAt as string,
+        abortedAt: null,
+        notSubmittedAttemptIds: [],
       };
     }
     if (
@@ -3753,10 +3993,67 @@ class VerifiedLarkCliTransport
         `Production Job claim lease is invalid: ${command.jobId}`,
       );
     }
+    const claimState =
+      claim.claimState === undefined ||
+      claim.claimState === "claimed"
+        ? "claimed"
+        : claim.claimState === "aborted_before_submission"
+          ? "aborted_before_submission"
+          : null;
+    const abortedAt =
+      claim.abortedAt === undefined || claim.abortedAt === null
+        ? null
+        : typeof claim.abortedAt === "string" &&
+            Number.isFinite(Date.parse(claim.abortedAt))
+          ? claim.abortedAt
+          : undefined;
+    const notSubmittedAttemptIds =
+      claim.notSubmittedAttemptIds === undefined
+        ? []
+        : Array.isArray(claim.notSubmittedAttemptIds) &&
+            claim.notSubmittedAttemptIds.every(
+              (value) =>
+                typeof value === "string" &&
+                value.trim().length > 0,
+            )
+          ? claim.notSubmittedAttemptIds
+          : null;
+    const expectedAttemptIds = command.runIds.map(
+      (runId) => `${runId}-attempt-1`,
+    );
+    if (
+      claimState === null ||
+      abortedAt === undefined ||
+      notSubmittedAttemptIds === null ||
+      (claimState === "claimed" &&
+        (abortedAt !== null ||
+          notSubmittedAttemptIds.length !== 0)) ||
+      (claimState === "aborted_before_submission" &&
+        (abortedAt === null ||
+          !isDeepStrictEqual(
+            notSubmittedAttemptIds,
+            expectedAttemptIds,
+          )))
+    ) {
+      throw new Error(
+        `Production Job claim state is invalid: ${command.jobId}`,
+      );
+    }
     return {
       claimEpoch: claim.claimEpoch as number,
+      claimState,
       executionLeaseId: claim.executionLeaseId,
       executionProcessId: claim.executionProcessId as number,
+      executionProcessStartIdentity:
+        typeof claim.executionProcessStartIdentity === "string" &&
+        claim.executionProcessStartIdentity.trim().length > 0
+          ? claim.executionProcessStartIdentity
+          : null,
+      authorizationDecisionId:
+        claim.authorizationDecisionId as string,
+      claimedAt: claim.claimedAt as string,
+      abortedAt,
+      notSubmittedAttemptIds,
     };
   }
 
@@ -3820,26 +4117,51 @@ class VerifiedLarkCliTransport
     const leaseIsActive = async (
       leaseId: string | null,
       processId: number | null,
-    ): Promise<boolean> =>
-      leaseId !== null &&
-      processId !== null &&
-      (await this.#executionLease.isActive(leaseId, processId));
+      processStartIdentity: string | null,
+    ): Promise<boolean> => {
+      if (leaseId === null || processId === null) return false;
+      if (processStartIdentity === null) {
+        // A pre-start-identity v3 claim is unknown while its PID is live.
+        // Fail closed instead of risking a duplicate provider submission.
+        return processIsAlive(processId);
+      }
+      return await this.#executionLease.isActive(
+        leaseId,
+        processId,
+        processStartIdentity,
+      );
+    };
     if (
       existingLease !== null &&
+      existingLease.claimState === "claimed" &&
       (await leaseIsActive(
         existingLease.executionLeaseId,
         existingLease.executionProcessId,
+        existingLease.executionProcessStartIdentity,
       ))
     ) {
       return "already_claimed";
     }
+    const currentBindingWasDurablyAborted =
+      existingLease?.claimState ===
+        "aborted_before_submission" &&
+      currentBinding !== null &&
+      currentBinding.claimEpoch === existingLease.claimEpoch &&
+      currentBinding.executionLeaseId ===
+        existingLease.executionLeaseId &&
+      currentBinding.executionProcessId ===
+        existingLease.executionProcessId &&
+      currentBinding.executionProcessStartIdentity ===
+        existingLease.executionProcessStartIdentity;
     if (
       currentBinding !== null &&
+      !currentBindingWasDurablyAborted &&
       currentBinding.executionLeaseId !==
         this.#executionLease.leaseId &&
       (await leaseIsActive(
         currentBinding.executionLeaseId,
         currentBinding.executionProcessId,
+        currentBinding.executionProcessStartIdentity,
       ))
     ) {
       return "already_claimed";
@@ -3849,7 +4171,9 @@ class VerifiedLarkCliTransport
       currentBinding?.executionLeaseId ===
         this.#executionLease.leaseId &&
       currentBinding.executionProcessId ===
-        this.#executionLease.processId;
+        this.#executionLease.processId &&
+      currentBinding.executionProcessStartIdentity ===
+        this.#executionLease.processStartIdentity;
     const claimEpoch = resumingOwnOwnerOnlyLease
       ? currentBinding.claimEpoch
       : Math.max(
@@ -3863,6 +4187,8 @@ class VerifiedLarkCliTransport
       claimEpoch,
       executionLeaseId: this.#executionLease.leaseId,
       executionProcessId: this.#executionLease.processId,
+      executionProcessStartIdentity:
+        this.#executionLease.processStartIdentity,
     });
     if (!isDeepStrictEqual(currentBinding, claimBinding)) {
       const ownerContent = createLarkReportOwnerMarkdown(
@@ -3914,8 +4240,13 @@ class VerifiedLarkCliTransport
       claimantId: command.claimantId,
       claimAttemptId: command.claimAttemptId,
       claimEpoch,
+      claimState: "claimed",
       executionLeaseId: this.#executionLease.leaseId,
       executionProcessId: this.#executionLease.processId,
+      executionProcessStartIdentity:
+        this.#executionLease.processStartIdentity,
+      abortedAt: null,
+      notSubmittedAttemptIds: [],
       authorizationDecisionId: command.authorization.decisionId,
       claimedAt: command.claimedAt,
     });
@@ -3930,6 +4261,122 @@ class VerifiedLarkCliTransport
       authorization: command.authorization,
     });
     return "claimed";
+  }
+
+  async abortProductionJobClaimBeforeSubmission(command: {
+    readonly jobId: string;
+    readonly runIds: readonly string[];
+    readonly claimHash: `sha256:${string}`;
+    readonly claimantId: string;
+    readonly claimAttemptId: string;
+    readonly authorization: ApprovedEgressAuthorization;
+    readonly notSubmittedAttemptIds: readonly string[];
+    readonly abortedAt: string;
+  }): Promise<void> {
+    await this.#withMutex(
+      "claim",
+      command.jobId,
+      async () => {
+        const expectedAttemptIds = command.runIds.map(
+          (runId) => `${runId}-attempt-1`,
+        );
+        if (
+          !isDeepStrictEqual(
+            command.notSubmittedAttemptIds,
+            expectedAttemptIds,
+          ) ||
+          !Number.isFinite(Date.parse(command.abortedAt))
+        ) {
+          throw new Error(
+            "Production Job pre-submission abort proof is incomplete",
+          );
+        }
+        const stableId = `claim:${command.jobId}`;
+        const existing = await this.#findRecord(
+          "commit_markers",
+          stableId,
+        );
+        if (existing === null) {
+          throw new Error(
+            `Production Job claim is missing before abort: ${command.jobId}`,
+          );
+        }
+        const lease = this.#assertProductionClaimRecord(
+          existing,
+          command,
+        );
+        if (lease.claimState === "aborted_before_submission") {
+          if (
+            !isDeepStrictEqual(
+              lease.notSubmittedAttemptIds,
+              expectedAttemptIds,
+            )
+          ) {
+            throw new Error(
+              "Production Job pre-submission abort proof conflicts",
+            );
+          }
+          return;
+        }
+        if (
+          lease.executionLeaseId !==
+            this.#executionLease.leaseId ||
+          lease.executionProcessId !==
+            this.#executionLease.processId ||
+          lease.executionProcessStartIdentity !==
+            this.#executionLease.processStartIdentity
+        ) {
+          throw new Error(
+            "Production Job pre-submission abort is not owned by this execution lease",
+          );
+        }
+        const currentReport = await this.#fetchReportDocument();
+        const currentBinding =
+          parseReportClaimBinding(currentReport.content);
+        if (
+          parseReportOwner(currentReport.content) !== command.jobId ||
+          currentBinding === null ||
+          currentBinding.claimEpoch !== lease.claimEpoch ||
+          currentBinding.executionLeaseId !== lease.executionLeaseId ||
+          currentBinding.executionProcessId !==
+            lease.executionProcessId ||
+          currentBinding.executionProcessStartIdentity !==
+            lease.executionProcessStartIdentity
+        ) {
+          throw new Error(
+            "Production Job pre-submission abort report binding conflicts",
+          );
+        }
+        const payload = canonicalPayload({
+          schemaVersion: "lark-production-job-claim-v3",
+          jobId: command.jobId,
+          runIds: command.runIds,
+          claimHash: command.claimHash,
+          claimantId: command.claimantId,
+          claimAttemptId: command.claimAttemptId,
+          claimEpoch: lease.claimEpoch,
+          claimState: "aborted_before_submission",
+          executionLeaseId: lease.executionLeaseId,
+          executionProcessId: lease.executionProcessId,
+          executionProcessStartIdentity:
+            lease.executionProcessStartIdentity,
+          abortedAt: command.abortedAt,
+          notSubmittedAttemptIds: expectedAttemptIds,
+          authorizationDecisionId:
+            lease.authorizationDecisionId,
+          claimedAt: lease.claimedAt,
+        });
+        await this.upsertRecord({
+          tableKey: "commit_markers",
+          stableId,
+          payload,
+          payloadHash: sha256(payload),
+          idempotencyKey:
+            `lark-job-claim-abort:${command.jobId}:${command.claimHash}:${lease.claimEpoch}:${encodeURIComponent(this.#executionLease.leaseId)}`,
+          authorization: command.authorization,
+        });
+      },
+    );
   }
 
   async commitBatch(
@@ -3997,7 +4444,19 @@ export async function createVerifiedLarkCliTransport(options: {
       "Verified Lark transport requires the declared single-workstation durable mutex boundary",
     );
   }
+  if (
+    typeof options.configuration.lockRootPath !== "string" ||
+    options.configuration.lockRootPath.trim().length === 0 ||
+    resolve(options.configuration.lockRootPath) !==
+      options.configuration.lockRootPath ||
+    options.configuration.lockRootPath === sep
+  ) {
+    throw new Error(
+      "Verified Lark transport requires one normalized fixed machine lock root",
+    );
+  }
   for (const [label, value] of Object.entries({
+    lockRootPath: options.configuration.lockRootPath,
     baseTokenEnvironmentVariable:
       options.configuration.baseTokenEnvironmentVariable,
     reportDocumentTokenEnvironmentVariable:
