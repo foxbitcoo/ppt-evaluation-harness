@@ -1619,7 +1619,9 @@ async function executeVendor(
       productionExecutionEvidence.artifactContentHash !==
         artifact.contentHash ||
       productionExecutionEvidence.traceHash !==
-        sha256Json(result.observableEvents ?? [])
+        sha256Bytes(
+          canonicalJsonBytes(result.observableEvents ?? []),
+        )
     ) {
       throw new Error(
         "Production Artifact requires bound driver session, outcome, Artifact, and Trace evidence",
