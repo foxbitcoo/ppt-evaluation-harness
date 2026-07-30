@@ -126,6 +126,8 @@ ${lineage.provenance === "MOCK" ? "> **MOCK 测试数据，禁止作为真实厂
 
 ${vendorSections}
 
+本次未生成兼容的直接对比；相对比较为 \`NOT_ASSESSABLE\`。
+
 Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分。本报告展示独立维度，不生成总分或总冠军，也不外推为稳定厂商排名。
 `;
   return {

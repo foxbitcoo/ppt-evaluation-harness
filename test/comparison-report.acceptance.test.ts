@@ -532,7 +532,7 @@ test("comparison rejects mismatched persisted compatibility fingerprints before 
   assert.equal(after.reports.length, before.reports.length);
 });
 
-test("comparison rejects LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards even when every other compatibility field matches", async () => {
+test("comparison rejects production-shaped LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards when their outer projection provenance is the same", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
     feishu,
@@ -545,7 +545,7 @@ test("comparison rejects LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards even w
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
-  const provenanceForRun = (runId: string) =>
+  const captureProvenanceForRun = (runId: string) =>
     runId === "MOCK-run-qwen-volcano-v1"
       ? ("LIVE_PRODUCTION" as const)
       : runId === "MOCK-run-doubao-volcano-v1"
@@ -555,18 +555,28 @@ test("comparison rejects LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards even w
     ...source,
     vendorRuns: source.vendorRuns.map((run) => ({
       ...run,
-      provenance: provenanceForRun(run.recordId),
+      provenance:
+        run.recordId === "MOCK-run-wps-volcano-v1"
+          ? run.provenance
+          : ("PRODUCTION" as const),
     })),
     artifactScores: source.artifactScores.map((record) => ({
       ...record,
-      provenance: provenanceForRun(record.runId),
+      provenance:
+        record.runId === "MOCK-run-wps-volcano-v1"
+          ? record.provenance
+          : ("PRODUCTION" as const),
       artifact: {
         ...record.artifact,
-        provenance: provenanceForRun(record.runId),
+        provenance: captureProvenanceForRun(record.runId),
+      },
+      renderManifest: {
+        ...record.renderManifest,
+        provenance: captureProvenanceForRun(record.runId),
       },
       scorecard: {
         ...record.scorecard,
-        provenance: provenanceForRun(record.runId),
+        provenance: captureProvenanceForRun(record.runId),
       },
     })),
   }));
@@ -585,6 +595,52 @@ test("comparison rejects LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards even w
     }),
     /provenance|compatible for direct comparison/i,
   );
+});
+
+test("Artifact Score projection rejects inconsistent capture execution provenance before persistence", async () => {
+  const source = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const score = source.snapshot().artifactScoreTable[0]!;
+  const target = new InMemoryFeishuProjection();
+
+  await assert.rejects(
+    target.appendArtifactScore({
+      ...score,
+      renderManifest: {
+        ...score.renderManifest,
+        provenance: "PRODUCTION_REPLAY",
+      },
+    }),
+    /provenance|lineage/i,
+  );
+  await assert.rejects(
+    target.appendArtifactScore({
+      ...score,
+      artifact: {
+        ...score.artifact,
+        provenance: "LIVE_PRODUCTION",
+      },
+      renderManifest: {
+        ...score.renderManifest,
+        provenance: "LIVE_PRODUCTION",
+      },
+      scorecard: {
+        ...score.scorecard,
+        provenance: "LIVE_PRODUCTION",
+      },
+    }),
+    /provenance|lineage/i,
+  );
+  assert.equal(target.snapshot().artifactScoreTable.length, 0);
 });
 
 test("comparison rejects Codex Judge scorecards produced by different stable execution identities", async () => {

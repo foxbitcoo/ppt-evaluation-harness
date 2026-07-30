@@ -775,6 +775,85 @@ test("the trusted registry executes the WPS package only through the registered 
   );
 });
 
+test("a WPS crash before the submitted checkpoint leaves durable unknown intent and never runs the browser again", async () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const retained = new InMemoryAttemptCheckpointStore(
+    "wps-submission-intent-crash-retained",
+  );
+  let submittedCheckpointCalls = 0;
+  const crashStore: AttemptCheckpointPort = {
+    checkpointStoreId: "wps-submission-intent-crash",
+    async append(event) {
+      if (
+        event.submissionEvidenceAtCheckpoint === "submitted"
+      ) {
+        submittedCheckpointCalls += 1;
+        throw new Error(
+          "simulated process crash before submitted checkpoint persistence",
+        );
+      }
+      await retained.append(event);
+    },
+    async readAttempt(attemptId) {
+      return await retained.readAttempt(attemptId);
+    },
+  };
+  const captured = capturedBrowserResult(
+    await knownGoodPptxBytes(),
+  );
+  const browserResult: WpsAiPptCapturedBrowserResult = {
+    ...captured,
+    events: [
+      {
+        ...captured.events[0]!,
+        vendorTaskId: null,
+        taskStateVersion: null,
+      },
+      captured.events[1]!,
+    ],
+  };
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        browserResult,
+      ),
+      attemptCheckpointStore: crashStore,
+      recordWpsSubmissionIntentForTest: true,
+    },
+  );
+  const command = {
+    jobId: "job-wps-submission-intent-crash",
+    runId: "run-wps-submission-intent-crash",
+    attemptId: "attempt-wps-submission-intent-crash-1",
+    attemptSeq: 1,
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  } as const;
+
+  await assert.rejects(
+    execute(command),
+    /simulated process crash/i,
+  );
+  assert.equal(
+    retained
+      .snapshot()
+      .find(({ eventType }) => eventType === "submission_intent")
+      ?.submissionEvidenceAtCheckpoint,
+    "unknown",
+  );
+
+  const restarted = await execute(command);
+  assert.ok(!("content" in restarted));
+  assert.equal(restarted.terminalReason, "task_state_unknown");
+  assert.equal(restarted.submissionEvidence, "unknown");
+  assert.equal(submittedCheckpointCalls, 1);
+});
+
 test("production rejects an arbitrary browser closure that is not backed by the harness allowlist packages", async () => {
   const forgedDriver = {
     driverId: "wps-aippt-test-fixture",

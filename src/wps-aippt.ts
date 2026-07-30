@@ -14,6 +14,8 @@ import {
   PRODUCTION_ENVIRONMENT_ORIGIN,
 } from "./environment-origin.ts";
 import {
+  createProviderSubmissionIntentCheckpoint,
+  isUnresolvedProviderSubmissionIntent,
   parseAdapterExecutionConfiguration,
   type AttemptCheckpointPort,
   type ProductAdapterExecutionConfiguration,
@@ -1163,6 +1165,7 @@ function createWpsAiPptProductAdapterExecutor(
   browserDriver: WpsAiPptBrowserDriverPort | undefined,
   checkpointStore?: AttemptCheckpointPort,
   testOnlyReplay = false,
+  testOnlyRecordSubmissionIntent = false,
 ): ProductAdapterExecutor {
   if (
     executionConfiguration.adapterKind !== "wps-aippt-browser" ||
@@ -1318,6 +1321,23 @@ function createWpsAiPptProductAdapterExecutor(
           manualActions: Object.freeze([]),
         };
       }
+      if (
+        persistedEvents.some(
+          isUnresolvedProviderSubmissionIntent,
+        )
+      ) {
+        return {
+          terminalReason: "task_state_unknown",
+          blockReason: null,
+          submissionEvidence: "unknown",
+          elapsedMs: 0,
+          artifactCandidates: [],
+          observableEvents: Object.freeze([...persistedEvents]),
+          manualActions: Object.freeze([
+            "provider submission intent is unresolved; automatic resubmission suppressed",
+          ]),
+        };
+      }
     }
     const runBrowser = resolveRegisteredWpsAiPptBrowserDriver(
       browserDriver,
@@ -1335,6 +1355,17 @@ function createWpsAiPptProductAdapterExecutor(
     );
     let result: WpsAiPptBrowserResult;
     try {
+      if (
+        executionMode === "live" &&
+        (!testOnlyReplay || testOnlyRecordSubmissionIntent)
+      ) {
+        await checkpointStore?.append(
+          createProviderSubmissionIntentCheckpoint(
+            command,
+            WPS_AIPPT_ADAPTER_VERSION,
+          ),
+        );
+      }
       result = await runBrowser({
         jobId: command.jobId,
         runId: command.runId,
@@ -1570,6 +1601,7 @@ export function resolveWpsAiPptProductAdapterExecutorForTest(
   executionConfiguration: ProductAdapterExecutionConfiguration,
   browserDriver: WpsAiPptBrowserDriverPort | undefined,
   checkpointStore?: AttemptCheckpointPort,
+  recordSubmissionIntent = false,
 ): ProductAdapterExecutor {
   if (browserDriver?.provenance !== "TEST_FAKE") {
     throw new Error(
@@ -1582,6 +1614,7 @@ export function resolveWpsAiPptProductAdapterExecutorForTest(
     browserDriver,
     checkpointStore,
     true,
+    recordSubmissionIntent,
   );
 }
 

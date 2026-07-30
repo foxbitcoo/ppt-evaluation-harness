@@ -1,16 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
-  link,
   lstat,
   mkdtemp,
-  open,
   readFile,
   readlink,
-  rename,
   rm,
-  stat,
-  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -316,7 +311,6 @@ function sha256(value: string | Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
-const LARK_PROCESS_INSTANCE_ID = randomUUID();
 const LARK_PROCESS_START_IDENTITY: string = (() => {
   const identity = readProcessStartIdentity(process.pid);
   if (identity === null) {
@@ -325,8 +319,26 @@ const LARK_PROCESS_START_IDENTITY: string = (() => {
   return identity;
 })();
 const LARK_MUTEX_WAIT_TIMEOUT_MS = 35 * 60 * 1_000;
-const LOCAL_LARK_MUTEX_TAILS = new Map<string, Promise<void>>();
-const ACTIVE_LARK_EXECUTION_LEASES = new Set<string>();
+const FROZEN_MACOS_LOCKF_BINARY = "/usr/bin/lockf";
+const FROZEN_MACOS_LOCKF_SHA256 =
+  "sha256:0ec2e00997f6b6660dc74b849b00ad25c69ba9b41496248c1d8aaa96977d0071" as const;
+const FROZEN_MACOS_LOCKF_USAGE =
+  "usage: lockf [-knsw] [-t seconds] file command [arguments]\n" +
+  "       lockf [-s] [-t seconds] fd\n";
+const MACOS_LOCKF_IDENTITY =
+  `macos-lockf-v1:${FROZEN_MACOS_LOCKF_BINARY}:${FROZEN_MACOS_LOCKF_SHA256}` as const;
+const LOCKF_ACQUIRED_HANDSHAKE = "ppt-lockf-acquired-v1\n";
+const LOCKF_RELEASE_COMMAND = "release\n";
+const LOCKF_HOLDER_SCRIPT = [
+  'let input = "";',
+  'process.stdin.setEncoding("utf8");',
+  'process.stdin.on("data", (value) => { input += value; });',
+  'process.stdin.on("end", () => {',
+  `  process.exit(input === "" || input === ${JSON.stringify(LOCKF_RELEASE_COMMAND)} ? 0 : 64);`,
+  "});",
+  `process.stdout.write(${JSON.stringify(LOCKF_ACQUIRED_HANDSHAKE)});`,
+  "process.stdin.resume();",
+].join("\n");
 
 interface LarkExecutionLeasePort {
   readonly leaseId: string;
@@ -339,40 +351,78 @@ interface LarkExecutionLeasePort {
   ): Promise<boolean>;
 }
 
-function createProcessLarkExecutionLease(): LarkExecutionLeasePort {
-  const leaseId = randomUUID();
-  ACTIVE_LARK_EXECUTION_LEASES.add(leaseId);
+function larkExecutionLeaseSentinelPath(
+  lockRoot: string,
+  leaseId: string,
+): string {
+  if (leaseId.trim().length === 0) {
+    throw new Error("Lark execution lease ID is invalid");
+  }
+  return join(
+    resolve(lockRoot),
+    `lease-${sha256(leaseId).slice("sha256:".length)}.lock`,
+  );
+}
+
+function createProcessLarkExecutionLease(options: {
+  readonly lockRoot: string;
+  readonly leaseId?: string;
+  readonly processId?: number;
+  readonly processStartIdentity?: string;
+}): LarkExecutionLeasePort {
+  const leaseId = options.leaseId ?? randomUUID();
+  const processId = options.processId ?? process.pid;
+  const processStartIdentity =
+    options.processStartIdentity ?? LARK_PROCESS_START_IDENTITY;
+  let sentinelRelease: (() => Promise<void>) | null = null;
+  let sentinelAcquisition: Promise<void> | null = null;
+  const ensureSentinelOwned = async (): Promise<void> => {
+    if (sentinelRelease !== null) return;
+    sentinelAcquisition ??= (async () => {
+      const release = await acquireMacOsAdvisoryLock(
+        larkExecutionLeaseSentinelPath(options.lockRoot, leaseId),
+        0,
+        { unrefAfterAcquisition: true },
+      );
+      sentinelRelease = release;
+    })();
+    await sentinelAcquisition;
+  };
   return Object.freeze({
     leaseId,
-    processId: process.pid,
-    processStartIdentity: LARK_PROCESS_START_IDENTITY,
+    processId,
+    processStartIdentity,
     async isActive(
       candidateLeaseId: string,
       candidateProcessId: number,
       candidateProcessStartIdentity: string,
     ): Promise<boolean> {
-      if (candidateProcessId === process.pid) {
-        return (
-          candidateProcessStartIdentity ===
-            LARK_PROCESS_START_IDENTITY &&
-          ACTIVE_LARK_EXECUTION_LEASES.has(candidateLeaseId)
-        );
+      if (
+        candidateLeaseId === leaseId &&
+        candidateProcessId === processId &&
+        candidateProcessStartIdentity === processStartIdentity
+      ) {
+        await ensureSentinelOwned();
+        return true;
       }
-      return processIsSameInstance(
-        candidateProcessId,
-        candidateProcessStartIdentity,
-      );
+      try {
+        const release = await acquireMacOsAdvisoryLock(
+          larkExecutionLeaseSentinelPath(
+            options.lockRoot,
+            candidateLeaseId,
+          ),
+          0,
+        );
+        await release();
+        return false;
+      } catch (error) {
+        if (error instanceof LarkAdvisoryLockUnavailableError) {
+          return true;
+        }
+        throw error;
+      }
     },
   });
-}
-
-interface LarkMutexOwner {
-  readonly schemaVersion: "lark-single-workstation-mutex-v2";
-  readonly processId: number;
-  readonly processInstanceId: string;
-  readonly processStartIdentity: string;
-  readonly acquisitionId: string;
-  readonly acquiredAt: string;
 }
 
 function larkMutexRoot(
@@ -438,105 +488,206 @@ function readProcessStartIdentity(processId: number): string | null {
   );
 }
 
-function processIsSameInstance(
-  processId: number,
-  processStartIdentity: string,
-): boolean {
-  if (processStartIdentity.trim().length === 0) return false;
-  return readProcessStartIdentity(processId) === processStartIdentity;
-}
+let lockfUsageAttestation: Promise<void> | null = null;
 
-function isAlreadyExists(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    error.code === "EEXIST"
+async function assertFrozenMacOsLockfInstallation(): Promise<void> {
+  if (resolve(FROZEN_MACOS_LOCKF_BINARY) !== FROZEN_MACOS_LOCKF_BINARY) {
+    throw new Error("macOS lockf path is not canonical");
+  }
+  const binaryHash = sha256(
+    Uint8Array.from(await readFile(FROZEN_MACOS_LOCKF_BINARY)),
   );
-}
-
-function isMissing(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    error.code === "ENOENT"
+  if (binaryHash !== FROZEN_MACOS_LOCKF_SHA256) {
+    throw new Error(
+      "macOS lockf executable does not match the reviewed installation",
+    );
+  }
+  lockfUsageAttestation ??= new Promise<void>(
+    (resolveAttestation, rejectAttestation) => {
+      const child = spawn(FROZEN_MACOS_LOCKF_BINARY, [], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { PATH: "/usr/bin:/bin" },
+      });
+      let stdout = "";
+      let stderr = "";
+      const appendBounded = (
+        current: string,
+        value: string,
+      ): string => {
+        const next = current + value;
+        if (Buffer.byteLength(next, "utf8") > 4_096) {
+          child.kill("SIGKILL");
+          throw new Error("macOS lockf identity output exceeded its bound");
+        }
+        return next;
+      };
+      child.stdout.setEncoding("utf8").on("data", (value: string) => {
+        try {
+          stdout = appendBounded(stdout, value);
+        } catch (error) {
+          rejectAttestation(error);
+        }
+      });
+      child.stderr.setEncoding("utf8").on("data", (value: string) => {
+        try {
+          stderr = appendBounded(stderr, value);
+        } catch (error) {
+          rejectAttestation(error);
+        }
+      });
+      child.once("error", rejectAttestation);
+      child.once("close", (code, signal) => {
+        if (
+          code !== 64 ||
+          signal !== null ||
+          stdout !== "" ||
+          stderr !== FROZEN_MACOS_LOCKF_USAGE
+        ) {
+          rejectAttestation(
+            new Error(
+              "macOS lockf version/usage identity does not match the reviewed installation",
+            ),
+          );
+          return;
+        }
+        resolveAttestation();
+      });
+    },
   );
+  await lockfUsageAttestation;
 }
 
-async function waitForLarkMutexRetry(): Promise<void> {
-  await new Promise<void>((resolveWait) => {
-    setTimeout(resolveWait, 25);
-  });
+class LarkAdvisoryLockUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LarkAdvisoryLockUnavailableError";
+  }
 }
 
-async function acquireLocalLarkMutex(
-  key: string,
-): Promise<() => void> {
-  const previous = LOCAL_LARK_MUTEX_TAILS.get(key) ?? Promise.resolve();
-  let releaseCurrent = () => {};
-  const current = new Promise<void>((resolveCurrent) => {
-    releaseCurrent = resolveCurrent;
+async function acquireMacOsAdvisoryLock(
+  lockPath: string,
+  waitTimeoutMs: number,
+  options: {
+    readonly unrefAfterAcquisition?: boolean;
+  } = {},
+): Promise<() => Promise<void>> {
+  await assertFrozenMacOsLockfInstallation();
+  const timeoutSeconds = Math.max(0, Math.ceil(waitTimeoutMs / 1_000));
+  const child = spawn(
+    FROZEN_MACOS_LOCKF_BINARY,
+    [
+      "-k",
+      "-s",
+      "-t",
+      String(timeoutSeconds),
+      lockPath,
+      process.execPath,
+      "--input-type=module",
+      "-e",
+      LOCKF_HOLDER_SCRIPT,
+    ],
+    {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        PATH: "/usr/bin:/bin",
+      },
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  let acquired = false;
+  let releaseRequested = false;
+  let resolveAcquired!: () => void;
+  let rejectAcquired!: (error: unknown) => void;
+  const acquiredPromise = new Promise<void>((resolve, reject) => {
+    resolveAcquired = resolve;
+    rejectAcquired = reject;
   });
-  const tail = previous.then(async () => await current);
-  LOCAL_LARK_MUTEX_TAILS.set(key, tail);
-  await previous;
-  return () => {
-    releaseCurrent();
-    if (LOCAL_LARK_MUTEX_TAILS.get(key) === tail) {
-      LOCAL_LARK_MUTEX_TAILS.delete(key);
+  const closedPromise = new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveClosed, rejectClosed) => {
+    child.once("error", (error) => {
+      rejectAcquired(error);
+      rejectClosed(error);
+    });
+    child.once("close", (code, signal) => {
+      if (!acquired) {
+        rejectAcquired(
+          new LarkAdvisoryLockUnavailableError(
+            code === 75
+              ? "Lark single-workstation durable mutex wait timed out"
+              : `macOS lockf exited before acquisition with ${String(code ?? signal)}`,
+          ),
+        );
+      }
+      resolveClosed({ code, signal });
+    });
+  });
+  child.stdout.setEncoding("utf8").on("data", (value: string) => {
+    stdout += value;
+    if (
+      Buffer.byteLength(stdout, "utf8") >
+        Buffer.byteLength(LOCKF_ACQUIRED_HANDSHAKE, "utf8") ||
+      !LOCKF_ACQUIRED_HANDSHAKE.startsWith(stdout)
+    ) {
+      child.kill("SIGKILL");
+      rejectAcquired(
+        new Error("macOS lockf holder emitted an invalid handshake"),
+      );
+      return;
+    }
+    if (stdout === LOCKF_ACQUIRED_HANDSHAKE) {
+      acquired = true;
+      resolveAcquired();
+    }
+  });
+  child.stderr.setEncoding("utf8").on("data", (value: string) => {
+    stderr += value;
+    if (Buffer.byteLength(stderr, "utf8") > 4_096) {
+      child.kill("SIGKILL");
+      rejectAcquired(
+        new Error("macOS lockf holder stderr exceeded its bound"),
+      );
+    }
+  });
+  try {
+    await acquiredPromise;
+  } catch (error) {
+    child.stdin.destroy();
+    await closedPromise.catch(() => undefined);
+    throw error;
+  }
+  if (options.unrefAfterAcquisition === true) {
+    child.unref();
+    (
+      child.stdin as typeof child.stdin & { unref(): void }
+    ).unref();
+    (
+      child.stdout as typeof child.stdout & { unref(): void }
+    ).unref();
+    (
+      child.stderr as typeof child.stderr & { unref(): void }
+    ).unref();
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    releaseRequested = true;
+    child.stdin.end(LOCKF_RELEASE_COMMAND);
+    const { code, signal } = await closedPromise;
+    if (
+      !releaseRequested ||
+      code !== 0 ||
+      signal !== null ||
+      stderr !== ""
+    ) {
+      throw new Error(
+        `macOS lockf release failed for ${MACOS_LOCKF_IDENTITY}`,
+      );
     }
   };
-}
-
-async function readLarkMutexOwner(
-  lockPath: string,
-): Promise<LarkMutexOwner | null> {
-  let content: string;
-  try {
-    content = await readFile(lockPath, "utf8");
-  } catch (error) {
-    if (isMissing(error)) return null;
-    throw error;
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content) as unknown;
-  } catch {
-    return null;
-  }
-  const owner =
-    parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  if (
-    owner.schemaVersion !== "lark-single-workstation-mutex-v2" ||
-    !Number.isSafeInteger(owner.processId) ||
-    (owner.processId as number) < 1 ||
-    typeof owner.processInstanceId !== "string" ||
-    owner.processInstanceId.trim().length === 0 ||
-    typeof owner.processStartIdentity !== "string" ||
-    owner.processStartIdentity.trim().length === 0 ||
-    typeof owner.acquisitionId !== "string" ||
-    owner.acquisitionId.trim().length === 0 ||
-    typeof owner.acquiredAt !== "string" ||
-    !Number.isFinite(Date.parse(owner.acquiredAt))
-  ) {
-    return null;
-  }
-  return owner as unknown as LarkMutexOwner;
-}
-
-async function reclaimStaleLarkMutex(
-  lockPath: string,
-): Promise<boolean> {
-  const stalePath = `${lockPath}.stale-${randomUUID()}`;
-  try {
-    await rename(lockPath, stalePath);
-  } catch (error) {
-    if (isMissing(error)) return true;
-    throw error;
-  }
-  await rm(stalePath, { force: true });
-  return true;
 }
 
 async function acquireLarkSingleWorkstationMutex(
@@ -557,142 +708,10 @@ async function acquireLarkSingleWorkstationMutex(
   const root = larkMutexRoot(configuration);
   await mkdir(root, { recursive: true, mode: 0o700 });
   const lockPath = join(root, `${sha256(scope).slice("sha256:".length)}.lock`);
-  const releaseLocal = await acquireLocalLarkMutex(lockPath);
-  const owner: LarkMutexOwner = Object.freeze({
-    schemaVersion: "lark-single-workstation-mutex-v2",
-    processId: process.pid,
-    processInstanceId: LARK_PROCESS_INSTANCE_ID,
-    processStartIdentity: LARK_PROCESS_START_IDENTITY,
-    acquisitionId: randomUUID(),
-    acquiredAt: new Date().toISOString(),
-  });
-  const ownerContent = JSON.stringify(owner);
-  const ownerTemporaryPath =
-    `${lockPath}.owner-${process.pid}-${owner.acquisitionId}.tmp`;
-  const ownerHandle = await open(ownerTemporaryPath, "wx", 0o600);
-  try {
-    await ownerHandle.writeFile(ownerContent, "utf8");
-    await ownerHandle.sync();
-  } finally {
-    await ownerHandle.close();
-  }
-  const deadline =
-    Date.now() +
-    (options.waitTimeoutMs ?? LARK_MUTEX_WAIT_TIMEOUT_MS);
-  let acquiredDevice: bigint | number | null = null;
-  let acquiredInode: bigint | number | null = null;
-  let publishedOurOwner = false;
-  try {
-    for (;;) {
-      try {
-        await link(ownerTemporaryPath, lockPath);
-        publishedOurOwner = true;
-        const [publishedMetadata, ownerMetadata, publishedOwner] =
-          await Promise.all([
-            stat(lockPath, { bigint: true }),
-            stat(ownerTemporaryPath, { bigint: true }),
-            readLarkMutexOwner(lockPath),
-          ]);
-        if (
-          publishedOwner?.processId !== owner.processId ||
-          publishedOwner.processInstanceId !== owner.processInstanceId ||
-          publishedOwner.acquisitionId !== owner.acquisitionId ||
-          publishedMetadata.dev !== ownerMetadata.dev ||
-          publishedMetadata.ino !== ownerMetadata.ino
-        ) {
-          throw new Error(
-            "Lark single-workstation durable mutex owner publication was replaced",
-          );
-        }
-        acquiredDevice = publishedMetadata.dev;
-        acquiredInode = publishedMetadata.ino;
-        publishedOurOwner = false;
-        break;
-      } catch (error) {
-        if (!isAlreadyExists(error)) throw error;
-        const existingOwner = await readLarkMutexOwner(lockPath);
-        if (
-          existingOwner !== null &&
-          !processIsSameInstance(
-            existingOwner.processId,
-            existingOwner.processStartIdentity,
-          )
-        ) {
-          if (await reclaimStaleLarkMutex(lockPath)) continue;
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(
-            "Lark single-workstation durable mutex wait timed out",
-          );
-        }
-        await waitForLarkMutexRetry();
-      }
-    }
-  } catch (error) {
-    try {
-      if (publishedOurOwner) {
-        const [publishedMetadata, ownerMetadata] = await Promise.all([
-          stat(lockPath, { bigint: true }).catch(
-            (metadataError: unknown) => {
-              if (isMissing(metadataError)) return null;
-              throw metadataError;
-            },
-          ),
-          stat(ownerTemporaryPath, { bigint: true }),
-        ]);
-        if (
-          publishedMetadata?.dev === ownerMetadata.dev &&
-          publishedMetadata.ino === ownerMetadata.ino
-        ) {
-          await unlink(lockPath).catch((unlinkError: unknown) => {
-            if (!isMissing(unlinkError)) throw unlinkError;
-          });
-        }
-      }
-    } finally {
-      releaseLocal();
-    }
-    throw error;
-  } finally {
-    await rm(ownerTemporaryPath, { force: true });
-  }
-  if (acquiredDevice === null || acquiredInode === null) {
-    releaseLocal();
-    throw new Error(
-      "Lark single-workstation durable mutex has no acquired inode",
-    );
-  }
-  let released = false;
-  return async () => {
-    if (released) return;
-    released = true;
-    try {
-      const [currentOwner, currentMetadata] = await Promise.all([
-        readLarkMutexOwner(lockPath),
-        stat(lockPath, { bigint: true }).catch((error: unknown) => {
-          if (isMissing(error)) return null;
-          throw error;
-        }),
-      ]);
-      if (
-        currentOwner?.processId === owner.processId &&
-        currentOwner.processInstanceId === owner.processInstanceId &&
-        currentOwner.processStartIdentity ===
-          owner.processStartIdentity &&
-        currentOwner.acquisitionId === owner.acquisitionId &&
-        currentMetadata?.dev === acquiredDevice &&
-        currentMetadata.ino === acquiredInode
-      ) {
-        try {
-          await unlink(lockPath);
-        } catch (error) {
-          if (!isMissing(error)) throw error;
-        }
-      }
-    } finally {
-      releaseLocal();
-    }
-  };
+  return await acquireMacOsAdvisoryLock(
+    lockPath,
+    options.waitTimeoutMs ?? LARK_MUTEX_WAIT_TIMEOUT_MS,
+  );
 }
 
 /**
@@ -737,6 +756,28 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
       ? {}
       : { waitTimeoutMs: options.waitTimeoutMs },
   );
+}
+
+/**
+ * Narrow process-level seam for proving that claim liveness is established by
+ * an OS advisory sentinel rather than a PID timestamp.
+ */
+export function createLarkExecutionLeaseForTest(options: {
+  readonly lockRoot: string;
+  readonly leaseId: string;
+  readonly processId: number;
+  readonly processStartIdentity: string;
+}): LarkExecutionLeasePort {
+  const lockRoot = resolve(options.lockRoot);
+  if (lockRoot === sep) {
+    throw new Error("Lark execution lease test root is too broad");
+  }
+  return createProcessLarkExecutionLease({
+    lockRoot,
+    leaseId: options.leaseId,
+    processId: options.processId,
+    processStartIdentity: options.processStartIdentity,
+  });
 }
 
 function assertHttps(value: string, label: string): void {
@@ -2656,7 +2697,10 @@ class VerifiedLarkCliTransport
       ((args, options) =>
         spawnFrozenLarkCliJson(this.#binaryPath, args, options));
     this.#executionLease =
-      executionLease ?? createProcessLarkExecutionLease();
+      executionLease ??
+      createProcessLarkExecutionLease({
+        lockRoot: configuration.lockRootPath,
+      });
     this.#configuration = Object.freeze({
       ...configuration,
       tables: Object.freeze({ ...configuration.tables }),
@@ -4084,6 +4128,17 @@ class VerifiedLarkCliTransport
   }): Promise<"claimed" | "already_claimed"> {
     nonEmpty(command.claimantId, "Production Job claimant ID");
     nonEmpty(command.claimAttemptId, "Production Job claim attempt ID");
+    if (
+      !(await this.#executionLease.isActive(
+        this.#executionLease.leaseId,
+        this.#executionLease.processId,
+        this.#executionLease.processStartIdentity,
+      ))
+    ) {
+      throw new Error(
+        "Production Job execution lease sentinel is unavailable",
+      );
+    }
     const stableId = `claim:${command.jobId}`;
     const existing = await this.#findRecord("commit_markers", stableId);
     const currentReport = await this.#fetchReportDocument();

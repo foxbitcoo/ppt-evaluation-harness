@@ -258,6 +258,49 @@ export interface AttemptCheckpointPort {
   ): Promise<readonly ObservableAttemptEvent[]>;
 }
 
+export const PROVIDER_SUBMISSION_INTENT_EVENT_TYPE =
+  "submission_intent" as const;
+
+export function createProviderSubmissionIntentCheckpoint(
+  command: ProductRunCommand,
+  adapterVersion: string,
+  observedAt = new Date().toISOString(),
+): ObservableAttemptEvent {
+  return Object.freeze({
+    eventId: `${command.attemptId}-submission-intent`,
+    jobId: command.jobId,
+    caseId: command.evaluationCase.caseId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    attemptSeq: command.attemptSeq,
+    eventType: PROVIDER_SUBMISSION_INTENT_EVENT_TYPE,
+    sourceAt: observedAt,
+    observedAt,
+    writerId: adapterVersion,
+    evidenceRef:
+      `harness://${command.jobId}/${command.attemptId}/submission-intent`,
+    sourceUrl: null,
+    submissionEvidenceAtCheckpoint: "unknown",
+    vendorTaskId: null,
+    taskStateVersion: null,
+    adapterVersion,
+    artifactId: null,
+  });
+}
+
+export function isUnresolvedProviderSubmissionIntent(
+  event: ObservableAttemptEvent,
+): boolean {
+  return (
+    event.eventType === PROVIDER_SUBMISSION_INTENT_EVENT_TYPE &&
+    event.submissionEvidenceAtCheckpoint === "unknown" &&
+    (event.vendorTaskId === null ||
+      event.vendorTaskId === undefined) &&
+    (event.taskStateVersion === null ||
+      event.taskStateVersion === undefined)
+  );
+}
+
 export class InMemoryAttemptCheckpointStore
   implements AttemptCheckpointPort
 {

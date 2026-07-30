@@ -138,6 +138,7 @@ export {
 } from "./retention.ts";
 export {
   createComparisonReportService,
+  planCompatibleComparisonPairs,
   type ComparisonReportService,
   type ComparisonReportServiceDependencies,
   type CreateComparisonReportCommand,

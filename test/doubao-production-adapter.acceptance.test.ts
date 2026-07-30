@@ -467,6 +467,97 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
   );
 });
 
+test("a Doubao crash after submit begins leaves durable unknown intent and never submits again", async () => {
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "doubao-submission-intent-crash",
+  );
+  let submitCalls = 0;
+  let reconcileCalls = 0;
+  const driver: DoubaoBrowserDriverPort = {
+    ...completeDoubaoDriver(),
+    async submitFrozenQuery() {
+      submitCalls += 1;
+      throw new Error(
+        "simulated process crash after the provider accepted submission",
+      );
+    },
+    async reconcileTask(query) {
+      reconcileCalls += 1;
+      return {
+        query,
+        observedState: "failed",
+        observedAt: "2026-07-27T06:01:00.000Z",
+        evidenceRef:
+          "screenshot://doubao/crash-reconciliation-failed",
+      };
+    },
+  };
+  const adapter = new DoubaoProductionProductAdapter();
+  const executor = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      attemptCheckpointStore: checkpoints,
+      doubaoBrowserDriver: driver,
+    },
+  );
+  const command = {
+    jobId: "job-doubao-submission-intent-crash",
+    runId: "run-doubao-submission-intent-crash",
+    attemptId: "attempt-doubao-submission-intent-crash-1",
+    attemptSeq: 1,
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  } as const;
+
+  await assert.rejects(
+    executor(command),
+    /simulated process crash/i,
+  );
+  const durableIntent = checkpoints
+    .snapshot()
+    .find(({ eventType }) => eventType === "submission_intent");
+  assert.equal(
+    durableIntent?.submissionEvidenceAtCheckpoint,
+    "unknown",
+  );
+
+  const restarted = await executor(command);
+  assert.ok(!("content" in restarted));
+  assert.equal(restarted.terminalReason, "task_state_unknown");
+  assert.equal(restarted.submissionEvidence, "unknown");
+  assert.equal(submitCalls, 1);
+
+  await checkpoints.append({
+    eventId:
+      "attempt-doubao-submission-intent-crash-1-submitted",
+    jobId: command.jobId,
+    caseId: command.evaluationCase.caseId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    attemptSeq: command.attemptSeq,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-27T06:00:10.000Z",
+    observedAt: "2026-07-27T06:00:10.000Z",
+    writerId: "doubao-web-ppt@1",
+    evidenceRef: "screenshot://doubao/submitted-after-intent",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_doubao_crash_1234",
+    taskStateVersion: "query_submitted@2",
+    adapterVersion: "doubao-web-ppt@1",
+    artifactId: null,
+  });
+  const reconciled = await executor(command);
+  assert.ok(!("content" in reconciled));
+  assert.equal(reconciled.terminalReason, "technical_failure");
+  assert.equal(reconciled.submissionEvidence, "submitted");
+  assert.equal(reconcileCalls, 1);
+  assert.equal(submitCalls, 1);
+});
+
 test("a package that needs new payment is blocked before submission with observable not-submitted evidence", async () => {
   const unexpected = async (): Promise<never> => {
     throw new Error("paid preflight must stop before submission");

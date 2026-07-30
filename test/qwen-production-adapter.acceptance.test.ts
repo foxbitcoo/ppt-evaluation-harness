@@ -460,6 +460,53 @@ test("the Qwen adapter returns retry-safe submission evidence and never resubmit
   }
 });
 
+test("a Qwen crash after browser submission begins leaves durable unknown intent and never executes again", async () => {
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "qwen-submission-intent-crash",
+  );
+  let executeCalls = 0;
+  const driver: QwenBrowserDriverPort = {
+    runtimeProvenance: "TEST",
+    async execute() {
+      executeCalls += 1;
+      throw new Error(
+        "simulated process crash after the provider accepted submission",
+      );
+    },
+  };
+  const executor = createQwenProductAdapterExecutorForTest(
+    driver,
+    checkpoints,
+  );
+  const command = {
+    jobId: "job-qwen-submission-intent-crash",
+    runId: "run-qwen-submission-intent-crash",
+    attemptId: "attempt-qwen-submission-intent-crash-1",
+    attemptSeq: 1,
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  } as const;
+
+  await assert.rejects(
+    executor(command),
+    /simulated process crash/i,
+  );
+  const durableIntent = checkpoints
+    .snapshot()
+    .find(({ eventType }) => eventType === "submission_intent");
+  assert.equal(
+    durableIntent?.submissionEvidenceAtCheckpoint,
+    "unknown",
+  );
+
+  const restarted = await executor(command);
+  assert.ok(!("content" in restarted));
+  assert.equal(restarted.terminalReason, "task_state_unknown");
+  assert.equal(restarted.submissionEvidence, "unknown");
+  assert.equal(executeCalls, 1);
+});
+
 test("a successful Qwen attempt captures the first compliant output without quality-based retry", async () => {
   const fixture = await qwenPptxFixture();
   const driver = new SuccessfulQwenBrowserFake(fixture);

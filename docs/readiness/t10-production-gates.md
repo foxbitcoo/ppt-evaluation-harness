@@ -35,14 +35,17 @@ simultaneously and proves replay does not add duplicates.
 Production Base mutation is deliberately limited to one workstation. Operators
 must configure one explicit, canonical, machine-level lock root shared by every
 local process; production never derives it from `TMPDIR` or another
-process-scoped directory. Lock ownership is published atomically with a
-no-replace link and is bound to an unpredictable owner token, device/inode,
-PID, and OS-observed process-start identity. A durable cross-process mutex
-covers each stable-ID search, create, and readback; an already-corrupt
-duplicate set fails closed and is never “repaired” by deleting a record another
-process may already use. The same boundary covers a complete Job projection
-from marker read through Docx CAS, Base rows and attachments, and the final
-marker. This does not claim distributed multi-host transaction safety.
+process-scoped directory. The mutex is the reviewed `/usr/bin/lockf` OS
+advisory lock, attested by canonical path, exact executable hash, and exact
+usage/version contract before acquisition. The lock holder emits a no-shell
+handshake only after `lockf` owns the lock; release waits for the holder to
+exit, and an owner crash closes its pipe so the OS releases the lock without
+stale-file deletion. It covers each stable-ID search, create, and readback; an
+already-corrupt duplicate set fails closed and is never “repaired” by deleting
+a record another process may already use. The same boundary covers a complete
+Job projection from marker read through Docx CAS, Base rows and attachments,
+and the final marker. This does not claim distributed multi-host transaction
+safety.
 
 This proves schema availability only. No real evaluation record, page
 evidence record, or commit marker has yet been accepted as a production run.
@@ -59,9 +62,12 @@ The current configuration exposes one Docx token, so the transport treats that
 token as a single-Job slot. The first production claim atomically binds an
 empty document to one Job with an exact remote revision compare-and-swap.
 The claim payload and document owner use a versioned claim-v3 state machine
-with an execution lease, process identity, and monotonic epoch. A live lease
-cannot yield a second winner; after a dead local owner is observed, one new
-lease can take over under the durable Job mutex and increments the epoch.
+with an execution lease, process identity, per-lease OS advisory sentinel, and
+monotonic epoch. PID and process-start fields remain audit metadata;
+cross-process liveness comes from the sentinel, so same-second PID reuse cannot
+keep or steal a lease. A live lease cannot yield a second winner; after a dead
+local owner is observed, one new lease can take over under the durable Job
+mutex and increments the epoch.
 Before provider submission, the active owner can transition its current lease
 to `aborted_before_submission` only when every selected attempt has at least
 one durable checkpoint and every checkpoint is still `not_submitted`. The

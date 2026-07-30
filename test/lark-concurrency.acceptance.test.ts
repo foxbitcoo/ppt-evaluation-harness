@@ -3,8 +3,6 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   readFileSync,
-  readdirSync,
-  writeFileSync,
 } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +11,7 @@ import test from "node:test";
 
 import {
   acquireLarkSingleWorkstationMutexForTest,
+  createLarkExecutionLeaseForTest,
   createLarkCliTransportForMutationBoundaryTest,
   createVerifiedLarkCliTransport,
   type LarkCliProjectionConfiguration,
@@ -69,7 +68,7 @@ const allowLarkMutation = {
   },
 } satisfies EgressAuthorizationPort;
 
-test("the single-workstation mutex is recovered after its owner crashes and its PID is reused", async () => {
+test("the single-workstation advisory mutex is released after its owner crashes", async () => {
   const lockRoot = await mkdtemp(
     join(tmpdir(), "ppt-lark-crash-mutex-test-"),
   );
@@ -112,28 +111,12 @@ test("the single-workstation mutex is recovered after its owner crashes and its 
     await new Promise<void>((resolveClose) => {
       child.once("close", () => resolveClose());
     });
-    const lockName = readdirSync(lockRoot).find((name) =>
-      name.endsWith(".lock"),
-    );
-    assert.ok(lockName);
-    const lockPath = join(lockRoot, lockName);
-    const crashedOwner = JSON.parse(
-      readFileSync(lockPath, "utf8"),
-    ) as Record<string, unknown>;
-    writeFileSync(
-      lockPath,
-      JSON.stringify({
-        ...crashedOwner,
-        processId: process.pid,
-      }),
-      "utf8",
-    );
 
     const release =
       await acquireLarkSingleWorkstationMutexForTest({
         lockRoot,
         scope: "crash-recovery",
-        waitTimeoutMs: 1_000,
+        waitTimeoutMs: 3_000,
       });
     await release();
   } finally {
@@ -146,29 +129,213 @@ test("the single-workstation mutex is recovered after its owner crashes and its 
   }
 });
 
-test("the single-workstation mutex never steals an incomplete owner from a live creator", async () => {
+test("two synchronized contenders serialize on one stale advisory lock file", async () => {
   const lockRoot = await mkdtemp(
-    join(tmpdir(), "ppt-lark-incomplete-owner-test-"),
+    join(tmpdir(), "ppt-lark-synchronized-contenders-test-"),
   );
-  const scope = "incomplete-live-owner";
-  const lockPath = join(
-    lockRoot,
-    `${createHash("sha256").update(scope).digest("hex")}.lock`,
+  const scope = "synchronized-contenders";
+  const staleLock = await open(
+    join(
+      lockRoot,
+      `${createHash("sha256").update(scope).digest("hex")}.lock`,
+    ),
+    "wx",
+    0o600,
   );
-  const incompleteOwner = await open(lockPath, "wx", 0o600);
+  await staleLock.close();
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const workerScript = [
+    'import { createInterface } from "node:readline";',
+    `import { acquireLarkSingleWorkstationMutexForTest } from ${JSON.stringify(moduleUrl)};`,
+    "const workerId = process.argv[1];",
+    "const lineReader = createInterface({ input: process.stdin, crlfDelay: Infinity });",
+    "const lines = lineReader[Symbol.asyncIterator]();",
+    "await lines.next();",
+    "try {",
+    `  const release = await acquireLarkSingleWorkstationMutexForTest({ lockRoot: ${JSON.stringify(lockRoot)}, scope: ${JSON.stringify(scope)}, waitTimeoutMs: 3_000 });`,
+    '  process.stdout.write(`acquired:${workerId}\\n`);',
+    "  await lines.next();",
+    "  await release();",
+    "  lineReader.close();",
+    '  process.stdout.write(`released:${workerId}\\n`);',
+    "} catch (error) {",
+    "  lineReader.close();",
+    '  process.stdout.write(`error:${workerId}:${error instanceof Error ? error.message : String(error)}\\n`);',
+    "  process.exitCode = 1;",
+    "}",
+  ].join("\n");
+  const workers = ["a", "b"].map((workerId) =>
+    spawn(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        workerScript,
+        workerId,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    ),
+  );
+  const outputs = workers.map((worker) => {
+    let output = "";
+    worker.stdout.setEncoding("utf8");
+    worker.stdout.on("data", (value: string) => {
+      output += value;
+    });
+    return () => output;
+  });
+  const workerClosures = workers.map(
+    (worker) =>
+      new Promise<void>((resolveClose, rejectClose) => {
+        worker.once("error", rejectClose);
+        worker.once("close", (code) => {
+          if (code !== 0) {
+            rejectClose(
+              new Error(`mutex contender exited with ${String(code)}`),
+            );
+            return;
+          }
+          resolveClose();
+        });
+      }),
+  );
   try {
-    await assert.rejects(
-      acquireLarkSingleWorkstationMutexForTest({
-        lockRoot,
-        scope,
-        waitTimeoutMs: 2_250,
-      } as Parameters<
-        typeof acquireLarkSingleWorkstationMutexForTest
-      >[0] & { readonly waitTimeoutMs: number }),
-      /mutex wait timed out/i,
+    workers.forEach((worker) => worker.stdin.write("start\n"));
+    const waitForAcquired = async (
+      indexes: readonly number[],
+      timeoutMs: number,
+    ): Promise<number> => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        for (const index of indexes) {
+          const output = outputs[index]!();
+          if (output.includes("error:")) {
+            throw new Error(output.trim());
+          }
+          if (output.includes("acquired:")) return index;
+        }
+        await new Promise<void>((resolveWait) => {
+          setTimeout(resolveWait, 10);
+        });
+      }
+      throw new Error("mutex contender acquisition timed out");
+    };
+    const firstIndex = await waitForAcquired([0, 1], 5_000);
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, 150);
+    });
+    assert.equal(
+      outputs.filter((readOutput) =>
+        readOutput().startsWith("acquired:"),
+      ).length,
+      1,
+      "only one cross-process contender may enter before release",
     );
+    workers[firstIndex]!.stdin.write("release\n");
+    const secondIndex = firstIndex === 0 ? 1 : 0;
+    assert.equal(
+      await waitForAcquired([secondIndex], 5_000),
+      secondIndex,
+    );
+    workers[secondIndex]!.stdin.write("release\n");
+    await Promise.all(workerClosures);
   } finally {
-    await incompleteOwner.close();
+    workers.forEach((worker) => {
+      try {
+        worker.kill("SIGKILL");
+      } catch {
+        // The expected path already exited.
+      }
+    });
+    await rm(lockRoot, { recursive: true, force: true });
+  }
+});
+
+test("an advisory lease sentinel distinguishes PID reuse within one start-time second", async () => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-lease-sentinel-test-"),
+  );
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const ownerScript = [
+    `import { createLarkExecutionLeaseForTest } from ${JSON.stringify(moduleUrl)};`,
+    `const lease = createLarkExecutionLeaseForTest({ lockRoot: ${JSON.stringify(lockRoot)}, leaseId: "lease-owner", processId: 4242, processStartIdentity: "same-second-start" });`,
+    'if (!await lease.isActive("lease-owner", 4242, "same-second-start")) throw new Error("owner sentinel was not acquired");',
+    'process.stdout.write("ready\\n");',
+    "setInterval(() => {}, 1000);",
+  ].join("\n");
+  const owner = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      ownerScript,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  try {
+    await new Promise<void>((resolveReady, rejectReady) => {
+      owner.once("error", rejectReady);
+      owner.stdout.setEncoding("utf8");
+      owner.stdout.once("data", (value) => {
+        if (value !== "ready\n") {
+          rejectReady(
+            new Error(`lease owner returned ${JSON.stringify(value)}`),
+          );
+          return;
+        }
+        resolveReady();
+      });
+    });
+    const verifier = createLarkExecutionLeaseForTest({
+      lockRoot,
+      leaseId: "lease-verifier",
+      processId: 4242,
+      processStartIdentity: "same-second-start",
+    });
+    assert.equal(
+      await verifier.isActive(
+        "lease-owner",
+        4242,
+        "same-second-start",
+      ),
+      true,
+      "the held sentinel, not the reused PID timestamp, proves liveness",
+    );
+    owner.kill("SIGKILL");
+    await new Promise<void>((resolveClose) => {
+      owner.once("close", () => resolveClose());
+    });
+    const deadline = Date.now() + 3_000;
+    let active = true;
+    while (active && Date.now() < deadline) {
+      active = await verifier.isActive(
+        "lease-owner",
+        4242,
+        "same-second-start",
+      );
+      if (active) {
+        await new Promise<void>((resolveWait) => {
+          setTimeout(resolveWait, 10);
+        });
+      }
+    }
+    assert.equal(active, false);
+  } finally {
+    try {
+      owner.kill("SIGKILL");
+    } catch {
+      // The expected crash path already terminated it.
+    }
     await rm(lockRoot, { recursive: true, force: true });
   }
 });
@@ -786,10 +953,14 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
           candidateProcessId: number,
           candidateProcessStartIdentity?: string,
         ) =>
-          activeLeases.has(candidateLeaseId) &&
-          (candidateProcessStartIdentity === undefined ||
-            observedProcessStarts.get(candidateProcessId) ===
-              candidateProcessStartIdentity),
+          (candidateLeaseId === leaseId &&
+            candidateProcessId === processId &&
+            candidateProcessStartIdentity ===
+              processStartIdentity) ||
+          (activeLeases.has(candidateLeaseId) &&
+            (candidateProcessStartIdentity === undefined ||
+              observedProcessStarts.get(candidateProcessId) ===
+                candidateProcessStartIdentity)),
       },
     } as Parameters<
       typeof createLarkCliTransportForMutationBoundaryTest

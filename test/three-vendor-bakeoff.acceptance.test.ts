@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
+  FileSystemEgressAuthorizationAudit,
   InMemoryFeishuProjection,
   InMemoryAttemptCheckpointStore,
   InMemoryReferencePackStore,
@@ -117,6 +121,139 @@ test("one test Bakeoff Job creates stable WPS, Qwen, and Doubao child Runs", asy
       },
     ],
   );
+});
+
+test("vendor execution starts only after durable authorization audit readback and a fresh validity check", async () => {
+  let now = "2026-07-27T06:00:00.000Z";
+  let vendorAppendCalls = 0;
+  let vendorReadbackCalls = 0;
+  let deadlineCalls = 0;
+  const recordedDecisionIds = new Set<string>();
+  const harness = createBakeoffHarness({
+    feishu: new InMemoryFeishuProjection(),
+    productAdapter: new MockWpsProductAdapter(),
+    clock: {
+      clockId: "vendor-egress-expiry-test-clock",
+      now: () => now,
+    },
+    egressAuthorization: {
+      async authorize(request) {
+        return {
+          status: "approved" as const,
+          decisionId: `decision:${request.requestId}`,
+          policyVersion: "test-policy-v1",
+          request,
+          legalSecurityBasis: "test-approved",
+          approvedAt: request.requestedAt,
+          expiresAt: new Date(
+            Date.parse(request.requestedAt) + 5 * 60 * 1_000,
+          ).toISOString(),
+        };
+      },
+    },
+    egressAudit: {
+      auditId: "vendor-egress-readback-test-audit",
+      async append(decision) {
+        recordedDecisionIds.add(decision.decisionId);
+        if (
+          decision.request.processingPurpose ===
+          "vendor_generation"
+        ) {
+          vendorAppendCalls += 1;
+        }
+      },
+      async assertRecorded(decision) {
+        assert.ok(recordedDecisionIds.has(decision.decisionId));
+        if (
+          decision.request.processingPurpose ===
+          "vendor_generation"
+        ) {
+          vendorReadbackCalls += 1;
+          now = decision.expiresAt;
+        }
+      },
+    },
+    attemptDeadline: {
+      async run() {
+        deadlineCalls += 1;
+        throw new Error(
+          "provider adapter must not run after authorization expiry",
+        );
+      },
+    },
+  });
+
+  await assert.rejects(
+    harness.startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+      executionMode: "capture_only",
+    }),
+    /egress authorization is missing, expired, or not yet valid.*vendor_generation/i,
+  );
+  assert.equal(vendorAppendCalls, 1);
+  assert.equal(vendorReadbackCalls, 1);
+  assert.equal(deadlineCalls, 0);
+});
+
+test("a provider crash still leaves its vendor authorization in the durable operational audit", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "vendor-egress-crash-audit-"),
+  );
+  let vendorDecision:
+    | Parameters<
+        FileSystemEgressAuthorizationAudit["append"]
+      >[0]
+    | undefined;
+  try {
+    const audit = new FileSystemEgressAuthorizationAudit({
+      auditId: "vendor-egress-crash-audit",
+      rootPath: root,
+    });
+    const outcome = await createBakeoffHarness({
+      feishu: new InMemoryFeishuProjection(),
+      productAdapter: new MockWpsProductAdapter({
+        scenario: "throwing",
+      }),
+      clock: {
+        clockId: "vendor-egress-crash-audit-clock",
+        now: () => "2026-07-27T06:00:00.000Z",
+      },
+      egressAuthorization: {
+        async authorize(request) {
+          const decision = {
+            status: "approved" as const,
+            decisionId: `decision:${request.requestId}`,
+            policyVersion: "test-policy-v1",
+            request,
+            legalSecurityBasis: "test-approved",
+            approvedAt: request.requestedAt,
+            expiresAt: "2126-07-27T06:05:00.000Z",
+          };
+          if (
+            request.processingPurpose === "vendor_generation"
+          ) {
+            vendorDecision = decision;
+          }
+          return decision;
+        },
+      },
+      egressAudit: audit,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_CASE_ID,
+      executionMode: "capture_only",
+    });
+
+    assert.equal(outcome.job.status, "failed");
+    assert.ok(vendorDecision !== undefined);
+    await new FileSystemEgressAuthorizationAudit({
+      auditId: "vendor-egress-crash-audit",
+      rootPath: root,
+    }).assertRecorded(vendorDecision);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the Feishu projections preserve stable Case, Run, Artifact, score, and product-gap lineage", async () => {

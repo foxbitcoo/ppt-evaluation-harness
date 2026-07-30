@@ -6,6 +6,10 @@ import { VOLCANO_EVALUATION_CASE } from "./fixtures/volcano-case.ts";
 import type {
   ObservableAttemptEvent,
 } from "./domain.ts";
+import {
+  createProviderSubmissionIntentCheckpoint,
+  isUnresolvedProviderSubmissionIntent,
+} from "./product-adapter.ts";
 import type {
   ObservedProductConfiguration,
   ProductAdapterImplementationPackage,
@@ -1149,6 +1153,23 @@ export function resolveDoubaoProductionExecutor(
           ]),
         });
       }
+      if (recovered.some(isUnresolvedProviderSubmissionIntent)) {
+        return Object.freeze({
+          terminalReason: "task_state_unknown",
+          blockReason: null,
+          submissionEvidence: "unknown",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: Object.freeze(
+            recovered.map((event) =>
+              Object.freeze(structuredClone(event)),
+            ),
+          ),
+          manualActions: Object.freeze([
+            "provider submission intent is unresolved; automatic resubmission suppressed",
+          ]),
+        });
+      }
     }
     const activeDriver = driver!;
     const preflight = await activeDriver.inspectCurrentPackage(operation);
@@ -1186,6 +1207,12 @@ export function resolveDoubaoProductionExecutor(
         manualActions,
       });
     }
+    await checkpointStore?.append(
+      createProviderSubmissionIntentCheckpoint(
+        command,
+        DOUBAO_PRODUCTION_ADAPTER_VERSION,
+      ),
+    );
     const submission = await activeDriver.submitFrozenQuery({
       ...operation,
       vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,

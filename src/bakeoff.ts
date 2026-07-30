@@ -34,13 +34,17 @@ import {
   InProcessBrowserProfileLock,
   type BrowserProfileLockPort,
 } from "./browser-profile-lock.ts";
-import { createComparisonReportService } from "./comparison-report.ts";
+import {
+  createComparisonReportService,
+  planCompatibleComparisonPairs,
+} from "./comparison-report.ts";
 import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
 } from "./environment-origin.ts";
 import {
+  assertApprovedEgressAuthorizationCurrent,
   requireEgressAuthorization,
   SYSTEM_CLOCK,
   InMemoryEgressAuthorizationAudit,
@@ -1447,6 +1451,7 @@ async function executeVendor(
   referencePack: ReferencePack | null,
   judge: OpenAiJudgePort | undefined,
   egressAuthorization: EgressAuthorizationPort | undefined,
+  egressAudit: EgressAuthorizationAuditPort,
   artifactVault: ArtifactVault,
   clock: ClockPort,
   rendererDestination: EgressDestinationMetadata,
@@ -1487,7 +1492,7 @@ async function executeVendor(
         artifactCandidates: [],
       };
     } else {
-      egressAuthorizations.push(
+      const vendorAuthorization =
         await requireEgressAuthorization(egressAuthorization, {
           requestId: `vendor-generation:${attemptId}`,
           jobId: context.jobId,
@@ -1519,8 +1524,14 @@ async function executeVendor(
             evaluationCase: context.evaluationCase,
           }),
           requiredRedactions: [],
-        }, clock),
+        }, clock);
+      await egressAudit.append(vendorAuthorization);
+      await egressAudit.assertRecorded(vendorAuthorization);
+      assertApprovedEgressAuthorizationCurrent(
+        vendorAuthorization,
+        clock,
       );
+      egressAuthorizations.push(vendorAuthorization);
       const startedAt = Date.now();
       try {
         const deadlineResult = await attemptDeadline.run(
@@ -2571,6 +2582,7 @@ export function createBakeoffHarness({
               referencePackSelection.pack,
               judge,
               egressAuthorization,
+              egressAudit,
               artifactVault,
               clock,
               rendererDestination,
@@ -2792,22 +2804,14 @@ export function createBakeoffHarness({
         }
       }
 
-      const defaultComparisonCandidates = successful.filter(
-          ({ renderManifest, scorecard }) =>
-            renderManifest.renderOutcome === "faithful" &&
-            scorecard !== null,
-        );
+      const comparisonSource =
+        await projection.loadComparisonReportSource(context.jobId);
       const hasDefaultComparison =
-        defaultComparisonCandidates.some(
-          (left, leftIndex) =>
-            defaultComparisonCandidates
-              .slice(leftIndex + 1)
-              .some(
-                (right) =>
-                  right.productPackage.provenance ===
-                  left.productPackage.provenance,
-              ),
-        );
+        planCompatibleComparisonPairs({
+          jobId: context.jobId,
+          vendorRuns: comparisonSource.vendorRuns,
+          artifactScores: comparisonSource.artifactScores,
+        }).length > 0;
       let report;
       if (command.executionMode === "capture_only") {
         report = null;

@@ -28,6 +28,10 @@ import {
   type ClockPort,
   type EgressDestinationMetadata,
 } from "./egress-authorization.ts";
+import {
+  captureExecutionProvenance,
+  projectionProvenanceCoversCapture,
+} from "./provenance.ts";
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -452,12 +456,26 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       "Render manifest",
     );
     this.#assertAllowed(record.scorecard.environmentOrigin, "Evaluation");
+    const captureProvenance = captureExecutionProvenance(
+      record.artifact,
+      record.renderManifest,
+      record.scorecard,
+    );
     if (
       record.runId !== record.artifact.runId ||
       record.runId !== record.scorecard.runId ||
+      record.jobId !== record.scorecard.jobId ||
       record.artifactId !== record.artifact.artifactId ||
       record.artifactId !== record.scorecard.artifactId ||
-      record.renderManifest.artifactId !== record.artifactId
+      record.renderManifest.artifactId !== record.artifactId ||
+      record.environmentOrigin !== record.artifact.environmentOrigin ||
+      record.environmentOrigin !== record.renderManifest.environmentOrigin ||
+      record.environmentOrigin !== record.scorecard.environmentOrigin ||
+      captureProvenance === null ||
+      !projectionProvenanceCoversCapture(
+        record.provenance,
+        captureProvenance,
+      )
     ) {
       throw new Error(
         "Artifact score projection contains inconsistent lineage",
@@ -647,10 +665,21 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       record.renderManifest.environmentOrigin,
       "Render manifest",
     );
+    const captureProvenance = captureExecutionProvenance(
+      record.artifact,
+      record.renderManifest,
+    );
     if (
       record.runId !== record.artifact.runId ||
       record.artifactId !== record.artifact.artifactId ||
-      record.renderManifest.artifactId !== record.artifactId
+      record.renderManifest.artifactId !== record.artifactId ||
+      record.environmentOrigin !== record.artifact.environmentOrigin ||
+      record.environmentOrigin !== record.renderManifest.environmentOrigin ||
+      captureProvenance === null ||
+      !projectionProvenanceCoversCapture(
+        record.provenance,
+        captureProvenance,
+      )
     ) {
       throw new Error(
         "Artifact capture projection contains inconsistent lineage",

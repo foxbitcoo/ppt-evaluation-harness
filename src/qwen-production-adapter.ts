@@ -18,6 +18,10 @@ import type {
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
+import {
+  createProviderSubmissionIntentCheckpoint,
+  isUnresolvedProviderSubmissionIntent,
+} from "./product-adapter.ts";
 import type {
   ProductAdapterImplementationPackage,
   AttemptCheckpointPort,
@@ -1133,6 +1137,8 @@ function qwenExecutor(
   reconciliationDriver?: QwenBrowserDriverPort,
   testOnlyReconciliation = false,
   testOnlyProductionValidation = false,
+  recordSubmissionIntent =
+    provenance === "LIVE_PRODUCTION",
 ): QwenProductAdapterExecutor {
   const productionValidation =
     provenance !== "MOCK" || testOnlyProductionValidation;
@@ -1214,6 +1220,30 @@ function qwenExecutor(
           event.taskStateVersion !== undefined,
       );
       if (latestTaskCheckpoint === undefined) {
+        if (
+          recoveredEvents.some(
+            isUnresolvedProviderSubmissionIntent,
+          )
+        ) {
+          return Object.freeze({
+            terminalReason: "task_state_unknown",
+            blockReason: null,
+            submissionEvidence: "unknown",
+            elapsedMs: 0,
+            artifactCandidates: Object.freeze([]),
+            observableEvents: Object.freeze(
+              recoveredEvents.map((event) =>
+                Object.freeze(structuredClone(event)),
+              ),
+            ),
+            observedConfiguration: null,
+            trace: Object.freeze([]),
+            manualActions: Object.freeze([
+              "provider submission intent is unresolved; automatic resubmission suppressed",
+            ]),
+            staticRenders: Object.freeze([]),
+          });
+        }
         throw new Error(
           "Recovered Qwen checkpoints require vendor task identity and state version",
         );
@@ -1297,6 +1327,14 @@ function qwenExecutor(
         manualActions: Object.freeze([]),
         staticRenders: Object.freeze([]),
       });
+    }
+    if (recordSubmissionIntent) {
+      await checkpointStore?.append(
+        createProviderSubmissionIntentCheckpoint(
+          command,
+          QWEN_ADAPTER_VERSION,
+        ),
+      );
     }
     const execution = await driver.execute({
       attemptSeq: command.attemptSeq,
@@ -1471,6 +1509,7 @@ function qwenExecutor(
 
 export function createQwenProductAdapterExecutorForTest(
   driver: QwenBrowserDriverPort,
+  checkpointStore?: AttemptCheckpointPort,
 ): QwenProductAdapterExecutor {
   if (driver.runtimeProvenance !== "TEST") {
     throw new Error("Qwen test executor requires a TEST browser driver");
@@ -1479,6 +1518,11 @@ export function createQwenProductAdapterExecutorForTest(
     driver,
     "MOCK",
     MOCK_TEST_ENVIRONMENT_ORIGIN,
+    checkpointStore,
+    undefined,
+    false,
+    false,
+    true,
   );
 }
 

@@ -1143,6 +1143,87 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
   );
 });
 
+test("Bakeoff preserves completed deliveries when every independently scored Judge lineage is incompatible for comparison", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const judge = createTestJudge({
+    rasterizer: {
+      version: "test-rasterizer@1",
+      async rasterize(slide) {
+        return {
+          mimeType: "image/png",
+          content: testPng(slide.pageNumber),
+        };
+      },
+    },
+    transport: {
+      async create(request) {
+        const input = request.input as Array<{
+          content: Array<{ type: string; text?: string }>;
+        }>;
+        const contextText = input[0]?.content.find(
+          ({ type }) => type === "input_text",
+        )?.text;
+        assert.notEqual(contextText, undefined);
+        const context = JSON.parse(contextText!) as {
+          evaluationIdentity: { runId: string };
+        };
+        const responseModel = context.evaluationIdentity.runId.includes("-wps-")
+          ? "gpt-5.6-sol-2026-07-01"
+          : context.evaluationIdentity.runId.includes("-qwen-")
+            ? "gpt-5.6-sol-2026-07-02"
+            : "gpt-5.6-sol-2026-07-03";
+        return {
+          id: `resp_incompatible_${responseModel}`,
+          model: responseModel,
+          status: "completed",
+          incomplete_details: null,
+          output: [
+            {
+              type: "message",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(validJudgePayload()),
+                },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  });
+
+  const outcome = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+    judge,
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+  });
+
+  assert.equal(outcome.job.status, "completed");
+  assert.equal(outcome.scorecards.length, 3);
+  assert.equal(feishu.snapshot().artifactScoreTable.length, 3);
+  assert.equal(
+    feishu
+      .snapshot()
+      .productGapCardTable.filter(
+        ({ recordType }) => recordType === "comparison",
+      ).length,
+    0,
+  );
+  assert.match(outcome.report.markdown, /NOT_ASSESSABLE/);
+  assert.match(outcome.report.markdown, /Mock WPS AI PPT/);
+  assert.match(outcome.report.markdown, /Mock Qwen/);
+  assert.match(outcome.report.markdown, /Mock Doubao/);
+});
+
 test("replaying a partial three-vendor Job keeps singular Artifact, Render, and Scorecard on one vendor lineage", async () => {
   const feishu = new InMemoryFeishuProjection();
   const judge = createTestJudge({

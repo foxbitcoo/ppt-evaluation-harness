@@ -975,6 +975,7 @@ export function resolveHarnessProductAdapterExecutorForTest(
       | AttemptCheckpointPort
       | undefined;
     readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort | undefined;
+    readonly recordWpsSubmissionIntentForTest?: boolean;
   } = {},
 ): ProductAdapterExecutor {
   if (executionConfiguration.adapterKind === "wps-aippt-browser") {
@@ -983,6 +984,7 @@ export function resolveHarnessProductAdapterExecutorForTest(
       executionConfiguration,
       dependencies.wpsAiPptBrowserDriver,
       dependencies.attemptCheckpointStore,
+      dependencies.recordWpsSubmissionIntentForTest,
     );
   }
   return resolveHarnessProductAdapterExecutor(

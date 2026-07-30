@@ -32,6 +32,10 @@ import {
   isHarnessOwnedLarkBaseProjection,
   persistHarnessOwnedLarkProjectionSnapshot,
 } from "./lark-base-projection.ts";
+import {
+  captureExecutionProvenance,
+  projectionProvenanceCoversCapture,
+} from "./provenance.ts";
 import { createScoreAdjudicationService } from "./score-adjudication.ts";
 
 export interface CreateComparisonReportCommand {
@@ -52,9 +56,12 @@ export interface ComparisonReportServiceDependencies {
   readonly clock?: ClockPort;
 }
 
-interface ScoredRun {
+interface ScoredRun<
+  ScoreRecord extends ArtifactScoreTableRecord =
+    EffectiveArtifactScoreTableRecord,
+> {
   readonly run: RunRecord & { readonly product: string };
-  readonly score: EffectiveArtifactScoreTableRecord;
+  readonly score: ScoreRecord;
 }
 
 type EffectiveArtifactScoreTableRecord = ArtifactScoreTableRecord & {
@@ -68,12 +75,12 @@ function shortHash(value: unknown): string {
     .slice(0, 16);
 }
 
-function scoredRunById(
+function scoredRunById<ScoreRecord extends ArtifactScoreTableRecord>(
   runId: string,
   vendorRuns: readonly RunRecord[],
-  scores: readonly EffectiveArtifactScoreTableRecord[],
+  scores: readonly ScoreRecord[],
   scorecardId?: string,
-): ScoredRun {
+): ScoredRun<ScoreRecord> {
   const run = vendorRuns.find(({ recordId }) => recordId === runId);
   const candidates = scores.filter((record) => record.runId === runId);
   if (scorecardId === undefined && candidates.length > 1) {
@@ -150,6 +157,52 @@ function compatibleJudgeConfiguration(
   );
 }
 
+function compatibleComparisonLineage(
+  jobId: string,
+  left: ScoredRun<ArtifactScoreTableRecord>,
+  right: ScoredRun<ArtifactScoreTableRecord>,
+): boolean {
+  const leftCaptureProvenance = captureExecutionProvenance(
+    left.score.artifact,
+    left.score.renderManifest,
+    left.score.scorecard,
+  );
+  const rightCaptureProvenance = captureExecutionProvenance(
+    right.score.artifact,
+    right.score.renderManifest,
+    right.score.scorecard,
+  );
+  return (
+    leftCaptureProvenance !== null &&
+    rightCaptureProvenance !== null &&
+    leftCaptureProvenance === rightCaptureProvenance &&
+    projectionProvenanceCoversCapture(
+      left.score.provenance,
+      leftCaptureProvenance,
+    ) &&
+    projectionProvenanceCoversCapture(
+      right.score.provenance,
+      rightCaptureProvenance,
+    ) &&
+    left.score.jobId === jobId &&
+    right.score.jobId === jobId &&
+    left.score.caseId === right.score.caseId &&
+    left.score.scorecard.rubricVersion ===
+      right.score.scorecard.rubricVersion &&
+    left.score.renderManifest.renderer ===
+      right.score.renderManifest.renderer &&
+    left.score.environmentOrigin === right.score.environmentOrigin &&
+    left.run.provenance === left.score.provenance &&
+    right.run.provenance === right.score.provenance &&
+    left.score.provenance === right.score.provenance &&
+    isDeepStrictEqual(
+      left.score.comparisonCompatibilityFingerprint,
+      right.score.comparisonCompatibilityFingerprint,
+    ) &&
+    compatibleJudgeConfiguration(left.score, right.score)
+  );
+}
+
 function comparePair(
   jobId: string,
   pair: ComparisonPairSelection,
@@ -171,24 +224,7 @@ function comparePair(
     scores,
     pair.rightScorecardId,
   );
-  if (
-    left.score.jobId !== jobId ||
-    right.score.jobId !== jobId ||
-    left.score.caseId !== right.score.caseId ||
-    left.score.scorecard.rubricVersion !==
-      right.score.scorecard.rubricVersion ||
-    left.score.renderManifest.renderer !==
-      right.score.renderManifest.renderer ||
-    left.score.environmentOrigin !== right.score.environmentOrigin ||
-    left.run.provenance !== left.score.provenance ||
-    right.run.provenance !== right.score.provenance ||
-    left.score.provenance !== right.score.provenance ||
-    !isDeepStrictEqual(
-      left.score.comparisonCompatibilityFingerprint,
-      right.score.comparisonCompatibilityFingerprint,
-    ) ||
-    !compatibleJudgeConfiguration(left.score, right.score)
-  ) {
+  if (!compatibleComparisonLineage(jobId, left, right)) {
     throw new Error("Selected Runs are not compatible for direct comparison");
   }
   const sharedProvenance = left.score.provenance;
@@ -838,7 +874,7 @@ function createVendorSummaries(
 
 function defaultViewPairs(
   vendorRuns: readonly RunRecord[],
-  scores: readonly EffectiveArtifactScoreTableRecord[],
+  scores: readonly ArtifactScoreTableRecord[],
 ): readonly ComparisonPairSelection[] {
   const scoredRunIds = new Set(scores.map(({ runId }) => runId));
   const vendorOrder = new Map([
@@ -862,6 +898,31 @@ function defaultViewPairs(
       rightRunId: right.recordId,
     })),
   );
+}
+
+export function planCompatibleComparisonPairs(command: {
+  readonly jobId: string;
+  readonly vendorRuns: readonly RunRecord[];
+  readonly artifactScores: readonly ArtifactScoreTableRecord[];
+}): readonly ComparisonPairSelection[] {
+  return defaultViewPairs(
+    command.vendorRuns,
+    command.artifactScores,
+  ).filter((pair) => {
+    const left = scoredRunById(
+      pair.leftRunId,
+      command.vendorRuns,
+      command.artifactScores,
+      pair.leftScorecardId,
+    );
+    const right = scoredRunById(
+      pair.rightRunId,
+      command.vendorRuns,
+      command.artifactScores,
+      pair.rightScorecardId,
+    );
+    return compatibleComparisonLineage(command.jobId, left, right);
+  });
 }
 
 export function createComparisonReportService({
@@ -909,31 +970,22 @@ export function createComparisonReportService({
             );
           const pairs =
             command.pairs ??
-            defaultViewPairs(source.vendorRuns, effectiveScores);
+            planCompatibleComparisonPairs({
+              jobId: command.jobId,
+              vendorRuns: source.vendorRuns,
+              artifactScores: effectiveScores,
+            });
           if (pairs.length === 0) {
             throw new Error("A comparison report requires at least one pair");
           }
-          const comparisons = pairs.flatMap((pair) => {
-            try {
-              return [
-                comparePair(
-                  command.jobId,
-                  pair,
-                  source.vendorRuns,
-                  effectiveScores,
-                ),
-              ];
-            } catch (error) {
-              if (
-                command.pairs === undefined &&
-                error instanceof Error &&
-                /not compatible for direct comparison/i.test(error.message)
-              ) {
-                return [];
-              }
-              throw error;
-            }
-          });
+          const comparisons = pairs.map((pair) =>
+            comparePair(
+              command.jobId,
+              pair,
+              source.vendorRuns,
+              effectiveScores,
+            ),
+          );
           if (comparisons.length === 0) {
             throw new Error(
               "A comparison report requires at least one compatible pair",
