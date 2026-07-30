@@ -1129,7 +1129,7 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       rawResultHashScope:
         "exact_stdout_bytes_including_terminal_lf",
       rawResultHash:
-        "sha256:8dcaca905c88a4f5d027f77684beb0a5607aec6fd5a6815e8dd2c1f1084f3abc",
+        "sha256:23b55f7266f20e7643600c103e0d6ffda346416ecaeea9700a1728525812f496",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
       attestedResultSchemaVersion:
         "doubao-recovery-result-attestation-v1",
@@ -1138,7 +1138,7 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
     },
     resultHash:
-      "sha256:349f539607a03bb3c689743b414ec538d1d006ecab11b9fb12a5ac380c9b8aa1",
+      "sha256:a8338ba7cd2d763d356bdd79e8653f0bddd90cbc014083827dec38ee0c544d37",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,

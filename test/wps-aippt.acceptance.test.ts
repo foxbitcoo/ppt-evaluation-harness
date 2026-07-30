@@ -524,13 +524,18 @@ test("retained real-provider capture is ingested only as PRODUCTION_REPLAY", asy
 });
 
 test("production rejects default in-memory recovery dependencies before driver execution", async () => {
+  const pptx = await knownGoodPptxBytes();
   await assert.rejects(
     async () =>
       createBakeoffHarness({
         feishu: new InMemoryFeishuProjection({
           targetEnvironment: "production",
         }),
-        productAdapter: new WpsAiPptProductAdapter(),
+        productAdapter: new WpsAiPptReplayAdapter(),
+        wpsAiPptBrowserDriver:
+          createWpsAiPptRealProviderReplayPackage({
+            sessions: [capturedBrowserResult(pptx)],
+          }),
         egressAuthorization: {
           async authorize() {
             throw new Error("durability preflight must run before egress");
@@ -547,6 +552,7 @@ test("production rejects default in-memory recovery dependencies before driver e
 });
 
 test("production rejects caller objects that merely self-report durable and isolated capabilities", async () => {
+  const pptx = await knownGoodPptxBytes();
   const artifactVault = {
     storageProfile: {
       durability: "durable",
@@ -605,7 +611,11 @@ test("production rejects caller objects that merely self-report durable and isol
         feishu: new InMemoryFeishuProjection({
           targetEnvironment: "production",
         }),
-        productAdapter: new WpsAiPptProductAdapter(),
+        productAdapter: new WpsAiPptReplayAdapter(),
+        wpsAiPptBrowserDriver:
+          createWpsAiPptRealProviderReplayPackage({
+            sessions: [capturedBrowserResult(pptx)],
+          }),
         artifactVault,
         runSpecificationVault,
         attemptCheckpointStore,
@@ -756,7 +766,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:e8cf1cdca1acb1c193ab6b984f723582573ef720a63d5b43065c49356f57ec2d",
+        "sha256:0717b0ff8a7cd5c6104daac75e3ea167508ead09d01b66fb1543f69b4f80f793",
       sourceArchiveEntryCount: 48,
     },
   );
