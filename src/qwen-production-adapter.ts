@@ -971,6 +971,39 @@ async function persistedObservableEvents(
     await checkpointStore?.append(event);
     events.push(event);
   }
+  if (
+    execution.status === "terminal" &&
+    execution.submissionEvidence === "not_submitted"
+  ) {
+    const eventIndex = events.length + 1;
+    const evidenceId = opaqueEvidenceId({
+      attemptId: command.attemptId,
+      eventType: "query_not_submitted",
+      observedAt: execution.observedAt,
+      terminalReason: execution.terminalReason,
+    });
+    const terminalNotSubmitted = Object.freeze({
+      eventId: `${command.attemptId}-qwen-event-${eventIndex}`,
+      jobId: command.jobId,
+      caseId: command.evaluationCase.caseId,
+      runId: command.runId,
+      attemptId: command.attemptId,
+      attemptSeq: command.attemptSeq,
+      eventType: "query_not_submitted",
+      sourceAt: execution.observedAt,
+      observedAt: execution.observedAt,
+      writerId: QWEN_ADAPTER_VERSION,
+      evidenceRef: evidenceId,
+      sourceUrl: `urn:qwen-evidence:${evidenceId}`,
+      submissionEvidenceAtCheckpoint: "not_submitted" as const,
+      vendorTaskId: null,
+      taskStateVersion: `not_submitted@${eventIndex}`,
+      adapterVersion: QWEN_ADAPTER_VERSION,
+      artifactId: null,
+    });
+    await checkpointStore?.append(terminalNotSubmitted);
+    events.push(terminalNotSubmitted);
+  }
   return Object.freeze(events);
 }
 
@@ -1368,6 +1401,11 @@ function qwenExecutor(
       signal: command.signal,
     });
     assertSafeQwenReplayInput(execution);
+    if (execution.status === "terminal") {
+      validateTerminalExecution(execution);
+    } else {
+      assertSubmissionEvidenceMatchesMilestones(execution);
+    }
     const observableEvents = await persistedObservableEvents(
       command,
       execution,
@@ -1382,9 +1420,8 @@ function qwenExecutor(
       submissionEvidenceBoundToCheckpoints(
         execution.submissionEvidence,
         durableResultEvents,
-      );
+    );
     if (execution.status === "terminal") {
-      validateTerminalExecution(execution);
       return Object.freeze({
         terminalReason: execution.terminalReason,
         blockReason: execution.blockReason,
@@ -1408,7 +1445,6 @@ function qwenExecutor(
         staticRenders: Object.freeze([]),
       });
     }
-    assertSubmissionEvidenceMatchesMilestones(execution);
     const observedConfiguration =
       validateObservedConfiguration(
         execution.observedConfiguration,
