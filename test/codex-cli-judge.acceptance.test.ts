@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  rm,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -16,6 +22,9 @@ import {
   assertCodexCliTranscriptIsDataOnly,
   type CodexCliJudgeTransportPort,
 } from "../src/index.ts";
+import {
+  runCodexCliJudgeProcessForTest,
+} from "../src/codex-cli-judge.ts";
 
 const DIMENSIONS = [
   "requirement_understanding_and_content_coverage",
@@ -337,4 +346,155 @@ test("Codex CLI Judge rejects a transport result that is not bound to the frozen
       /not bound to the frozen invocation/i.test(error.cause.message),
   );
   assert.equal(transportCalls, 1);
+});
+
+const TEST_PROCESS_LIMITS = Object.freeze({
+  deadlineMs: 100,
+  stdoutByteLimit: 1_024,
+  stderrByteLimit: 1_024,
+  terminationGraceMs: 50,
+});
+
+test("Codex CLI Judge enforces a hard subprocess deadline and waits for termination", async () => {
+  const startedAt = Date.now();
+  await assert.rejects(
+    runCodexCliJudgeProcessForTest({
+      executable: process.execPath,
+      args: [
+        "-e",
+        "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
+      ],
+      stdin: null,
+      cwd: process.cwd(),
+      env: process.env,
+      ...TEST_PROCESS_LIMITS,
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message ===
+        "Codex CLI Judge subprocess exceeded hard deadline",
+  );
+  assert.ok(
+    Date.now() - startedAt < 2_000,
+    "deadline termination must not leave the caller hanging",
+  );
+});
+
+test("Codex CLI Judge caps stdout by raw bytes instead of decoded characters", async () => {
+  await assert.rejects(
+    runCodexCliJudgeProcessForTest({
+      executable: process.execPath,
+      args: ["-e", 'process.stdout.write("😀".repeat(300));'],
+      stdin: null,
+      cwd: process.cwd(),
+      env: process.env,
+      ...TEST_PROCESS_LIMITS,
+      stdoutByteLimit: 1_023,
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message ===
+        "Codex CLI Judge subprocess stdout exceeded byte limit",
+  );
+});
+
+test("Codex CLI Judge caps stderr independently by raw bytes", async () => {
+  await assert.rejects(
+    runCodexCliJudgeProcessForTest({
+      executable: process.execPath,
+      args: ["-e", 'process.stderr.write("😀".repeat(300));'],
+      stdin: null,
+      cwd: process.cwd(),
+      env: process.env,
+      ...TEST_PROCESS_LIMITS,
+      stderrByteLimit: 1_023,
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message ===
+        "Codex CLI Judge subprocess stderr exceeded byte limit",
+  );
+});
+
+test("Codex CLI Judge preserves bounded UTF-8 JSONL output exactly", async () => {
+  const jsonl =
+    `${JSON.stringify({ type: "thread.started", thread_id: "线程-1" })}\n` +
+    `${JSON.stringify({ type: "turn.completed", usage: {} })}\n`;
+  const result = await runCodexCliJudgeProcessForTest({
+    executable: process.execPath,
+    args: [
+      "-e",
+      `process.stdout.write(${JSON.stringify(jsonl)}); process.stderr.write("diagnostic");`,
+    ],
+    stdin: null,
+    cwd: process.cwd(),
+    env: process.env,
+    ...TEST_PROCESS_LIMITS,
+  });
+
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, jsonl);
+  assert.equal(result.stderr, "diagnostic");
+});
+
+test("Codex CLI Judge terminates the entire process group before returning a limit error", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-codex-process-group-test-"),
+  );
+  const pidPath = join(directory, "grandchild.pid");
+  const stoppedPath = join(directory, "grandchild.stopped");
+  let grandchildPid: number | null = null;
+  try {
+    const grandchildScript = [
+      'const fs = require("node:fs");',
+      `const stoppedPath = ${JSON.stringify(stoppedPath)};`,
+      "process.on('SIGTERM', () => {",
+      "  fs.writeFileSync(stoppedPath, 'stopped');",
+      "  process.exit(0);",
+      "});",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const parentScript = [
+      'const fs = require("node:fs");',
+      'const { spawn } = require("node:child_process");',
+      `const pidPath = ${JSON.stringify(pidPath)};`,
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchildScript)}], { stdio: "ignore" });`,
+      "fs.writeFileSync(pidPath, String(child.pid));",
+      "process.on('SIGTERM', () => {});",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+
+    await assert.rejects(
+      runCodexCliJudgeProcessForTest({
+        executable: process.execPath,
+        args: ["-e", parentScript],
+        stdin: null,
+        cwd: directory,
+        env: process.env,
+        ...TEST_PROCESS_LIMITS,
+        deadlineMs: 250,
+      }),
+      /hard deadline/,
+    );
+
+    grandchildPid = Number(await readFile(pidPath, "utf8"));
+    assert.equal(await readFile(stoppedPath, "utf8"), "stopped");
+    assert.throws(
+      () => process.kill(grandchildPid!, 0),
+      (error: unknown) =>
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ESRCH",
+      "the process-group descendant must be gone before rejection",
+    );
+  } finally {
+    if (grandchildPid !== null) {
+      try {
+        process.kill(grandchildPid, "SIGKILL");
+      } catch {
+        // The expected cleanup path already terminated it.
+      }
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 });

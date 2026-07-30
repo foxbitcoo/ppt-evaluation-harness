@@ -4,6 +4,9 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
+  readlinkSync,
+  realpathSync,
   statSync,
 } from "node:fs";
 import {
@@ -11,11 +14,12 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 
 import sharp from "sharp";
 
@@ -51,6 +55,7 @@ import {
 import {
   validatedSafePngDimensions,
 } from "./safe-raster.ts";
+import { parseStrictJson } from "./strict-json.ts";
 
 interface FailureDomainConfiguration {
   readonly operatorDomainLabel: string;
@@ -137,6 +142,7 @@ interface ProductionRendererConfiguration {
   readonly colorProfile: string;
   readonly fidelityNotes: readonly string[];
   readonly fixedRenderer?: "frozen-libreoffice-poppler-v1";
+  readonly nativeFrozenEvidenceDirectory?: string;
 }
 
 export const FROZEN_ARTIFACT_RENDERER_ID =
@@ -196,7 +202,7 @@ const FROZEN_RENDERER_TOOLS = Object.freeze([
     hash: FROZEN_SANDBOX_EXEC_SHA256,
   }),
 ] as const);
-const FROZEN_RENDERER_EXECUTABLE_HASH = sha256(
+const FROZEN_RENDERER_ENTRYPOINT_MANIFEST_HASH = sha256(
   JSON.stringify(
     FROZEN_RENDERER_TOOLS.map(({ name, path, hash }) => ({
       name,
@@ -205,6 +211,174 @@ const FROZEN_RENDERER_EXECUTABLE_HASH = sha256(
     })),
   ),
 );
+const FROZEN_RENDERER_BUNDLE_ROOTS = Object.freeze([
+  Object.freeze({
+    label: "libreoffice",
+    rootPath: FROZEN_LIBREOFFICE_ROOT,
+  }),
+  Object.freeze({
+    label: "poppler",
+    rootPath: FROZEN_POPPLER_ROOT,
+  }),
+  Object.freeze({
+    label: "system-fonts",
+    rootPath: "/System/Library/Fonts",
+  }),
+  Object.freeze({
+    label: "local-fonts",
+    rootPath: "/Library/Fonts",
+  }),
+  Object.freeze({
+    label: "user-fonts",
+    rootPath: resolve(
+      process.env.HOME ?? "/nonexistent-home",
+      "Library/Fonts",
+    ),
+  }),
+  Object.freeze({
+    label: "system-color-profiles",
+    rootPath: "/System/Library/ColorSync/Profiles",
+  }),
+  Object.freeze({
+    label: "local-color-profiles",
+    rootPath: "/Library/ColorSync/Profiles",
+  }),
+] as const);
+const FROZEN_RENDERER_BUNDLE_SHA256 =
+  "sha256:4e5ea60511a1d9f11c5bbfd796f634c672d5ec6af23408a43e0a9b7a591d9fdc" as `sha256:${string}`;
+const FROZEN_RENDERER_EXECUTABLE_HASH = sha256(
+  JSON.stringify({
+    entrypointManifestHash:
+      FROZEN_RENDERER_ENTRYPOINT_MANIFEST_HASH,
+    bundleClosureHash: FROZEN_RENDERER_BUNDLE_SHA256,
+  }),
+);
+
+interface RendererBundleRoot {
+  readonly label: string;
+  readonly rootPath: string;
+}
+
+function rendererBundleClosureDigest(
+  roots: readonly RendererBundleRoot[],
+): `sha256:${string}` {
+  const entries: {
+    readonly path: string;
+    readonly kind: "directory" | "file" | "symlink";
+    readonly mode: number;
+    readonly contentHash?: `sha256:${string}`;
+    readonly target?: string;
+  }[] = [];
+  const visit = (
+    rootLabel: string,
+    rootPath: string,
+    currentPath: string,
+  ): void => {
+    const metadata = lstatSync(currentPath);
+    const relativePath = relative(rootPath, currentPath);
+    const path =
+      relativePath.length === 0
+        ? rootLabel
+        : `${rootLabel}/${relativePath}`;
+    const mode = metadata.mode & 0o777;
+    if (metadata.isSymbolicLink()) {
+      entries.push({
+        path,
+        kind: "symlink",
+        mode,
+        target: readlinkSync(currentPath),
+      });
+      return;
+    }
+    if (metadata.isDirectory()) {
+      entries.push({ path, kind: "directory", mode });
+      for (const name of readdirSync(currentPath).sort()) {
+        visit(rootLabel, rootPath, join(currentPath, name));
+      }
+      return;
+    }
+    if (!metadata.isFile()) {
+      throw new Error(
+        `Frozen renderer bundle contains unsupported entry ${path}`,
+      );
+    }
+    entries.push({
+      path,
+      kind: "file",
+      mode,
+      contentHash: sha256(
+        Uint8Array.from(readFileSync(currentPath)),
+      ),
+    });
+  };
+  for (const { label, rootPath } of roots) {
+    const root = resolve(rootPath);
+    visit(label, root, root);
+  }
+  return sha256(
+    JSON.stringify(
+      entries.sort((left, right) =>
+        left.path.localeCompare(right.path),
+      ),
+    ),
+  );
+}
+
+export function rendererBundleClosureDigestForTest(
+  roots: readonly RendererBundleRoot[],
+): `sha256:${string}` {
+  return rendererBundleClosureDigest(roots);
+}
+
+function seatbeltLiteral(path: string): string {
+  return JSON.stringify(resolve(path));
+}
+
+function frozenRendererSandboxProfile(input: {
+  readonly invocationRoot: string;
+  readonly executablePath: string;
+}): string {
+  const invocationRoot = realpathSync(resolve(input.invocationRoot));
+  const executablePath = realpathSync(resolve(input.executablePath));
+  const libreOfficeRoot = realpathSync(FROZEN_LIBREOFFICE_ROOT);
+  const processExecFilters = [
+    `(literal ${seatbeltLiteral(executablePath)})`,
+    ...(executablePath.startsWith(`${libreOfficeRoot}/`)
+      ? [`(subpath ${seatbeltLiteral(libreOfficeRoot)})`]
+      : []),
+  ];
+  const readableRoots = [
+    invocationRoot,
+    FROZEN_LIBREOFFICE_ROOT,
+    FROZEN_POPPLER_ROOT,
+    resolve(process.env.HOME ?? "/nonexistent-home", "Library/Fonts"),
+  ];
+  return [
+    "(version 1)",
+    "(deny default)",
+    "(allow process-info*)",
+    "(allow process-fork)",
+    "(allow sysctl*)",
+    "(allow signal (target self))",
+    "(allow mach*)",
+    "(allow ipc*)",
+    `(allow process-exec ${processExecFilters.join(" ")})`,
+    "(allow file-read*)",
+    '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/var/folders") (subpath "/private/tmp") (subpath "/tmp"))',
+    "(allow file-read-metadata)",
+    `(allow file-read* ${readableRoots
+      .map((root) => `(subpath ${seatbeltLiteral(root)})`)
+      .join(" ")} (literal ${seatbeltLiteral(executablePath)}))`,
+    `(allow file-write* (subpath ${seatbeltLiteral(invocationRoot)}) (literal "/dev/null"))`,
+  ].join(" ");
+}
+
+export function frozenRendererSandboxProfileForTest(input: {
+  readonly invocationRoot: string;
+  readonly executablePath: string;
+}): string {
+  return frozenRendererSandboxProfile(input);
+}
 
 function assertFrozenRendererTools(): void {
   for (const tool of FROZEN_RENDERER_TOOLS) {
@@ -220,6 +394,15 @@ function assertFrozenRendererTools(): void {
       );
     }
   }
+  if (
+    rendererBundleClosureDigest(
+      FROZEN_RENDERER_BUNDLE_ROOTS,
+    ) !== FROZEN_RENDERER_BUNDLE_SHA256
+  ) {
+    throw new Error(
+      "Frozen Artifact renderer bundle dependency closure hash is invalid",
+    );
+  }
 }
 
 async function readRegularFile(
@@ -231,6 +414,166 @@ async function readRegularFile(
     throw new Error(`${label} must be a regular non-symlink file`);
   }
   return Uint8Array.from(await readFile(path));
+}
+
+async function verifyNativeFrozenEvidence(input: {
+  readonly evidenceRoot: string | undefined;
+  readonly artifact: Artifact;
+  readonly slides: readonly {
+    readonly pageNumber: number;
+    readonly content: Uint8Array;
+    readonly contentHash: `sha256:${string}`;
+    readonly dimensions: {
+      readonly width: number;
+      readonly height: number;
+    };
+  }[];
+}): Promise<{
+  readonly verified: boolean;
+  readonly evidenceHash: `sha256:${string}` | null;
+}> {
+  if (input.evidenceRoot === undefined) {
+    return Object.freeze({
+      verified: false,
+      evidenceHash: null,
+    });
+  }
+  const root = resolve(input.evidenceRoot);
+  const rootMetadata = await lstat(root);
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    throw new Error(
+      "Native-frozen evidence root must be a non-symlink directory",
+    );
+  }
+  const evidenceDirectory = join(
+    root,
+    input.artifact.contentHash.slice("sha256:".length),
+  );
+  let directoryMetadata;
+  try {
+    directoryMetadata = await lstat(evidenceDirectory);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return Object.freeze({
+        verified: false,
+        evidenceHash: null,
+      });
+    }
+    throw error;
+  }
+  if (
+    !directoryMetadata.isDirectory() ||
+    directoryMetadata.isSymbolicLink()
+  ) {
+    throw new Error(
+      "Native-frozen evidence directory must be content-addressed and non-symlink",
+    );
+  }
+  const manifestBytes = await readRegularFile(
+    join(evidenceDirectory, "manifest.json"),
+    "Native-frozen evidence manifest",
+  );
+  const parsed = parseStrictJson(
+    new TextDecoder().decode(manifestBytes),
+    "native-frozen evidence manifest",
+  );
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new Error(
+      "Native-frozen evidence manifest must be an object",
+    );
+  }
+  const manifest = parsed as Record<string, unknown>;
+  const expectedKeys = [
+    "animationFramePolicy",
+    "artifactContentHash",
+    "colorProfile",
+    "cropPolicy",
+    "resolution",
+    "schemaVersion",
+    "slides",
+    "surfaceClass",
+    "viewport",
+  ];
+  if (
+    Object.keys(manifest).sort().join("\n") !==
+      expectedKeys.sort().join("\n") ||
+    manifest.schemaVersion !==
+      "native-frozen-render-evidence-v1" ||
+    manifest.artifactContentHash !== input.artifact.contentHash ||
+    manifest.surfaceClass !== "native_frozen" ||
+    manifest.viewport !== "1920x1080" ||
+    manifest.resolution !== "1920x1080" ||
+    manifest.colorProfile !== "sRGB" ||
+    manifest.cropPolicy !== "native_completion_view" ||
+    manifest.animationFramePolicy !== "completion_state" ||
+    !Array.isArray(manifest.slides) ||
+    manifest.slides.length !== input.slides.length
+  ) {
+    throw new Error(
+      "Native-frozen evidence manifest does not match the canonical render contract",
+    );
+  }
+  for (const [index, canonical] of input.slides.entries()) {
+    const candidate = manifest.slides[index];
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      Array.isArray(candidate)
+    ) {
+      throw new Error(
+        "Native-frozen evidence slide entry is invalid",
+      );
+    }
+    const slide = candidate as Record<string, unknown>;
+    const expectedFilename =
+      `native-slide-${String(index + 1).padStart(2, "0")}.png`;
+    if (
+      Object.keys(slide).sort().join("\n") !==
+        ["contentHash", "filename", "pageNumber"].join("\n") ||
+      slide.pageNumber !== index + 1 ||
+      slide.filename !== expectedFilename ||
+      typeof slide.contentHash !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/.test(slide.contentHash)
+    ) {
+      throw new Error(
+        "Native-frozen evidence slide lineage is invalid",
+      );
+    }
+    const content = await readRegularFile(
+      join(evidenceDirectory, expectedFilename),
+      `Native-frozen evidence slide ${index + 1}`,
+    );
+    const contentHash = sha256(content);
+    const dimensions = await validatedSafePngDimensions(
+      content,
+      `Native-frozen evidence slide ${index + 1}`,
+    );
+    if (
+      contentHash !== slide.contentHash ||
+      contentHash !== canonical.contentHash ||
+      canonical.pageNumber !== index + 1 ||
+      canonical.dimensions.width !== 1920 ||
+      canonical.dimensions.height !== 1080 ||
+      dimensions.width !== 1920 ||
+      dimensions.height !== 1080
+    ) {
+      throw new Error(
+        "Native-frozen evidence content hash or visual surface does not match the canonical render",
+      );
+    }
+  }
+  return Object.freeze({
+    verified: true,
+    evidenceHash: sha256(manifestBytes),
+  });
 }
 
 async function rendererContactSheet(
@@ -272,11 +615,10 @@ async function runSandboxedRendererTool(
   cwd: string,
 ): Promise<{ readonly stdout: string }> {
   return await new Promise((resolveExecution, rejectExecution) => {
-    const profile = [
-      "(version 1)",
-      "(allow default)",
-      "(deny network*)",
-    ].join(" ");
+    const profile = frozenRendererSandboxProfile({
+      invocationRoot: cwd,
+      executablePath,
+    });
     const child = spawn(
       FROZEN_SANDBOX_EXEC_BINARY,
       [
@@ -341,7 +683,7 @@ async function runSandboxedRendererTool(
       } else {
         rejectOnce(
           new Error(
-            `Frozen Artifact renderer failed with code ${code ?? -1} signal ${signal ?? "none"}; output withheld`,
+            `Frozen Artifact renderer ${basename(executablePath)} failed with code ${code ?? -1} signal ${signal ?? "none"}; output withheld`,
           ),
         );
       }
@@ -447,6 +789,7 @@ export function createHarnessOwnedProductionCapabilities(input: {
     "colorProfile",
     "fidelityNotes",
     "fixedRenderer",
+    "nativeFrozenEvidenceDirectory",
   ]);
   if (rendererKeys.some((key) => !allowedRendererKeys.has(key))) {
     throw new Error(
@@ -519,6 +862,29 @@ export function createHarnessOwnedProductionCapabilities(input: {
     input.renderer.fixedRenderer === undefined
       ? null
       : (assertFrozenRendererTools(), FROZEN_RENDERER_EXECUTABLE_HASH);
+  let nativeFrozenEvidenceRoot: string | undefined;
+  if (input.renderer.nativeFrozenEvidenceDirectory !== undefined) {
+    mkdirSync(
+      resolve(input.renderer.nativeFrozenEvidenceDirectory),
+      { recursive: true, mode: 0o700 },
+    );
+    const requestedRoot = resolve(
+      input.renderer.nativeFrozenEvidenceDirectory,
+    );
+    const metadata = lstatSync(requestedRoot);
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      (process.getuid !== undefined &&
+        metadata.uid !== process.getuid()) ||
+      (metadata.mode & 0o077) !== 0
+    ) {
+      throw new Error(
+        "Native-frozen evidence root must be a harness-owned private directory",
+      );
+    }
+    nativeFrozenEvidenceRoot = realpathSync(requestedRoot);
+  }
   const rendererIdentity =
     fixedRendererExecutable === null
       ? input.renderer.rendererId
@@ -590,8 +956,10 @@ export function createHarnessOwnedProductionCapabilities(input: {
         } satisfies SafeRasterCandidate);
       }
 
-      const invocationRoot = await mkdtemp(
-        join(tmpdir(), "ppt-artifact-specific-render-"),
+      const invocationRoot = await realpath(
+        await mkdtemp(
+          join(tmpdir(), "ppt-artifact-specific-render-"),
+        ),
       );
       try {
         assertFrozenRendererTools();
@@ -724,7 +1092,7 @@ export function createHarnessOwnedProductionCapabilities(input: {
             }),
           ),
         );
-        const fidelityVerified =
+        const canonicalStructuralChecksVerified =
           pageGeometryVerified &&
           noFontSubstitutions &&
           slides.every(
@@ -732,6 +1100,18 @@ export function createHarnessOwnedProductionCapabilities(input: {
               dimensions.width === 1920 &&
               dimensions.height === 1080,
           );
+        const nativeFrozenEvidence =
+          await verifyNativeFrozenEvidence({
+            evidenceRoot:
+              nativeFrozenEvidenceRoot,
+            artifact,
+            slides,
+          });
+        const nativeFrozenEvidenceVerified =
+          nativeFrozenEvidence.verified;
+        const fidelityVerified =
+          canonicalStructuralChecksVerified &&
+          nativeFrozenEvidenceVerified;
         const publicSlides = Object.freeze(
           slides.map(
             ({
@@ -754,13 +1134,13 @@ export function createHarnessOwnedProductionCapabilities(input: {
             ? {
                 status: "verified",
                 notes: Object.freeze([
-                  "Current Artifact hash, source-reviewed LibreOffice/Poppler executables, sandboxed offline conversion, 16-page PDF geometry, zero reported font substitutions, and 1920x1080 page rasters were verified.",
+                  `Current Artifact hash, complete renderer bundle closure, sandboxed offline conversion, 16-page PDF geometry, zero reported font substitutions, 1920x1080 page rasters, and byte-identical native-frozen evidence ${nativeFrozenEvidence.evidenceHash} were verified.`,
                 ]),
               }
             : {
                 status: "degraded",
                 notes: Object.freeze([
-                  "Frozen renderer fidelity proof was incomplete or reported font substitution; visual scoring is prohibited.",
+                  "Frozen renderer structural checks are insufficient without byte-identical content-addressed native-frozen evidence; visual scoring is prohibited.",
                 ]),
               },
           slides: publicSlides,

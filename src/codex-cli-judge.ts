@@ -109,6 +109,193 @@ export const CODEX_CLI_FIXED_ARGUMENTS_HASH = sha256(
   JSON.stringify(FIXED_ARGUMENT_TEMPLATE),
 );
 
+const CODEX_CLI_SUBPROCESS_DEADLINE_MS = 10 * 60 * 1_000;
+const CODEX_CLI_STDOUT_BYTE_LIMIT = 16 * 1_024 * 1_024;
+const CODEX_CLI_STDERR_BYTE_LIMIT = 1 * 1_024 * 1_024;
+const CODEX_CLI_TERMINATION_GRACE_MS = 1_000;
+
+interface CodexCliJudgeProcessOptions {
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly stdin: string | null;
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly deadlineMs: number;
+  readonly stdoutByteLimit: number;
+  readonly stderrByteLimit: number;
+  readonly terminationGraceMs: number;
+}
+
+interface CodexCliJudgeProcessResult {
+  readonly code: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+type CodexCliJudgeProcessViolation =
+  | "deadline"
+  | "stdout"
+  | "stderr";
+
+const PROCESS_VIOLATION_MESSAGES: Readonly<
+  Record<CodexCliJudgeProcessViolation, string>
+> = Object.freeze({
+  deadline: "Codex CLI Judge subprocess exceeded hard deadline",
+  stdout: "Codex CLI Judge subprocess stdout exceeded byte limit",
+  stderr: "Codex CLI Judge subprocess stderr exceeded byte limit",
+});
+
+function positiveSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`Codex CLI Judge invalid ${label}`);
+  }
+  return value;
+}
+
+async function runBoundedCodexCliJudgeProcess(
+  options: CodexCliJudgeProcessOptions,
+): Promise<CodexCliJudgeProcessResult> {
+  const deadlineMs = positiveSafeInteger(
+    options.deadlineMs,
+    "subprocess deadline",
+  );
+  const stdoutByteLimit = positiveSafeInteger(
+    options.stdoutByteLimit,
+    "stdout byte limit",
+  );
+  const stderrByteLimit = positiveSafeInteger(
+    options.stderrByteLimit,
+    "stderr byte limit",
+  );
+  const terminationGraceMs = positiveSafeInteger(
+    options.terminationGraceMs,
+    "termination grace",
+  );
+  return await new Promise<CodexCliJudgeProcessResult>(
+    (resolveOutput, rejectOutput) => {
+      const child = spawn(options.executable, [...options.args], {
+        stdio: [
+          options.stdin === null ? "ignore" : "pipe",
+          "pipe",
+          "pipe",
+        ],
+        cwd: options.cwd,
+        env: options.env,
+        detached: true,
+      });
+      const stdoutBuffer = Buffer.allocUnsafe(stdoutByteLimit);
+      const stderrBuffer = Buffer.allocUnsafe(stderrByteLimit);
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let violation: CodexCliJudgeProcessViolation | null = null;
+      let settled = false;
+      let terminationTimer: NodeJS.Timeout | null = null;
+
+      const signalProcessGroup = (signal: NodeJS.Signals): void => {
+        if (child.pid === undefined) return;
+        try {
+          if (process.platform === "win32") {
+            child.kill(signal);
+          } else {
+            process.kill(-child.pid, signal);
+          }
+        } catch (error) {
+          if (
+            !(
+              error instanceof Error &&
+              "code" in error &&
+              error.code === "ESRCH"
+            )
+          ) {
+            child.kill(signal);
+          }
+        }
+      };
+
+      const beginTermination = (
+        reason: CodexCliJudgeProcessViolation,
+      ): void => {
+        if (violation !== null || settled) return;
+        violation = reason;
+        signalProcessGroup("SIGTERM");
+        terminationTimer = setTimeout(() => {
+          signalProcessGroup("SIGKILL");
+        }, terminationGraceMs);
+      };
+
+      const deadlineTimer = setTimeout(() => {
+        beginTermination("deadline");
+      }, deadlineMs);
+
+      child.stdout!.on("data", (value: Buffer | string) => {
+        if (violation !== null) return;
+        const chunk = Buffer.isBuffer(value)
+          ? value
+          : Buffer.from(value);
+        if (stdoutBytes + chunk.byteLength > stdoutByteLimit) {
+          beginTermination("stdout");
+          return;
+        }
+        chunk.copy(stdoutBuffer, stdoutBytes);
+        stdoutBytes += chunk.byteLength;
+      });
+      child.stderr!.on("data", (value: Buffer | string) => {
+        if (violation !== null) return;
+        const chunk = Buffer.isBuffer(value)
+          ? value
+          : Buffer.from(value);
+        if (stderrBytes + chunk.byteLength > stderrByteLimit) {
+          beginTermination("stderr");
+          return;
+        }
+        chunk.copy(stderrBuffer, stderrBytes);
+        stderrBytes += chunk.byteLength;
+      });
+      child.once("error", () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadlineTimer);
+        if (terminationTimer !== null) clearTimeout(terminationTimer);
+        rejectOutput(
+          new Error("Codex CLI Judge subprocess failed to start"),
+        );
+      });
+      child.once("close", (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadlineTimer);
+        if (terminationTimer !== null) clearTimeout(terminationTimer);
+        if (violation !== null) {
+          signalProcessGroup("SIGKILL");
+          rejectOutput(new Error(PROCESS_VIOLATION_MESSAGES[violation]));
+          return;
+        }
+        resolveOutput({
+          code: code ?? -1,
+          stdout: stdoutBuffer
+            .subarray(0, stdoutBytes)
+            .toString("utf8"),
+          stderr: stderrBuffer
+            .subarray(0, stderrBytes)
+            .toString("utf8"),
+        });
+      });
+      if (options.stdin !== null) {
+        child.stdin!.on("error", () => {
+          // Process exit and boundary violations are resolved on `close`.
+        });
+        child.stdin!.end(options.stdin);
+      }
+    },
+  );
+}
+
+export async function runCodexCliJudgeProcessForTest(
+  options: CodexCliJudgeProcessOptions,
+): Promise<CodexCliJudgeProcessResult> {
+  return await runBoundedCodexCliJudgeProcess(options);
+}
+
 function seatbeltProfile(allowedRoot: string): string {
   const root = JSON.stringify(allowedRoot);
   const home = process.env.HOME;
@@ -526,39 +713,25 @@ class VerifiedCodexCliJudgeTransport
     readonly stderr: string;
   }> {
     const sandboxRoot = await realpath(options.sandboxRoot);
-    return await new Promise((resolveOutput, rejectOutput) => {
-      const executable = options.executable ?? this.binaryPath;
-      const child = spawn(
-        this.sandboxBinaryPath,
-        [
-          "-p",
-          seatbeltProfile(sandboxRoot),
-          executable,
-          ...args,
-        ],
-        {
-          stdio: [stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
-          cwd: options.cwd,
-          env: {
-            HOME: process.env.HOME,
-            TMPDIR: sandboxRoot,
-            PATH: "/usr/bin:/bin",
-          },
-        },
-      );
-      let stdout = "";
-      let stderr = "";
-      child.stdout!.setEncoding("utf8").on("data", (chunk) => {
-        stdout += chunk;
-      });
-      child.stderr!.setEncoding("utf8").on("data", (chunk) => {
-        stderr += chunk;
-      });
-      child.once("error", rejectOutput);
-      child.once("close", (code) => {
-        resolveOutput({ code: code ?? -1, stdout, stderr });
-      });
-      if (stdin !== null) child.stdin!.end(stdin);
+    return await runBoundedCodexCliJudgeProcess({
+      executable: this.sandboxBinaryPath,
+      args: [
+        "-p",
+        seatbeltProfile(sandboxRoot),
+        options.executable ?? this.binaryPath,
+        ...args,
+      ],
+      stdin,
+      cwd: options.cwd,
+      env: {
+        HOME: process.env.HOME,
+        TMPDIR: sandboxRoot,
+        PATH: "/usr/bin:/bin",
+      },
+      deadlineMs: CODEX_CLI_SUBPROCESS_DEADLINE_MS,
+      stdoutByteLimit: CODEX_CLI_STDOUT_BYTE_LIMIT,
+      stderrByteLimit: CODEX_CLI_STDERR_BYTE_LIMIT,
+      terminationGraceMs: CODEX_CLI_TERMINATION_GRACE_MS,
     });
   }
 

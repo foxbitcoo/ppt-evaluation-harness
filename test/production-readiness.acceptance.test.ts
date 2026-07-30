@@ -8,7 +8,10 @@ import {
   FileSystemJudgeEgressAudit,
   InMemoryFeishuProjection,
   MockWpsProductAdapter,
+  DoubaoProductionProductAdapter,
+  QwenProductionProductAdapter,
   VOLCANO_CASE_ID,
+  WpsAiPptProductAdapter,
   assertHarnessOwnedLarkBaseProjection,
   assertHarnessOwnedDurableEgressAuthorizationAudit,
   assertHarnessOwnedDurableReferencePackStore,
@@ -24,6 +27,46 @@ test("production preflight fails closed on a missing real Judge before any adapt
     () => assertHarnessOwnedProductionJudge(undefined),
     /requires an explicit harness-owned real Judge.*Mock scoring is forbidden/i,
   );
+});
+
+test("production preflight rejects every unavailable LIVE_PRODUCTION executor before provider egress", async () => {
+  for (const [adapter, expected] of [
+    [
+      new WpsAiPptProductAdapter(),
+      /trusted WPS live bridge executable is unavailable/i,
+    ],
+    [
+      new QwenProductionProductAdapter(),
+      /Qwen live executable is not embedded/i,
+    ],
+    [
+      new DoubaoProductionProductAdapter(),
+      /trusted Doubao live bridge executable is unavailable/i,
+    ],
+  ] as const) {
+    let egressCalls = 0;
+    await assert.rejects(
+      async () =>
+        createBakeoffHarness({
+          feishu: new InMemoryFeishuProjection({
+            targetEnvironment: "production",
+          }),
+          productAdapter: adapter,
+          egressAuthorization: {
+            async authorize() {
+              egressCalls += 1;
+              throw new Error("provider egress must not start");
+            },
+          },
+        }).startBakeoffJob({
+          environment: "production",
+          caseId: VOLCANO_CASE_ID,
+          executionMode: "capture_only",
+        }),
+      expected,
+    );
+    assert.equal(egressCalls, 0);
+  }
 });
 
 test("production preflight rejects an in-memory Feishu projection even when a real Codex CLI Judge is configured", async () => {

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import type { Artifact } from "../src/domain.ts";
@@ -18,6 +20,8 @@ import {
 } from "../src/product-adapter.ts";
 import {
   FROZEN_ARTIFACT_RENDERER_ID,
+  frozenRendererSandboxProfileForTest,
+  rendererBundleClosureDigestForTest,
   createHarnessOwnedProductionCapabilities,
 } from "../src/production-capabilities.ts";
 import {
@@ -144,6 +148,113 @@ async function writeLegacySlides(root: string, source: Artifact) {
   );
 }
 
+async function writeNativeFrozenEvidence(
+  root: string,
+  source: Artifact,
+  slides: readonly {
+    readonly pageNumber: number;
+    readonly content: Uint8Array;
+  }[],
+) {
+  const evidenceDirectory = join(
+    root,
+    source.contentHash.slice("sha256:".length),
+  );
+  await mkdir(evidenceDirectory, { recursive: true, mode: 0o700 });
+  const manifestSlides = [];
+  for (const slide of slides) {
+    const filename =
+      `native-slide-${String(slide.pageNumber).padStart(2, "0")}.png`;
+    await writeFile(
+      join(evidenceDirectory, filename),
+      slide.content,
+      { mode: 0o600 },
+    );
+    manifestSlides.push({
+      pageNumber: slide.pageNumber,
+      filename,
+      contentHash: sha256(slide.content),
+    });
+  }
+  await writeFile(
+    join(evidenceDirectory, "manifest.json"),
+    JSON.stringify({
+      schemaVersion: "native-frozen-render-evidence-v1",
+      artifactContentHash: source.contentHash,
+      surfaceClass: "native_frozen",
+      viewport: "1920x1080",
+      resolution: "1920x1080",
+      colorProfile: "sRGB",
+      cropPolicy: "native_completion_view",
+      animationFramePolicy: "completion_state",
+      slides: manifestSlides,
+    }),
+    { mode: 0o600 },
+  );
+}
+
+test("the frozen renderer sandbox denies repository and ~/.codex reads plus non-allowlisted process execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "production-renderer-sandbox-"));
+  try {
+    const allowed = join(root, "allowed.txt");
+    await writeFile(allowed, "allowed-renderer-input", { mode: 0o600 });
+    const profile = frozenRendererSandboxProfileForTest({
+      invocationRoot: root,
+      executablePath: "/bin/cat",
+    });
+    assert.equal(
+      spawnSync(
+        "/usr/bin/sandbox-exec",
+        ["-p", profile, "/bin/cat", allowed],
+        { encoding: "utf8" },
+      ).stdout,
+      "allowed-renderer-input",
+    );
+    for (const forbidden of [
+      resolve("package.json"),
+      join(homedir(), ".codex", "AGENTS.md"),
+    ]) {
+      const attempt = spawnSync(
+        "/usr/bin/sandbox-exec",
+        ["-p", profile, "/bin/cat", forbidden],
+        { encoding: "utf8" },
+      );
+      assert.notEqual(attempt.status, 0);
+      assert.equal(attempt.stdout, "");
+    }
+    const shell = spawnSync(
+      "/usr/bin/sandbox-exec",
+      ["-p", profile, "/bin/sh", "-c", "exit 0"],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(shell.status, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the frozen renderer identity changes when a loaded bundle dependency drifts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "production-renderer-bundle-"));
+  try {
+    const executable = join(root, "renderer");
+    const dependency = join(root, "librenderer.dylib");
+    await writeFile(executable, "fixed-entrypoint-v1", { mode: 0o700 });
+    await writeFile(dependency, "loaded-dependency-v1", { mode: 0o600 });
+    const before = rendererBundleClosureDigestForTest([
+      { label: "fixture", rootPath: root },
+    ]);
+
+    await writeFile(dependency, "loaded-dependency-v2", { mode: 0o600 });
+    const after = rendererBundleClosureDigestForTest([
+      { label: "fixture", rootPath: root },
+    ]);
+
+    assert.notEqual(after, before);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy pre-rendered slides are degraded and are isolated by Artifact content hash", async () => {
   const root = await mkdtemp(join(tmpdir(), "production-renderer-legacy-"));
   try {
@@ -190,7 +301,7 @@ test("legacy pre-rendered slides are degraded and are isolated by Artifact conte
   }
 });
 
-test("the source-reviewed frozen renderer converts the current Artifact to 16 faithful PNGs", async () => {
+test("LibreOffice structural checks remain degraded without content-addressed native-frozen evidence", async () => {
   const root = await mkdtemp(join(tmpdir(), "production-renderer-frozen-"));
   try {
     const capabilities = await capabilityFixture(root, {
@@ -213,8 +324,8 @@ test("the source-reviewed frozen renderer converts the current Artifact to 16 fa
       authorizationDecisionId: "renderer-approved",
     });
 
-    assert.equal(candidate.renderOutcome, "faithful");
-    assert.equal(candidate.fidelity.status, "verified");
+    assert.equal(candidate.renderOutcome, "degraded");
+    assert.equal(candidate.fidelity.status, "degraded");
     assert.equal(candidate.slides.length, 16);
     assert.equal(candidate.resolution, "1920x1080");
     assert.equal(
@@ -225,6 +336,146 @@ test("the source-reviewed frozen renderer converts the current Artifact to 16 fa
       candidate.renderer,
       /^frozen-libreoffice-poppler-artifact-renderer:1:sha256:[a-f0-9]{64}$/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("byte-identical content-addressed native-frozen evidence upgrades the canonical render to faithful", async () => {
+  const root = await mkdtemp(join(tmpdir(), "production-renderer-native-"));
+  try {
+    const evidenceRoot = join(root, "native-evidence");
+    const capabilities = await capabilityFixture(root, {
+      rendererId: FROZEN_ARTIFACT_RENDERER_ID,
+      slidesDirectory: join(root, "legacy-unused"),
+      extractedTextPrefix: "unused",
+      fontPack: "caller-value-must-not-control-fidelity",
+      resolution: "caller-value-must-not-control-fidelity",
+      colorProfile: "sRGB",
+      fidelityNotes: ["legacy fallback only"],
+      fixedRenderer: "frozen-libreoffice-poppler-v1",
+      nativeFrozenEvidenceDirectory: evidenceRoot,
+    });
+    const source = artifact(
+      await knownGoodPptxBytes(),
+      "production-renderer-native-evidence-artifact",
+    );
+    const canonical = await capabilities.safeRasterRenderer.render({
+      artifact: source,
+      authorizationDecisionId: "renderer-approved",
+    });
+    assert.equal(canonical.renderOutcome, "degraded");
+    await writeNativeFrozenEvidence(
+      evidenceRoot,
+      source,
+      canonical.slides,
+    );
+
+    const verified = await capabilities.safeRasterRenderer.render({
+      artifact: source,
+      authorizationDecisionId: "renderer-approved",
+    });
+
+    assert.equal(verified.renderOutcome, "faithful");
+    assert.equal(verified.fidelity.status, "verified");
+    assert.match(
+      verified.fidelity.notes.join("\n"),
+      /native-frozen.*sha256:[a-f0-9]{64}/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("tampered native-frozen evidence fails closed before it can claim faithful rendering", async () => {
+  const root = await mkdtemp(join(tmpdir(), "production-renderer-native-tamper-"));
+  try {
+    const evidenceRoot = join(root, "native-evidence");
+    const capabilities = await capabilityFixture(root, {
+      rendererId: FROZEN_ARTIFACT_RENDERER_ID,
+      slidesDirectory: join(root, "legacy-unused"),
+      extractedTextPrefix: "unused",
+      fontPack: "caller-value-must-not-control-fidelity",
+      resolution: "caller-value-must-not-control-fidelity",
+      colorProfile: "sRGB",
+      fidelityNotes: ["legacy fallback only"],
+      fixedRenderer: "frozen-libreoffice-poppler-v1",
+      nativeFrozenEvidenceDirectory: evidenceRoot,
+    });
+    const source = artifact(
+      await knownGoodPptxBytes(),
+      "production-renderer-native-evidence-tamper",
+    );
+    const canonical = await capabilities.safeRasterRenderer.render({
+      artifact: source,
+      authorizationDecisionId: "renderer-approved",
+    });
+    await writeNativeFrozenEvidence(
+      evidenceRoot,
+      source,
+      canonical.slides,
+    );
+    await writeFile(
+      join(
+        evidenceRoot,
+        source.contentHash.slice("sha256:".length),
+        "native-slide-01.png",
+      ),
+      PNG,
+      { mode: 0o600 },
+    );
+
+    await assert.rejects(
+      capabilities.safeRasterRenderer.render({
+        artifact: source,
+        authorizationDecisionId: "renderer-approved",
+      }),
+      /native-frozen evidence content hash or visual surface does not match/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the harness snapshots its native-frozen evidence root before caller mutation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "production-renderer-native-root-"));
+  try {
+    const trustedEvidenceRoot = join(root, "trusted-native-evidence");
+    const attackerEvidenceRoot = join(root, "attacker-native-evidence");
+    const renderer = {
+      rendererId: FROZEN_ARTIFACT_RENDERER_ID,
+      slidesDirectory: join(root, "legacy-unused"),
+      extractedTextPrefix: "unused",
+      fontPack: "caller-value-must-not-control-fidelity",
+      resolution: "caller-value-must-not-control-fidelity",
+      colorProfile: "sRGB",
+      fidelityNotes: ["legacy fallback only"],
+      fixedRenderer: "frozen-libreoffice-poppler-v1" as const,
+      nativeFrozenEvidenceDirectory: trustedEvidenceRoot,
+    };
+    const capabilities = await capabilityFixture(root, renderer);
+    const source = artifact(
+      await knownGoodPptxBytes(),
+      "production-renderer-native-root-snapshot",
+    );
+    const canonical = await capabilities.safeRasterRenderer.render({
+      artifact: source,
+      authorizationDecisionId: "renderer-approved",
+    });
+    await writeNativeFrozenEvidence(
+      attackerEvidenceRoot,
+      source,
+      canonical.slides,
+    );
+    renderer.nativeFrozenEvidenceDirectory = attackerEvidenceRoot;
+
+    const afterMutation =
+      await capabilities.safeRasterRenderer.render({
+        artifact: source,
+        authorizationDecisionId: "renderer-approved",
+      });
+
+    assert.equal(afterMutation.renderOutcome, "degraded");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

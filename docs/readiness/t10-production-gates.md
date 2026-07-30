@@ -99,7 +99,28 @@ records and opening their share URLs from the final real run remain external
 acceptance gates. `capture_only` creates no scores, comparisons, Gap Cards, or
 report, but retained captures still require hash-verified Artifact storage.
 
-## Frozen local executables — implementation attested
+## Selected LIVE adapter preflight — implementation ready
+
+Production validates every selected adapter's execution mode against its
+Product Package provenance before durable claims, provider execution, or any
+egress authorization is used. `PRODUCTION_REPLAY` remains eligible only through
+its registered, hash-verified replay package. For `LIVE_PRODUCTION`, the
+selected harness-owned executable or bridge must already be embedded and pass
+its fixed-file/hash readiness check.
+
+This is a selection-scoped, fail-before-egress gate: an unavailable adapter
+does not affect an unselected product, but selecting its LIVE mode aborts the
+whole run before any network egress. The trusted WPS live bridge is checked at
+preflight and again immediately before spawn. The harness-owned Qwen LIVE
+executable and trusted Doubao LIVE bridge are not currently embedded, so
+selecting either LIVE adapter deterministically fails this gate. Replay
+coverage does not make either LIVE adapter available.
+
+These checks prove only that unavailable LIVE implementations cannot fall
+through to a caller-supplied browser or later network action. A successful
+real WPS, Qwen, or Doubao run has not yet been accepted.
+
+## Frozen local executables and renderer — implementation attested
 
 - Codex Judge:
   `/Applications/ChatGPT.app/Contents/Resources/codex`
@@ -124,6 +145,36 @@ runs `lark-cli update`. Native hash, exact `--version` output, symlink target,
 and wrapper-script hash must all match the reviewed installation; any drift
 fails closed.
 
+The Artifact renderer runs each fixed LibreOffice or Poppler command under a
+deny-default Seatbelt profile. The profile grants no network operation,
+permits process execution only for the exact selected binary (plus the frozen
+LibreOffice executable subtree when LibreOffice itself is selected), denies
+data reads from user, volume, and shared-temporary roots except the exact
+canonical invocation root and frozen renderer/font roots, and permits writes
+only inside that invocation root and `/dev/null`. Acceptance coverage executes
+the real profile and proves that an invocation input is readable while a
+repository file, a Codex home file, and `/bin/sh` are denied.
+
+Entrypoint hashes alone are insufficient. Renderer startup and every render
+recompute the deterministic dependency-closure digest over the complete frozen
+LibreOffice and Poppler roots, system/local/user fonts, and system/local color
+profiles, including directory and file modes, file contents, and symlink
+targets. The currently reviewed closure digest is
+`sha256:4e5ea60511a1d9f11c5bbfd796f634c672d5ec6af23408a43e0a9b7a591d9fdc`;
+any dylib, plugin, configuration, font, color profile, mode, or symlink drift
+fails closed.
+
+Canonical 16-page, 1920x1080, sRGB raster structure is necessary but not enough
+for visual fidelity. A `faithful` render additionally requires strict
+native-frozen evidence at
+`<private-evidence-root>/<artifact-sha256-without-prefix>/manifest.json` plus
+the 16 ordered PNGs. The manifest is bound to the exact Artifact hash, native
+surface class, viewport/resolution, crop and completion-frame policies, and
+each PNG hash. Every native PNG must be a regular non-symlink 1920x1080 file
+whose bytes are identical to its canonical renderer page. Missing evidence
+always yields `degraded` and prohibits Judge visual scoring; malformed,
+misbound, or tampered evidence fails closed rather than degrading silently.
+
 The Judge runs in a fresh temporary root under a pinned Seatbelt profile.
 Reads and writes under `/Users`, `/Volumes`, and shared temporary roots are
 denied except the invocation root and the two exact Codex bootstrap files
@@ -131,6 +182,11 @@ needed for configuration/authentication. Agent shell, unified-exec, code-mode,
 app, and plugin tool features are disabled. Preflight proves an allowed read,
 a denied outside-root read, and sandboxed login; execution evidence records the
 profile and attestation hashes. Any executable or profile drift fails closed.
+
+Every Judge subprocess also has a hard ten-minute deadline and independent
+raw-byte caps of 16 MiB for stdout and 1 MiB for stderr. Exceeding the deadline
+or either cap terminates the whole subprocess group, waits for termination,
+and returns a bounded failure without persisting the overflowing output.
 
 The local attestation is implementation evidence. A successful real Judge call
 and persisted non-Mock score lineage are still required for production
@@ -172,3 +228,7 @@ Mock outputs cannot enter production lineage. A provider without a captured,
 hash-verified PPT remains partial rather than receiving zero. A degraded static
 render retains the Artifact, skips the Judge, and reports visual quality as
 `NOT_ASSESSABLE`.
+
+Therefore the current state is not end-to-end production acceptance: real
+provider generation, real Lark mutation/readback, native-frozen evidence for
+the resulting Artifacts, and a successful sandboxed Judge call remain pending.

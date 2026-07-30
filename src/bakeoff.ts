@@ -75,6 +75,8 @@ import {
   resolveHarnessProductAdapterExecutor,
 } from "./mock-wps.ts";
 import {
+  DOUBAO_PRODUCTION_REPLAY_SCENARIO,
+  DOUBAO_PRODUCTION_SCENARIO,
   registeredDoubaoBrowserDriverEvidence,
   type DoubaoBrowserDriverPort,
 } from "./doubao-production-adapter.ts";
@@ -89,6 +91,9 @@ import {
   assertHarnessOwnedProductionJudge,
   preflightHarnessOwnedProductionJudge,
 } from "./codex-cli-judge.ts";
+import {
+  assertHarnessOwnedWpsLiveBridgeReady,
+} from "./wps-aippt-live-bridge.ts";
 import {
   InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
@@ -707,6 +712,56 @@ interface SelectedProductAdapter {
   readonly productPackage: ProductPackageSnapshot;
   readonly browserDriverEvidence: TrustedBrowserDriverEvidence | null;
   readonly runId: string;
+}
+
+function assertProductionAdapterExecutionReadiness(
+  selections: readonly SelectedProductAdapter[],
+): void {
+  for (const { executionConfiguration, productPackage } of selections) {
+    const { adapterKind, scenario } = executionConfiguration;
+    if (
+      ![
+        "wps-aippt-browser",
+        "qwen-web",
+        "doubao-web-ppt",
+      ].includes(adapterKind)
+    ) {
+      continue;
+    }
+    const expectedScenario =
+      productPackage.provenance === "LIVE_PRODUCTION"
+        ? adapterKind === "doubao-web-ppt"
+          ? DOUBAO_PRODUCTION_SCENARIO
+          : "production-live"
+        : productPackage.provenance === "PRODUCTION_REPLAY"
+          ? adapterKind === "doubao-web-ppt"
+            ? DOUBAO_PRODUCTION_REPLAY_SCENARIO
+            : "production-replay"
+          : null;
+    if (expectedScenario === null || scenario !== expectedScenario) {
+      throw new Error(
+        `Production ${adapterKind} execution mode does not match Product Package provenance`,
+      );
+    }
+    if (
+      expectedScenario === "production-replay" ||
+      expectedScenario === DOUBAO_PRODUCTION_REPLAY_SCENARIO
+    ) {
+      continue;
+    }
+    if (adapterKind === "wps-aippt-browser") {
+      assertHarnessOwnedWpsLiveBridgeReady();
+      continue;
+    }
+    if (adapterKind === "qwen-web") {
+      throw new Error(
+        "Harness-owned Qwen live executable is not embedded; production preflight fails closed",
+      );
+    }
+    throw new Error(
+      "Trusted Doubao live bridge executable is unavailable; production preflight fails closed",
+    );
+  }
 }
 
 class ArtifactPackageIdentityConflictError extends Error {
@@ -2902,6 +2957,7 @@ export function createBakeoffHarness({
             ),
           );
         }
+        assertProductionAdapterExecutionReadiness(selections);
         if (artifactVault.storageProfile?.durability !== "durable") {
           return Promise.reject(
             new Error(

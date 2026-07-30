@@ -4,6 +4,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
@@ -40,26 +41,45 @@ function hmac(
     .digest("hex")}`;
 }
 
-export async function startHarnessOwnedWpsLiveBridge():
-  Promise<HarnessOwnedWpsLiveBridgeSession> {
+export function assertHarnessOwnedWpsLiveBridgeReady():
+  `sha256:${string}` {
   const expectedHash =
     EMBEDDED_BUILD_MANIFEST.trustedWpsLiveBridgeExecutableHash;
   if (expectedHash === null) {
     throw new Error(
-      "Trusted live bridge executable is unavailable in this build",
+      "Trusted WPS live bridge executable is unavailable in this build",
     );
   }
+  let executable: Uint8Array;
+  try {
+    executable = Uint8Array.from(readFileSync(fixedExecutableUrl));
+  } catch {
+    throw new Error(
+      "Trusted WPS live bridge executable is unavailable in this build",
+    );
+  }
+  if (sha256(executable) !== expectedHash) {
+    throw new Error(
+      "Trusted WPS live bridge executable content hash verification failed",
+    );
+  }
+  return expectedHash;
+}
+
+export async function startHarnessOwnedWpsLiveBridge():
+    Promise<HarnessOwnedWpsLiveBridgeSession> {
+  const expectedHash = assertHarnessOwnedWpsLiveBridgeReady();
   let executable: Uint8Array;
   try {
     executable = Uint8Array.from(await readFile(fixedExecutableUrl));
   } catch {
     throw new Error(
-      "Trusted live bridge executable is unavailable in this build",
+      "Trusted WPS live bridge executable is unavailable in this build",
     );
   }
   if (sha256(executable) !== expectedHash) {
     throw new Error(
-      "Trusted live bridge executable content hash verification failed",
+      "Trusted WPS live bridge executable content hash verification failed",
     );
   }
   const challenge = Uint8Array.from(randomBytes(32));

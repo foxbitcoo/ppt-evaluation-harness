@@ -407,14 +407,15 @@ ${comparison.dimensions
 - 主要问题：${findingMarkdown(summary.majorIssues)}`,
     )
     .join("\n\n");
+  const title =
+    job.provenance === "MOCK"
+      ? "MOCK｜Case Sample 动态 A/B 精简报告"
+      : "Case Sample｜动态 A/B 精简报告";
   return {
     reportId: `comparison-report-${reportKey}`,
     provenance: job.provenance,
     environmentOrigin: job.environmentOrigin,
-    title:
-      job.provenance === "MOCK"
-        ? "MOCK｜Case Sample 动态 A/B 精简报告"
-        : "Case Sample｜动态 A/B 精简报告",
+    title,
     jobId: job.jobId,
     runIds:
       job.selectedRunIds === null
@@ -422,9 +423,7 @@ ${comparison.dimensions
         : [...job.selectedRunIds],
     artifactIds: capturedArtifacts.map(({ artifactId }) => artifactId),
     claimLevel: "case_sample",
-    markdown: `# ${
-      job.provenance === "MOCK" ? "MOCK｜" : ""
-    }Case Sample 动态 A/B 精简报告
+    markdown: `# ${title}
 
 > **单次 Case Sample：结论仅适用于当前已捕获的静态自读 PPT，不外推到其他场景。**
 
@@ -826,6 +825,17 @@ export function createComparisonReportService({
 }: ComparisonReportServiceDependencies): ComparisonReportService {
   return {
     async createReport(command) {
+      const requiresAuthorizedPersistence =
+        isHarnessOwnedLarkBaseProjection(feishu);
+      if (
+        requiresAuthorizedPersistence &&
+        (egressAuthorization === undefined ||
+          egressAudit === undefined)
+      ) {
+        throw new Error(
+          "Production dynamic comparison requires authorized Lark persistence",
+        );
+      }
       const source = await feishu.loadComparisonReportSource(command.jobId);
       const adjudicationService = createScoreAdjudicationService({
         feishu,
@@ -854,8 +864,11 @@ export function createComparisonReportService({
           effectiveScores,
         ),
       );
+      const writeProjection = requiresAuthorizedPersistence
+        ? feishu.forkForStaging()
+        : feishu;
       for (const comparison of comparisons) {
-        await feishu.appendComparison({
+        await writeProjection.appendComparison({
           recordType: comparison.recordType,
           comparisonId: comparison.comparisonId,
           caseId: comparison.caseId,
@@ -875,7 +888,7 @@ export function createComparisonReportService({
         effectiveScores,
       );
       for (const gapCard of gapCards) {
-        await feishu.appendProductGapCard(gapCard);
+        await writeProjection.appendProductGapCard(gapCard);
       }
       const vendorSummaries = createVendorSummaries(
         feishu,
@@ -883,7 +896,7 @@ export function createComparisonReportService({
         source.vendorRuns,
         effectiveScores,
       );
-      const report = await feishu.createReport(
+      const report = await writeProjection.createReport(
         reportDraft(
           feishu,
           source.job,
@@ -895,27 +908,20 @@ export function createComparisonReportService({
           effectiveScores,
         ),
       );
-      await feishu.linkReportToBakeoffJob(
+      await writeProjection.linkReportToBakeoffJob(
         command.jobId,
         report.url,
         command.pairs === undefined ? "primary" : "auxiliary",
       );
       let materializedReport = report;
-      if (isHarnessOwnedLarkBaseProjection(feishu)) {
-        if (
-          egressAuthorization === undefined ||
-          egressAudit === undefined
-        ) {
-          throw new Error(
-            "Production dynamic comparison requires authorized Lark persistence",
-          );
-        }
+      if (requiresAuthorizedPersistence) {
         const snapshot =
           await persistHarnessOwnedLarkProjectionSnapshot({
             projection: feishu,
+            stagedSnapshot: writeProjection.snapshot(),
             jobId: command.jobId,
-            egressAuthorization,
-            egressAudit,
+            egressAuthorization: egressAuthorization!,
+            egressAudit: egressAudit!,
             ...(clock === undefined ? {} : { clock }),
           });
         const readback = snapshot.reports.find(

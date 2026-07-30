@@ -194,6 +194,7 @@ export interface FeishuProjectionPort
     snapshot: FeishuProjectionSnapshot,
     authorization: ApprovedEgressAuthorization,
   ): Promise<void>;
+  forkForStaging(): FeishuProjectionPort;
   snapshot(): FeishuProjectionSnapshot;
   scrubPayloadsForJob(jobId: string): Promise<void>;
   hasPayloadsForJob(jobId: string): Promise<boolean>;
@@ -266,6 +267,16 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     _authorization: ApprovedEgressAuthorization,
   ): Promise<FeishuProjectionSnapshot> {
     return snapshot;
+  }
+
+  forkForStaging(): FeishuProjectionPort {
+    const staging = new InMemoryFeishuProjection({
+      targetEnvironment: this.targetEnvironment,
+      egressDestination: this.egressDestination,
+      clock: this.#clock,
+    });
+    staging.#replaceSnapshot(this.snapshot());
+    return staging;
   }
 
   #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {
