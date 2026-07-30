@@ -16,6 +16,13 @@ export interface TrustedDoubaoRecoveryCheckpoint {
     | "offline_validation_fixture";
   readonly artifactContentHash: DoubaoRecoverySha256;
   readonly checkpointTraceHash: DoubaoRecoverySha256;
+  readonly caseId: "volcano-query-v1";
+  readonly caseVersion: 1;
+  readonly caseContentHash: DoubaoRecoverySha256;
+  readonly vendorPromptHash: DoubaoRecoverySha256;
+  readonly track: "query_generation";
+  readonly protocolId: "production-query-default-cost-v1";
+  readonly referencePackMode: "off";
   readonly pageCount: 16;
   readonly packageId: string;
   readonly adapterVersion: "doubao-web-ppt@1";
@@ -61,6 +68,15 @@ const TRUSTED_CHECKPOINTS = Object.freeze<
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
     checkpointTraceHash:
       "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
+    caseId: "volcano-query-v1",
+    caseVersion: 1,
+    caseContentHash:
+      "sha256:9c2f70e0ef3d5413a0d527475dfd03f29c5feabe17cf719013e2d83af193be18",
+    vendorPromptHash:
+      "sha256:39fec395e6904ca10346a86b85ecae57a35a9196e9897ccab7fe2ab30ccb6ba4",
+    track: "query_generation",
+    protocolId: "production-query-default-cost-v1",
+    referencePackMode: "off",
     pageCount: 16,
     packageId: "doubao-web-ppt-real-provider-replay-v1",
     adapterVersion: "doubao-web-ppt@1",

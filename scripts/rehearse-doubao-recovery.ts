@@ -31,6 +31,27 @@ import {
 const execFileAsync = promisify(execFile);
 const sha256 = (content: string | Uint8Array) =>
   `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
+function assertExactObjectKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value)
+  ) {
+    throw new Error(`${label} schema is invalid`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(`${label} schema contains an unexpected field`);
+  }
+}
 const [pptxPath, slidesDirectory, registryId] = process.argv.slice(2);
 if (
   pptxPath === undefined ||
@@ -357,6 +378,47 @@ const parsedRecoveryResult = JSON.parse(recoveryResult) as {
     readonly contactSheetPngCount: number;
   };
 };
+assertExactObjectKeys(
+  parsedRecoveryResult,
+  [
+    "artifactId",
+    "attemptId",
+    "binaryValidation",
+    "browserDriverId",
+    "caseId",
+    "checkpointCount",
+    "checkpointTraceHash",
+    "derivativeCount",
+    "derivativeSetHash",
+    "jobId",
+    "manifestHash",
+    "originalHash",
+    "recoveredDerivativeCount",
+    "registryHash",
+    "registryId",
+    "renderManifestHash",
+    "rootReferences",
+    "runId",
+    "runSpecificationHash",
+    "trustedRecoveryCheckpoint",
+  ],
+  "Doubao recovery CLI result",
+);
+assertExactObjectKeys(
+  parsedRecoveryResult.rootReferences,
+  ["artifactRecovery", "checkpoint", "runSpecification"],
+  "Doubao recovery CLI result.rootReferences",
+);
+assertExactObjectKeys(
+  parsedRecoveryResult.trustedRecoveryCheckpoint,
+  ["checkpointId", "purpose", "schemaVersion"],
+  "Doubao recovery CLI result.trustedRecoveryCheckpoint",
+);
+assertExactObjectKeys(
+  parsedRecoveryResult.binaryValidation,
+  ["contactSheetPngCount", "pptxSlideCount", "staticPngCount"],
+  "Doubao recovery CLI result.binaryValidation",
+);
 if (
   parsedRecoveryResult.registryId !== registryId ||
   parsedRecoveryResult.manifestHash !==

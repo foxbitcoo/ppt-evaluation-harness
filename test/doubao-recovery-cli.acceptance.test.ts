@@ -22,6 +22,7 @@ import {
   VENDOR_GENERATION_TIMEOUT_MS,
   VOLCANO_EVALUATION_CASE,
   calculateArtifactDerivativeSetHash,
+  canonicalJsonBytes,
   parseAdapterExecutionConfiguration,
   registerDurableRoots,
   resolveHarnessProductAdapterExecutor,
@@ -51,6 +52,15 @@ const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
       "sha256:fadcc2150e1d5262efa0ba3364c0665b59efd1fd0b536fa65fdc19b7b4613942",
     checkpointTraceHash:
       "sha256:e2c4eca0f43e2a6e4c557094bf428309b355f30e0aa944911c276b8dc7f41398",
+    caseId: "volcano-query-v1",
+    caseVersion: 1,
+    caseContentHash:
+      "sha256:9c2f70e0ef3d5413a0d527475dfd03f29c5feabe17cf719013e2d83af193be18",
+    vendorPromptHash:
+      "sha256:39fec395e6904ca10346a86b85ecae57a35a9196e9897ccab7fe2ab30ccb6ba4",
+    track: "query_generation",
+    protocolId: "production-query-default-cost-v1",
+    referencePackMode: "off",
     pageCount: 16,
     packageId: "doubao-web-ppt-real-provider-replay-v1",
     adapterVersion: "doubao-web-ppt@1",
@@ -101,7 +111,16 @@ type MalformedLineageCase =
   | "trace_evidence_tamper"
   | "trace_event_omission"
   | "trace_event_insertion"
-  | "trace_extra_authorization_field";
+  | "trace_extra_authorization_field"
+  | "manifest_trace_hash_tamper"
+  | "manifest_trace_hash_missing"
+  | "manifest_execution_authorization"
+  | "manifest_execution_hidden_reasoning"
+  | "manifest_receipt_pollution"
+  | "manifest_root_hidden_reasoning"
+  | "run_spec_hidden_authorization"
+  | "run_spec_prompt_swap"
+  | "render_manifest_extra_field";
 
 interface FixtureDerivative {
   derivativeId: string;
@@ -259,27 +278,32 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
       (_, index) => encoder.encode(`text-page-${index + 1}`),
     );
     const contactPayload = Uint8Array.from(minimalPng);
+    const renderManifestObject: Record<string, unknown> = {
+      schemaVersion: "render-manifest-v1",
+      renderManifestId: `${artifactId}-render`,
+      artifactHash: hash(original),
+      artifactId,
+      pageCount: 16,
+      renderer: "fixture-renderer-v1",
+      contactSheet: {
+        contentHash: hash(contactPayload),
+        filename: "contact-sheet.png",
+        mimeType: "image/png",
+      },
+      slides: staticPayloads.map((content, index) => ({
+        pageNumber: index + 1,
+        filename: `slide-${index + 1}.png`,
+        mimeType: "image/png",
+        contentHash: hash(content),
+        extractedTextHash: hash(textPayloads[index]!),
+      })),
+    };
+    if (malformedCase === "render_manifest_extra_field") {
+      renderManifestObject.hiddenReasoning =
+        "must-not-survive-schema-validation";
+    }
     const renderManifest = encoder.encode(
-      JSON.stringify({
-        schemaVersion: "render-manifest-v1",
-        renderManifestId: `${artifactId}-render`,
-        artifactHash: hash(original),
-        artifactId,
-        pageCount: 16,
-        renderer: "fixture-renderer-v1",
-        contactSheet: {
-          contentHash: hash(contactPayload),
-          filename: "contact-sheet.png",
-          mimeType: "image/png",
-        },
-        slides: staticPayloads.map((content, index) => ({
-          pageNumber: index + 1,
-          filename: `slide-${index + 1}.png`,
-          mimeType: "image/png",
-          contentHash: hash(content),
-          extractedTextHash: hash(textPayloads[index]!),
-        })),
-      }),
+      JSON.stringify(renderManifestObject),
     );
     const derivatives: FixtureDerivative[] = [
       ...staticPayloads.map((content, index) => ({
@@ -363,85 +387,148 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
       };
       staticPayloads[0] = adversarial;
     }
-    const manifestReceipt =
+    const manifestReceipt: Record<string, unknown> =
       malformedCase === "receipt_digest_mismatch"
         ? { ...receipt, renderDigest: HASH_A }
         : receipt;
-    const manifest = encoder.encode(
-      JSON.stringify({
-        schemaVersion: "artifact-package-identity-v1",
-        jobId,
-        artifact: {
-          artifactId,
-          runId,
-          contentHash: hash(original),
-          provenance: "PRODUCTION_REPLAY",
-          mimeType:
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-          byteSize: original.byteLength,
-          pageCount: 16,
-          capturedAt: "2026-07-27T10:45:58.000Z",
-          filename: "doubao-volcano-16.pptx",
-        },
-        renderManifestId: `${artifactId}-render`,
-        renderManifestHash: hash(renderManifest),
-        renderOutcome: "degraded",
-        derivatives,
-        productionExecutionEvidence: {
-          executionMode: "PRODUCTION_REPLAY",
+    if (malformedCase === "manifest_receipt_pollution") {
+      manifestReceipt.hiddenAuthorization =
+        "must-not-survive-schema-validation";
+    }
+    const productionExecutionEvidence: Record<string, unknown> = {
+      executionMode: "PRODUCTION_REPLAY",
+      captureSource: "REAL_PROVIDER_CAPTURE",
+      driverSessionId: "session_replay_fixture",
+      driverVersion: "doubao-harness-browser-bridge@2",
+      adapterVersion,
+      outcome: "captured",
+      vendorTaskId: productionVendorTaskId,
+      taskStateVersion: "artifact_exported@4",
+      artifactContentHash: hash(original),
+      rasterManifestHash: hash(renderManifest),
+      traceHash:
+        malformedCase === "manifest_trace_hash_tamper"
+          ? HASH_A
+          : OFFLINE_RECOVERY_FIXTURE_CHECKPOINT.checkpointTraceHash,
+      captureReceipt: manifestReceipt,
+    };
+    if (malformedCase === "manifest_trace_hash_missing") {
+      delete productionExecutionEvidence.traceHash;
+    } else if (
+      malformedCase === "manifest_execution_authorization"
+    ) {
+      productionExecutionEvidence.authorization =
+        "must-not-survive-schema-validation";
+    } else if (
+      malformedCase === "manifest_execution_hidden_reasoning"
+    ) {
+      productionExecutionEvidence.hiddenReasoning =
+        "must-not-survive-schema-validation";
+    }
+    const manifestObject: Record<string, unknown> = {
+      schemaVersion: "artifact-package-identity-v1",
+      jobId,
+      artifact: {
+        artifactId,
+        runId,
+        contentHash: hash(original),
+        provenance: "PRODUCTION_REPLAY",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        byteSize: original.byteLength,
+        pageCount: 16,
+        capturedAt: "2026-07-27T10:45:58.000Z",
+        filename: "doubao-volcano-16.pptx",
+      },
+      renderManifestId: `${artifactId}-render`,
+      renderManifestHash: hash(renderManifest),
+      renderOutcome: "degraded",
+      derivatives,
+      productionExecutionEvidence,
+    };
+    if (malformedCase === "manifest_root_hidden_reasoning") {
+      manifestObject.hiddenReasoning =
+        "must-not-survive-schema-validation";
+    }
+    const manifest = encoder.encode(JSON.stringify(manifestObject));
+    const evaluationCase: Record<string, unknown> = {
+      audience: "初中生",
+      caseId,
+      caseVersion: 1,
+      dataClassification: "public_or_synthetic",
+      environmentOrigin: {
+        environment: "production",
+        originId: "production:ppt-evaluation-v1",
+      },
+      provenance: "PRODUCTION",
+      readingMode: "self_reading",
+      recordId: "production-case-volcano-query-v1",
+      sourceOwner: "ppt-evaluation-harness",
+      targetPageCount: 16,
+      title: "火山为什么会喷发",
+      track: "query_generation",
+      vendorPrompt:
+        "为初中生制作一份供自主阅读的 16 页《火山为什么会喷发》科普 PPT。共 16 页：第 1 页为封面，第 2 页为目录，第 3–15 页为正文，第 16 页为总结/知识回顾；不要单独的封底或致谢页。",
+    };
+    if (malformedCase === "run_spec_prompt_swap") {
+      evaluationCase.vendorPrompt =
+        "为董事会制作一份 16 页企业财报分析 PPT。";
+      evaluationCase.title = "企业财报分析";
+    }
+    const runSpecificationObject: Record<string, unknown> = {
+      schemaVersion: "run-specification-bundle-v1",
+      jobId,
+      runId:
+        malformedCase === "wrong_run_spec"
+          ? "run-doubao-wrong"
+          : runId,
+      specCommitSha: BUILD_SPEC_COMMIT_SHA,
+      evaluationCase,
+      versionReferences: {
+        caseContentHash: hash(canonicalJsonBytes(evaluationCase)),
+      },
+      protocolSnapshot: {
+        protocolId: "production-query-default-cost-v1",
+        referencePackMode: "off",
+        timeoutMs: 1_800_000,
+        retryPolicy: "one_if_provably_not_submitted",
+        resultSelectionPolicy: "first_policy_compliant_artifact",
+        cancellationPolicy: "independent_vendor_runs_continue",
+      },
+      productPackage: {
+        packageId: "doubao-web-ppt-real-provider-replay-v1",
+        vendorId: "doubao",
+        adapterVersion,
+        provenance: "PRODUCTION_REPLAY",
+      },
+      adapterSpecification: {
+        packageId: "doubao-web-ppt-real-provider-replay-v1",
+        vendorId: "doubao",
+        adapterVersion,
+        implementationDigest: HASH_A,
+        executionEntrypointDigest: HASH_A,
+        executionConfigurationDigest: HASH_A,
+        browserDriverEvidence: {
+          driverId: "doubao-real-provider-replay",
+          provenance:
+            malformedCase === "provenance"
+              ? "TEST_FAKE"
+              : "PRODUCTION_REPLAY",
           captureSource: "REAL_PROVIDER_CAPTURE",
-          adapterVersion,
-          vendorTaskId: productionVendorTaskId,
-          taskStateVersion: "artifact_exported@4",
-          artifactContentHash: hash(original),
-          rasterManifestHash: hash(renderManifest),
-          captureReceipt: manifestReceipt,
-        },
-      }),
-    );
-    const runSpecification = encoder.encode(
-      JSON.stringify({
-        schemaVersion: "run-specification-bundle-v1",
-        jobId,
-        runId:
-          malformedCase === "wrong_run_spec"
-            ? "run-doubao-wrong"
-            : runId,
-        specCommitSha: BUILD_SPEC_COMMIT_SHA,
-        evaluationCase: {
-          caseId,
-          provenance: "PRODUCTION",
-          targetPageCount: 16,
-          track: "query_generation",
-        },
-        productPackage: {
-          packageId: "doubao-web-ppt-real-provider-replay-v1",
-          vendorId: "doubao",
-          adapterVersion,
-          provenance: "PRODUCTION_REPLAY",
-        },
-        adapterSpecification: {
-          packageId: "doubao-web-ppt-real-provider-replay-v1",
-          vendorId: "doubao",
-          adapterVersion,
+          driverVersion: "doubao-harness-browser-bridge@2",
+          browserProfileDigest: HASH_A,
           implementationDigest: HASH_A,
-          executionEntrypointDigest: HASH_A,
-          executionConfigurationDigest: HASH_A,
-          browserDriverEvidence: {
-            driverId: "doubao-real-provider-replay",
-            provenance:
-              malformedCase === "provenance"
-                ? "TEST_FAKE"
-                : "PRODUCTION_REPLAY",
-            captureSource: "REAL_PROVIDER_CAPTURE",
-            driverVersion: "doubao-harness-browser-bridge@2",
-            browserProfileDigest: HASH_A,
-            implementationDigest: HASH_A,
-            configurationDigest: HASH_A,
-            captureReceipt: receipt,
-          },
+          configurationDigest: HASH_A,
+          captureReceipt: receipt,
         },
-      }),
+      },
+    };
+    if (malformedCase === "run_spec_hidden_authorization") {
+      runSpecificationObject.hiddenAuthorization =
+        "must-not-survive-schema-validation";
+    }
+    const runSpecification = encoder.encode(
+      JSON.stringify(runSpecificationObject),
     );
     const runSpecificationHash = hash(runSpecification);
     const specificationKey =
@@ -667,7 +754,7 @@ test("the recovery validator rejects a complete self-consistent bundle not ancho
 test("the recovery validator rejects a valid bundle presented under the wrong trusted checkpoint", async () => {
   await assert.rejects(
     runRecoveryFixture("wrong_checkpoint"),
-    /trusted checkpoint|not allowlisted/i,
+    /trusted checkpoint|not allowlisted|schema/i,
   );
 });
 
@@ -712,6 +799,57 @@ test("the recovery validator rejects non-schema checkpoint fields before they ca
   await assert.rejects(
     runRecoveryFixture("trace_extra_authorization_field"),
     /checkpoint.*schema|unexpected.*field/i,
+  );
+});
+
+test("the recovery validator requires manifest execution traceHash to equal the actual persisted checkpoint Trace", async (context) => {
+  for (const malformedCase of [
+    "manifest_trace_hash_tamper",
+    "manifest_trace_hash_missing",
+  ] as const) {
+    await context.test(malformedCase, async () => {
+      await assert.rejects(
+        runRecoveryFixture(malformedCase),
+        /traceHash|checkpoint Trace|schema/i,
+      );
+    });
+  }
+});
+
+test("the recovery validator rejects unknown fields throughout authenticated manifest evidence", async (context) => {
+  for (const malformedCase of [
+    "manifest_execution_authorization",
+    "manifest_execution_hidden_reasoning",
+    "manifest_receipt_pollution",
+    "manifest_root_hidden_reasoning",
+  ] as const) {
+    await context.test(malformedCase, async () => {
+      await assert.rejects(
+        runRecoveryFixture(malformedCase),
+        /schema|unexpected field/i,
+      );
+    });
+  }
+});
+
+test("the recovery validator rejects a self-hashed replacement Query and unknown Run Specification fields", async (context) => {
+  for (const malformedCase of [
+    "run_spec_prompt_swap",
+    "run_spec_hidden_authorization",
+  ] as const) {
+    await context.test(malformedCase, async () => {
+      await assert.rejects(
+        runRecoveryFixture(malformedCase),
+        /Run Specification|evaluation Case|trusted checkpoint|schema/i,
+      );
+    });
+  }
+});
+
+test("the recovery validator rejects unknown render-manifest fields", async () => {
+  await assert.rejects(
+    runRecoveryFixture("render_manifest_extra_field"),
+    /render manifest.*schema|unexpected field/i,
   );
 });
 

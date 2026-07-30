@@ -128,6 +128,11 @@ rejects every non-schema field, and requires its hash to match the
 harness-owned recovery checkpoint before returning trusted recovery output.
 The retained PPTX must also decode as exactly 16 safe OPC slides, and both the
 driver metadata and decoded slide count must independently equal 16.
+Artifact, execution-evidence, receipt, Run Specification, product/driver,
+render-manifest, derivative, and recovery-result objects all use explicit
+exact-key schemas. The trusted checkpoint also pins the complete frozen
+evaluation Case hash, vendor-prompt hash, Case version/track, protocol, and
+Reference Pack mode, so a self-hashed replacement Query is not recoverable.
 
 ## Static render hashes
 

@@ -62,6 +62,103 @@ interface ValidatedReceipt {
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const hash = (content: Uint8Array): Sha256 =>
   `sha256:${createHash("sha256").update(content).digest("hex")}`;
+const RECEIPT_KEYS = Object.freeze([
+  "captureId",
+  "artifactContentHash",
+  "traceDigest",
+  "retainedPageDigest",
+  "renderDigest",
+]);
+const ARTIFACT_KEYS = Object.freeze([
+  "artifactId",
+  "runId",
+  "contentHash",
+  "mimeType",
+  "byteSize",
+  "pageCount",
+  "capturedAt",
+  "filename",
+]);
+const DERIVATIVE_KEYS = Object.freeze([
+  "derivativeId",
+  "sourceArtifactId",
+  "derivativeType",
+  "pageNumber",
+  "filename",
+  "mimeType",
+  "byteSize",
+  "contentHash",
+  "pipelineVersion",
+]);
+const EXECUTION_EVIDENCE_KEYS = Object.freeze([
+  "executionMode",
+  "captureSource",
+  "driverSessionId",
+  "driverVersion",
+  "adapterVersion",
+  "outcome",
+  "vendorTaskId",
+  "taskStateVersion",
+  "artifactContentHash",
+  "rasterManifestHash",
+  "traceHash",
+  "captureReceipt",
+]);
+const EVALUATION_CASE_KEYS = Object.freeze([
+  "audience",
+  "caseId",
+  "caseVersion",
+  "dataClassification",
+  "environmentOrigin",
+  "provenance",
+  "readingMode",
+  "recordId",
+  "sourceOwner",
+  "targetPageCount",
+  "title",
+  "track",
+  "vendorPrompt",
+]);
+const PROTOCOL_KEYS = Object.freeze([
+  "cancellationPolicy",
+  "protocolId",
+  "referencePackMode",
+  "resultSelectionPolicy",
+  "retryPolicy",
+  "timeoutMs",
+]);
+const BROWSER_EVIDENCE_KEYS = Object.freeze([
+  "browserProfileDigest",
+  "captureReceipt",
+  "captureSource",
+  "configurationDigest",
+  "driverId",
+  "driverVersion",
+  "implementationDigest",
+  "provenance",
+]);
+const ENVIRONMENT_ORIGIN_KEYS = Object.freeze([
+  "environment",
+  "originId",
+]);
+const EGRESS_DESTINATION_KEYS = Object.freeze([
+  "subprocessors",
+  "targetAccount",
+  "targetRegion",
+  "targetService",
+]);
+const RENDER_SLIDE_KEYS = Object.freeze([
+  "pageNumber",
+  "contentHash",
+  "filename",
+  "mimeType",
+  "extractedTextHash",
+]);
+const CONTACT_SHEET_KEYS = Object.freeze([
+  "contentHash",
+  "filename",
+  "mimeType",
+]);
 
 function record(value: unknown, label: string): JsonRecord {
   if (
@@ -147,6 +244,7 @@ function iso(value: unknown, label: string): string {
 
 function receipt(value: unknown, label: string): ValidatedReceipt {
   const candidate = record(value, label);
+  exactKeys(candidate, RECEIPT_KEYS, label);
   return Object.freeze({
     captureId: text(candidate.captureId, `${label}.captureId`),
     artifactContentHash: sha(
@@ -237,6 +335,32 @@ if (
 }
 
 const manifestIdentity = json(manifest, "Artifact manifest");
+exactKeys(
+  manifestIdentity,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? [
+        "artifact",
+        "derivatives",
+        "fidelity",
+        "jobId",
+        "productionExecutionEvidence",
+        "renderManifestHash",
+        "renderManifestId",
+        "renderOutcome",
+        "schemaVersion",
+      ]
+    : [
+        "artifact",
+        "derivatives",
+        "jobId",
+        "productionExecutionEvidence",
+        "renderManifestHash",
+        "renderManifestId",
+        "renderOutcome",
+        "schemaVersion",
+      ],
+  "Artifact manifest",
+);
 text(
   manifestIdentity.schemaVersion,
   "Artifact manifest.schemaVersion",
@@ -245,6 +369,13 @@ text(
 const jobId = text(manifestIdentity.jobId, "Artifact manifest.jobId");
 const artifact = record(
   manifestIdentity.artifact,
+  "Artifact manifest.artifact",
+);
+exactKeys(
+  artifact,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? ARTIFACT_KEYS
+    : [...ARTIFACT_KEYS, "provenance"],
   "Artifact manifest.artifact",
 );
 const artifactId = text(
@@ -276,6 +407,37 @@ integer(
 );
 iso(artifact.capturedAt, "Artifact manifest.artifact.capturedAt");
 text(artifact.filename, "Artifact manifest.artifact.filename");
+if (trustedCheckpoint.purpose !== "real_provider_recovery") {
+  text(
+    artifact.provenance,
+    "Artifact manifest.artifact.provenance",
+    "PRODUCTION_REPLAY",
+  );
+}
+if (trustedCheckpoint.purpose === "real_provider_recovery") {
+  const fidelity = record(
+    manifestIdentity.fidelity,
+    "Artifact manifest.fidelity",
+  );
+  exactKeys(
+    fidelity,
+    ["notes", "status"],
+    "Artifact manifest.fidelity",
+  );
+  text(
+    fidelity.status,
+    "Artifact manifest.fidelity.status",
+    "degraded",
+  );
+  if (
+    !Array.isArray(fidelity.notes) ||
+    fidelity.notes.some((note) => typeof note !== "string")
+  ) {
+    throw new Error(
+      "Durable Doubao recovery Artifact manifest.fidelity.notes schema is invalid",
+    );
+  }
+}
 const renderManifestId = text(
   manifestIdentity.renderManifestId,
   "Artifact manifest.renderManifestId",
@@ -319,6 +481,11 @@ const derivatives: ValidatedDerivative[] = rawDerivatives.map(
   (value, index) => {
     const candidate = record(
       value,
+      `Artifact manifest.derivatives[${index}]`,
+    );
+    exactKeys(
+      candidate,
+      DERIVATIVE_KEYS,
       `Artifact manifest.derivatives[${index}]`,
     );
     const derivativeType = text(
@@ -388,6 +555,11 @@ const executionEvidence = record(
   manifestIdentity.productionExecutionEvidence,
   "Artifact manifest.productionExecutionEvidence",
 );
+exactKeys(
+  executionEvidence,
+  EXECUTION_EVIDENCE_KEYS,
+  "Artifact manifest.productionExecutionEvidence",
+);
 text(
   executionEvidence.executionMode,
   "Artifact manifest.executionMode",
@@ -402,6 +574,24 @@ const adapterVersion = text(
   executionEvidence.adapterVersion,
   "Artifact manifest.adapterVersion",
   "doubao-web-ppt@1",
+);
+text(
+  executionEvidence.driverSessionId,
+  "Artifact manifest.driverSessionId",
+);
+text(
+  executionEvidence.driverVersion,
+  "Artifact manifest.driverVersion",
+  trustedCheckpoint.driverVersion,
+);
+text(
+  executionEvidence.outcome,
+  "Artifact manifest.outcome",
+  "captured",
+);
+const manifestTraceHash = sha(
+  executionEvidence.traceHash,
+  "Artifact manifest.productionExecutionEvidence.traceHash",
 );
 const manifestVendorTaskId = text(
   executionEvidence.vendorTaskId,
@@ -434,6 +624,39 @@ const runSpecificationBundle = json(
   runSpecification,
   "Run Specification",
 );
+exactKeys(
+  runSpecificationBundle,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? [
+        "adapterSpecification",
+        "environmentEvidence",
+        "estimatorSnapshot",
+        "evaluationCase",
+        "jobId",
+        "productPackage",
+        "protocolSnapshot",
+        "rubricSnapshot",
+        "runId",
+        "runnerCodeEvidence",
+        "runnerImageEvidence",
+        "schemaSnapshot",
+        "schemaVersion",
+        "specCommitSha",
+        "versionReferences",
+      ]
+    : [
+        "adapterSpecification",
+        "evaluationCase",
+        "jobId",
+        "productPackage",
+        "protocolSnapshot",
+        "runId",
+        "schemaVersion",
+        "specCommitSha",
+        "versionReferences",
+      ],
+  "Run Specification",
+);
 text(
   runSpecificationBundle.schemaVersion,
   "Run Specification.schemaVersion",
@@ -462,9 +685,81 @@ const evaluationCase = record(
   runSpecificationBundle.evaluationCase,
   "Run Specification.evaluationCase",
 );
+exactKeys(
+  evaluationCase,
+  EVALUATION_CASE_KEYS,
+  "Run Specification.evaluationCase",
+);
 const caseId = text(
   evaluationCase.caseId,
   "Run Specification.evaluationCase.caseId",
+);
+const caseVersion = integer(
+  evaluationCase.caseVersion,
+  "Run Specification.evaluationCase.caseVersion",
+);
+const vendorPrompt = text(
+  evaluationCase.vendorPrompt,
+  "Run Specification.evaluationCase.vendorPrompt",
+);
+const vendorPromptHash = hash(canonicalJsonBytes(vendorPrompt));
+const caseContentHash = hash(canonicalJsonBytes(evaluationCase));
+const versionReferences = record(
+  runSpecificationBundle.versionReferences,
+  "Run Specification.versionReferences",
+);
+exactKeys(
+  versionReferences,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? [
+        "adapterSpecificationHash",
+        "adapterVersion",
+        "caseContentHash",
+        "caseVersion",
+        "environmentEvidenceHash",
+        "estimatorSnapshotHash",
+        "productPackageContentHash",
+        "productPackageVersion",
+        "protocolSnapshotContentHash",
+        "rubricSnapshotHash",
+        "rubricVersion",
+        "runnerCodeDigest",
+        "runnerImageDigest",
+        "runPolicyVersion",
+        "schemaSnapshotHash",
+        "schemaVersion",
+      ]
+    : ["caseContentHash"],
+  "Run Specification.versionReferences",
+);
+if (
+  sha(
+    versionReferences.caseContentHash,
+    "Run Specification.versionReferences.caseContentHash",
+  ) !== caseContentHash
+) {
+  throw new Error(
+    "Durable Doubao recovery Run Specification evaluation Case hash mismatch",
+  );
+}
+const caseEnvironmentOrigin = record(
+  evaluationCase.environmentOrigin,
+  "Run Specification.evaluationCase.environmentOrigin",
+);
+exactKeys(
+  caseEnvironmentOrigin,
+  ENVIRONMENT_ORIGIN_KEYS,
+  "Run Specification.evaluationCase.environmentOrigin",
+);
+text(
+  caseEnvironmentOrigin.environment,
+  "Run Specification.evaluationCase.environmentOrigin.environment",
+  "production",
+);
+text(
+  caseEnvironmentOrigin.originId,
+  "Run Specification.evaluationCase.environmentOrigin.originId",
+  "production:ppt-evaluation-v1",
 );
 text(
   evaluationCase.provenance,
@@ -476,13 +771,71 @@ integer(
   "Run Specification.evaluationCase.targetPageCount",
   16,
 );
-text(
+const track = text(
   evaluationCase.track,
   "Run Specification.evaluationCase.track",
   "query_generation",
 );
+const protocolSnapshot = record(
+  runSpecificationBundle.protocolSnapshot,
+  "Run Specification.protocolSnapshot",
+);
+exactKeys(
+  protocolSnapshot,
+  PROTOCOL_KEYS,
+  "Run Specification.protocolSnapshot",
+);
+const protocolId = text(
+  protocolSnapshot.protocolId,
+  "Run Specification.protocolSnapshot.protocolId",
+);
+const referencePackMode = text(
+  protocolSnapshot.referencePackMode,
+  "Run Specification.protocolSnapshot.referencePackMode",
+);
+integer(
+  protocolSnapshot.timeoutMs,
+  "Run Specification.protocolSnapshot.timeoutMs",
+  1_800_000,
+);
+text(
+  protocolSnapshot.retryPolicy,
+  "Run Specification.protocolSnapshot.retryPolicy",
+  "one_if_provably_not_submitted",
+);
+text(
+  protocolSnapshot.resultSelectionPolicy,
+  "Run Specification.protocolSnapshot.resultSelectionPolicy",
+  "first_policy_compliant_artifact",
+);
+text(
+  protocolSnapshot.cancellationPolicy,
+  "Run Specification.protocolSnapshot.cancellationPolicy",
+  "independent_vendor_runs_continue",
+);
 const productPackage = record(
   runSpecificationBundle.productPackage,
+  "Run Specification.productPackage",
+);
+exactKeys(
+  productPackage,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? [
+        "adapterVersion",
+        "displayName",
+        "egressDestination",
+        "environmentOrigin",
+        "evaluationConfiguration",
+        "packageId",
+        "provenance",
+        "vendorId",
+      ]
+    : [
+        "adapterVersion",
+        "packageId",
+        "provenance",
+        "vendorId",
+      ],
   "Run Specification.productPackage",
 );
 const packageId = text(
@@ -508,8 +861,87 @@ if (
     "Durable Doubao recovery Run Specification package lineage mismatch",
   );
 }
+if (trustedCheckpoint.purpose === "real_provider_recovery") {
+  const productEnvironmentOrigin = record(
+    productPackage.environmentOrigin,
+    "Run Specification.productPackage.environmentOrigin",
+  );
+  exactKeys(
+    productEnvironmentOrigin,
+    ENVIRONMENT_ORIGIN_KEYS,
+    "Run Specification.productPackage.environmentOrigin",
+  );
+  const productEgress = record(
+    productPackage.egressDestination,
+    "Run Specification.productPackage.egressDestination",
+  );
+  exactKeys(
+    productEgress,
+    EGRESS_DESTINATION_KEYS,
+    "Run Specification.productPackage.egressDestination",
+  );
+  if (
+    !Array.isArray(productEgress.subprocessors) ||
+    productEgress.subprocessors.length !== 0
+  ) {
+    throw new Error(
+      "Durable Doubao recovery product egress subprocessors schema is invalid",
+    );
+  }
+  const evaluationConfiguration = record(
+    productPackage.evaluationConfiguration,
+    "Run Specification.productPackage.evaluationConfiguration",
+  );
+  exactKeys(
+    evaluationConfiguration,
+    [
+      "accountContext",
+      "benchmarkProtocol",
+      "entryUrl",
+      "modelSelection",
+      "networking",
+      "purchasePolicy",
+      "requestedPageCount",
+    ],
+    "Run Specification.productPackage.evaluationConfiguration",
+  );
+  integer(
+    evaluationConfiguration.requestedPageCount,
+    "Run Specification.productPackage.evaluationConfiguration.requestedPageCount",
+    16,
+  );
+}
 const adapterSpecification = record(
   runSpecificationBundle.adapterSpecification,
+  "Run Specification.adapterSpecification",
+);
+exactKeys(
+  adapterSpecification,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? [
+        "adapterVersion",
+        "browserDriverEvidence",
+        "egressDestination",
+        "executionConfiguration",
+        "executionConfigurationDigest",
+        "executionConfigurationPackageByteSize",
+        "executionConfigurationPackageName",
+        "executionEntrypointDigest",
+        "implementationDigest",
+        "implementationPackageByteSize",
+        "implementationPackageName",
+        "packageId",
+        "vendorId",
+      ]
+    : [
+        "adapterVersion",
+        "browserDriverEvidence",
+        "executionConfigurationDigest",
+        "executionEntrypointDigest",
+        "implementationDigest",
+        "packageId",
+        "vendorId",
+      ],
   "Run Specification.adapterSpecification",
 );
 if (
@@ -544,6 +976,11 @@ const executionConfigurationDigest = sha(
 );
 const browserEvidence = record(
   adapterSpecification.browserDriverEvidence,
+  "Run Specification.browserDriverEvidence",
+);
+exactKeys(
+  browserEvidence,
+  BROWSER_EVIDENCE_KEYS,
   "Run Specification.browserDriverEvidence",
 );
 const browserDriverId = text(
@@ -581,6 +1018,176 @@ const runSpecificationReceipt = receipt(
   browserEvidence.captureReceipt,
   "Run Specification.captureReceipt",
 );
+if (trustedCheckpoint.purpose === "real_provider_recovery") {
+  const adapterEgress = record(
+    adapterSpecification.egressDestination,
+    "Run Specification.adapterSpecification.egressDestination",
+  );
+  exactKeys(
+    adapterEgress,
+    EGRESS_DESTINATION_KEYS,
+    "Run Specification.adapterSpecification.egressDestination",
+  );
+  if (
+    !Array.isArray(adapterEgress.subprocessors) ||
+    adapterEgress.subprocessors.length !== 0
+  ) {
+    throw new Error(
+      "Durable Doubao recovery adapter egress subprocessors schema is invalid",
+    );
+  }
+  const executionConfiguration = record(
+    adapterSpecification.executionConfiguration,
+    "Run Specification.adapterSpecification.executionConfiguration",
+  );
+  exactKeys(
+    executionConfiguration,
+    ["adapterKind", "scenario", "schemaVersion"],
+    "Run Specification.adapterSpecification.executionConfiguration",
+  );
+  integer(
+    adapterSpecification.executionConfigurationPackageByteSize,
+    "Run Specification.adapterSpecification.executionConfigurationPackageByteSize",
+  );
+  integer(
+    adapterSpecification.implementationPackageByteSize,
+    "Run Specification.adapterSpecification.implementationPackageByteSize",
+  );
+  text(
+    adapterSpecification.executionConfigurationPackageName,
+    "Run Specification.adapterSpecification.executionConfigurationPackageName",
+  );
+  text(
+    adapterSpecification.implementationPackageName,
+    "Run Specification.adapterSpecification.implementationPackageName",
+  );
+
+  const environmentEvidence = record(
+    runSpecificationBundle.environmentEvidence,
+    "Run Specification.environmentEvidence",
+  );
+  exactKeys(
+    environmentEvidence,
+    [
+      "architecture",
+      "environmentOriginId",
+      "nodeVersion",
+      "platform",
+      "targetEnvironment",
+    ],
+    "Run Specification.environmentEvidence",
+  );
+  const estimatorSnapshot = record(
+    runSpecificationBundle.estimatorSnapshot,
+    "Run Specification.estimatorSnapshot",
+  );
+  exactKeys(
+    estimatorSnapshot,
+    ["deliveryGate", "estimatorVersion", "scoringScale"],
+    "Run Specification.estimatorSnapshot",
+  );
+  const rubricSnapshot = record(
+    runSpecificationBundle.rubricSnapshot,
+    "Run Specification.rubricSnapshot",
+  );
+  exactKeys(
+    rubricSnapshot,
+    ["dimensions", "rubricVersion"],
+    "Run Specification.rubricSnapshot",
+  );
+  if (
+    !Array.isArray(rubricSnapshot.dimensions) ||
+    rubricSnapshot.dimensions.some(
+      (dimension) => typeof dimension !== "string",
+    )
+  ) {
+    throw new Error(
+      "Durable Doubao recovery rubric dimensions schema is invalid",
+    );
+  }
+  const runnerCodeEvidence = record(
+    runSpecificationBundle.runnerCodeEvidence,
+    "Run Specification.runnerCodeEvidence",
+  );
+  exactKeys(
+    runnerCodeEvidence,
+    ["contentHash", "entrypoint", "files", "specCommitSha"],
+    "Run Specification.runnerCodeEvidence",
+  );
+  if (!Array.isArray(runnerCodeEvidence.files)) {
+    throw new Error(
+      "Durable Doubao recovery runner code files schema is invalid",
+    );
+  }
+  runnerCodeEvidence.files.forEach((value, index) => {
+    const file = record(
+      value,
+      `Run Specification.runnerCodeEvidence.files[${index}]`,
+    );
+    exactKeys(
+      file,
+      ["contentHash", "path"],
+      `Run Specification.runnerCodeEvidence.files[${index}]`,
+    );
+    sha(
+      file.contentHash,
+      `Run Specification.runnerCodeEvidence.files[${index}].contentHash`,
+    );
+    text(
+      file.path,
+      `Run Specification.runnerCodeEvidence.files[${index}].path`,
+    );
+  });
+  const runnerImageEvidence = record(
+    runSpecificationBundle.runnerImageEvidence,
+    "Run Specification.runnerImageEvidence",
+  );
+  exactKeys(
+    runnerImageEvidence,
+    [
+      "contentHash",
+      "imageReference",
+      "runtimeFamily",
+      "runtimePackageManifest",
+      "runtimeVersion",
+    ],
+    "Run Specification.runnerImageEvidence",
+  );
+  const runtimePackageManifest = record(
+    runnerImageEvidence.runtimePackageManifest,
+    "Run Specification.runnerImageEvidence.runtimePackageManifest",
+  );
+  exactKeys(
+    runtimePackageManifest,
+    [
+      "architecture",
+      "dependencyLockHash",
+      "nodeExecutableHash",
+      "platform",
+      "runnerBundleHash",
+    ],
+    "Run Specification.runnerImageEvidence.runtimePackageManifest",
+  );
+  const schemaSnapshot = record(
+    runSpecificationBundle.schemaSnapshot,
+    "Run Specification.schemaSnapshot",
+  );
+  exactKeys(
+    schemaSnapshot,
+    ["requiredLineage", "schemaVersion"],
+    "Run Specification.schemaSnapshot",
+  );
+  if (
+    !Array.isArray(schemaSnapshot.requiredLineage) ||
+    schemaSnapshot.requiredLineage.some(
+      (entry) => typeof entry !== "string",
+    )
+  ) {
+    throw new Error(
+      "Durable Doubao recovery schema lineage schema is invalid",
+    );
+  }
+}
 if (!sameReceipt(manifestReceipt, runSpecificationReceipt)) {
   throw new Error(
     "Durable Doubao recovery capture receipt provenance mismatch",
@@ -606,6 +1213,37 @@ if (
   throw new Error("Durable Doubao recovery render manifest hash mismatch");
 }
 const renderIdentity = json(renderManifest, "render manifest");
+exactKeys(
+  renderIdentity,
+  trustedCheckpoint.purpose === "real_provider_recovery"
+    ? [
+        "artifactHash",
+        "artifactId",
+        "contactSheet",
+        "environmentOrigin",
+        "fidelity",
+        "pageCount",
+        "provenance",
+        "renderer",
+        "rendererAuthorizationDecisionId",
+        "renderManifestId",
+        "renderOutcome",
+        "renderPolicy",
+        "schemaVersion",
+        "slides",
+      ]
+    : [
+        "artifactHash",
+        "artifactId",
+        "contactSheet",
+        "pageCount",
+        "renderer",
+        "renderManifestId",
+        "schemaVersion",
+        "slides",
+      ],
+  "render manifest",
+);
 text(
   renderIdentity.schemaVersion,
   "render manifest.schemaVersion",
@@ -636,6 +1274,11 @@ if (!Array.isArray(rawSlides) || rawSlides.length !== 16) {
 }
 const slides = rawSlides.map((value, index) => {
   const slide = record(value, `render manifest.slides[${index}]`);
+  exactKeys(
+    slide,
+    RENDER_SLIDE_KEYS,
+    `render manifest.slides[${index}]`,
+  );
   return Object.freeze({
     pageNumber: integer(
       slide.pageNumber,
@@ -665,6 +1308,11 @@ const contactSheet = record(
   renderIdentity.contactSheet,
   "render manifest.contactSheet",
 );
+exactKeys(
+  contactSheet,
+  CONTACT_SHEET_KEYS,
+  "render manifest.contactSheet",
+);
 const contactSheetHash = sha(
   contactSheet.contentHash,
   "render manifest.contactSheet.contentHash",
@@ -678,6 +1326,63 @@ text(
   "render manifest.contactSheet.mimeType",
   "image/png",
 );
+if (trustedCheckpoint.purpose === "real_provider_recovery") {
+  const renderEnvironmentOrigin = record(
+    renderIdentity.environmentOrigin,
+    "render manifest.environmentOrigin",
+  );
+  exactKeys(
+    renderEnvironmentOrigin,
+    ENVIRONMENT_ORIGIN_KEYS,
+    "render manifest.environmentOrigin",
+  );
+  const renderFidelity = record(
+    renderIdentity.fidelity,
+    "render manifest.fidelity",
+  );
+  exactKeys(
+    renderFidelity,
+    ["notes", "status"],
+    "render manifest.fidelity",
+  );
+  if (
+    !Array.isArray(renderFidelity.notes) ||
+    renderFidelity.notes.some((note) => typeof note !== "string")
+  ) {
+    throw new Error(
+      "Durable Doubao recovery render manifest fidelity notes schema is invalid",
+    );
+  }
+  const renderPolicy = record(
+    renderIdentity.renderPolicy,
+    "render manifest.renderPolicy",
+  );
+  exactKeys(
+    renderPolicy,
+    [
+      "animationPolicy",
+      "colorProfile",
+      "externalAssetPolicy",
+      "fontPack",
+      "resolution",
+    ],
+    "render manifest.renderPolicy",
+  );
+  text(
+    renderIdentity.provenance,
+    "render manifest.provenance",
+    "PRODUCTION_REPLAY",
+  );
+  text(
+    renderIdentity.rendererAuthorizationDecisionId,
+    "render manifest.rendererAuthorizationDecisionId",
+  );
+  text(
+    renderIdentity.renderOutcome,
+    "render manifest.renderOutcome",
+    "degraded",
+  );
+}
 
 const expectedDerivative = (
   derivativeType: "static_slide" | "extracted_text",
@@ -823,6 +1528,13 @@ if (
 }
 if (
   artifactContentHash !== trustedCheckpoint.artifactContentHash ||
+  caseId !== trustedCheckpoint.caseId ||
+  caseVersion !== trustedCheckpoint.caseVersion ||
+  caseContentHash !== trustedCheckpoint.caseContentHash ||
+  vendorPromptHash !== trustedCheckpoint.vendorPromptHash ||
+  track !== trustedCheckpoint.track ||
+  protocolId !== trustedCheckpoint.protocolId ||
+  referencePackMode !== trustedCheckpoint.referencePackMode ||
   trustedCheckpoint.pageCount !== 16 ||
   packageId !== trustedCheckpoint.packageId ||
   adapterVersion !== trustedCheckpoint.adapterVersion ||
@@ -958,10 +1670,11 @@ checkpoints.forEach((event, index) => {
 });
 const checkpointTraceHash = hash(canonicalJsonBytes(checkpoints));
 if (
-  checkpointTraceHash !== trustedCheckpoint.checkpointTraceHash
+  checkpointTraceHash !== trustedCheckpoint.checkpointTraceHash ||
+  manifestTraceHash !== checkpointTraceHash
 ) {
   throw new Error(
-    "Durable Doubao recovery checkpoint Trace does not match the harness-owned trusted checkpoint",
+    "Durable Doubao recovery manifest traceHash and checkpoint Trace do not match the harness-owned trusted checkpoint",
   );
 }
 if (

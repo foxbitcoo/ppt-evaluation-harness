@@ -1437,7 +1437,7 @@ export function resolveDoubaoProductionExecutor(
             outcome: "captured" as const,
             artifactContentHash: contentHash,
             traceHash: sha256(
-              encoder.encode(JSON.stringify(observableEvents)),
+              canonicalJsonBytes(observableEvents),
             ),
             ...(driverEvidence.captureReceipt === undefined
               ? {}
