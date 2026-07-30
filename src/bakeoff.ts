@@ -74,6 +74,10 @@ import {
   renderStaticArtifact,
   resolveHarnessProductAdapterExecutor,
 } from "./mock-wps.ts";
+import {
+  registeredDoubaoBrowserDriverEvidence,
+  type DoubaoBrowserDriverPort,
+} from "./doubao-production-adapter.ts";
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import { scoreRenderedArtifact } from "./mock-score.ts";
@@ -124,7 +128,10 @@ import {
   type PayloadInventoryPort,
   type TombstoneLedgerPort,
 } from "./retention.ts";
-import { createAuthorizedSafeRasterManifest } from "./safe-raster.ts";
+import {
+  createAuthorizedSafeRasterManifest,
+  createFailedSafeRasterManifest,
+} from "./safe-raster.ts";
 import {
   registeredWpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverPort,
@@ -349,6 +356,7 @@ export interface BakeoffHarnessDependencies {
   readonly attemptCheckpointStore?: AttemptCheckpointPort;
   readonly browserProfileLock?: BrowserProfileLockPort;
   readonly safeRasterRenderer?: SafeRasterRendererPort;
+  readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort;
 }
 
 interface InFlightBakeoffJob {
@@ -553,6 +561,7 @@ function bakeoffJobIdentity(
     readonly attemptCheckpointStore: AttemptCheckpointPort;
     readonly browserProfileLock: BrowserProfileLockPort;
     readonly safeRasterRenderer: SafeRasterRendererPort | undefined;
+    readonly doubaoBrowserDriver: DoubaoBrowserDriverPort | undefined;
   },
 ): string {
   return JSON.stringify({
@@ -630,6 +639,9 @@ function bakeoffJobIdentity(
       },
       safeRasterRenderer: dependencyIdentity(
         dependencies.safeRasterRenderer,
+      ),
+      doubaoBrowserDriver: dependencyIdentity(
+        dependencies.doubaoBrowserDriver,
       ),
     },
   });
@@ -732,6 +744,9 @@ function snapshotProductSelections(
       | QwenBrowserDriverPort
       | undefined;
     readonly attemptCheckpointStore: AttemptCheckpointPort;
+    readonly doubaoBrowserDriver:
+      | DoubaoBrowserDriverPort
+      | undefined;
   },
 ): readonly SelectedProductAdapter[] {
   return Object.freeze(
@@ -741,6 +756,15 @@ function snapshotProductSelections(
         egressDestination: Object.freeze(
           structuredClone(adapter.productPackage.egressDestination),
         ),
+        ...(adapter.productPackage.evaluationConfiguration === undefined
+          ? {}
+          : {
+              evaluationConfiguration: Object.freeze(
+                structuredClone(
+                  adapter.productPackage.evaluationConfiguration,
+                ),
+              ),
+            }),
       });
       const implementationPackage =
         Object.freeze<ProductAdapterImplementationPackage>({
@@ -769,10 +793,13 @@ function snapshotProductSelections(
           ? registeredWpsAiPptBrowserDriverEvidence(
               dependencies.wpsAiPptBrowserDriver,
             )
-          : executionConfiguration.adapterKind ===
-              "qwen-web"
+          : executionConfiguration.adapterKind === "qwen-web"
             ? registeredQwenBrowserDriverEvidence(
                 dependencies.qwenBrowserDriver,
+              )
+          : executionConfiguration.adapterKind === "doubao-web-ppt"
+            ? registeredDoubaoBrowserDriverEvidence(
+                dependencies.doubaoBrowserDriver,
               )
           : null;
       const selectedExecute =
@@ -1301,6 +1328,12 @@ function attemptRecord(input: {
         },
       ],
     manualActions: input.result.manualActions ?? [],
+    ...(input.result.observedConfiguration === undefined
+      ? {}
+      : {
+          productConfigurationEvidence:
+            input.result.observedConfiguration,
+        }),
     costEvidence: {
       classification: "unknown",
       amount: null,
@@ -1638,7 +1671,9 @@ async function executeVendor(
       productionExecutionEvidence.artifactContentHash !==
         artifact.contentHash ||
       productionExecutionEvidence.traceHash !==
-        sha256Json(result.observableEvents ?? [])
+        sha256Bytes(
+          canonicalJsonBytes(result.observableEvents ?? []),
+        )
     ) {
       throw new Error(
         "Production Artifact requires bound driver session, outcome, Artifact, and Trace evidence",
@@ -1687,30 +1722,62 @@ async function executeVendor(
       "Production browser driver cannot submit raster output before renderer authorization",
     );
   }
-  const safeRasterCandidate =
-    isRealProviderProductProvenance(productPackage.provenance)
-      ? await safeRasterRenderer!.render({
-          artifact,
-          authorizationDecisionId:
-            rendererAuthorizationDecisionId,
-        })
-      : selectedArtifact.safeRasterCandidate;
-  const renderManifest =
-    safeRasterCandidate !== undefined
-      ? await createAuthorizedSafeRasterManifest({
-          artifact,
-          candidate: safeRasterCandidate,
-          renderManifestId: `${artifact.artifactId}-render`,
-          rendererAuthorizationDecisionId:
-            rendererAuthorizationDecisionId,
-        })
-      : selectedArtifact.renderManifest ??
-        renderStaticArtifact(
-          artifact,
-          scenario?.renderManifestId ??
-            runId.replace(/^MOCK-run-/, "MOCK-render-"),
+  let safeRasterCandidate = selectedArtifact.safeRasterCandidate;
+  let safeRasterFailure: unknown;
+  if (isRealProviderProductProvenance(productPackage.provenance)) {
+    try {
+      safeRasterCandidate = await safeRasterRenderer!.render({
+        artifact,
+        authorizationDecisionId:
           rendererAuthorizationDecisionId,
-        );
+      });
+    } catch (error) {
+      safeRasterFailure = error;
+      safeRasterCandidate = undefined;
+    }
+  }
+  let renderManifest: RenderManifest;
+  if (safeRasterFailure !== undefined) {
+    renderManifest = createFailedSafeRasterManifest({
+      artifact,
+      renderer: safeRasterRenderer!.rendererId,
+      rendererAuthorizationDecisionId:
+        rendererAuthorizationDecisionId,
+      failure: safeRasterFailure,
+      renderManifestId: `${artifact.artifactId}-render`,
+    });
+  } else if (safeRasterCandidate !== undefined) {
+    try {
+      renderManifest = await createAuthorizedSafeRasterManifest({
+        artifact,
+        candidate: safeRasterCandidate,
+        renderManifestId: `${artifact.artifactId}-render`,
+        rendererAuthorizationDecisionId:
+          rendererAuthorizationDecisionId,
+      });
+    } catch (error) {
+      if (!isRealProviderProductProvenance(productPackage.provenance)) {
+        throw error;
+      }
+      renderManifest = createFailedSafeRasterManifest({
+        artifact,
+        renderer: safeRasterRenderer!.rendererId,
+        rendererAuthorizationDecisionId:
+          rendererAuthorizationDecisionId,
+        failure: error,
+        renderManifestId: `${artifact.artifactId}-render`,
+      });
+    }
+  } else {
+    renderManifest =
+      selectedArtifact.renderManifest ??
+      renderStaticArtifact(
+        artifact,
+        scenario?.renderManifestId ??
+          runId.replace(/^MOCK-run-/, "MOCK-render-"),
+        rendererAuthorizationDecisionId,
+      );
+  }
   if (
     renderManifest.artifactId !== artifact.artifactId ||
     renderManifest.provenance !== artifact.provenance ||
@@ -1964,6 +2031,7 @@ export function createBakeoffHarness({
   attemptCheckpointStore: configuredAttemptCheckpointStore,
   browserProfileLock: configuredBrowserProfileLock,
   safeRasterRenderer,
+  doubaoBrowserDriver,
 }: BakeoffHarnessDependencies): BakeoffHarness {
   const attemptDeadline =
     configuredAttemptDeadline ?? WALL_CLOCK_ATTEMPT_DEADLINE;
@@ -2717,6 +2785,7 @@ export function createBakeoffHarness({
           wpsAiPptBrowserDriver,
           qwenBrowserDriver,
           attemptCheckpointStore,
+          doubaoBrowserDriver,
         },
       );
       if (commandSnapshot.environment === "production") {
@@ -2731,18 +2800,15 @@ export function createBakeoffHarness({
             ),
           );
         }
-        const selectedWpsRuns = selections.filter(
+        const selectedRealProviderRuns = selections.filter(
           ({ executionConfiguration }) =>
-            executionConfiguration.adapterKind ===
-            "wps-aippt-browser",
+            executionConfiguration.adapterKind === "wps-aippt-browser" ||
+            executionConfiguration.adapterKind === "qwen-web" ||
+            executionConfiguration.adapterKind === "doubao-web-ppt",
         );
         const isExplicitRealProviderReplay =
-          wpsAiPptBrowserDriver?.provenance ===
-            "PRODUCTION_REPLAY" &&
-          wpsAiPptBrowserDriver.captureSource ===
-            "REAL_PROVIDER_CAPTURE" &&
-          selectedWpsRuns.length > 0 &&
-          selectedWpsRuns.every(
+          selectedRealProviderRuns.length > 0 &&
+          selectedRealProviderRuns.every(
             ({ browserDriverEvidence, productPackage }) =>
               productPackage.provenance ===
                 "PRODUCTION_REPLAY" &&
@@ -2753,11 +2819,29 @@ export function createBakeoffHarness({
           );
         if (
           wpsAiPptBrowserDriver !== undefined &&
-          !isExplicitRealProviderReplay
+          selections.some(
+            ({ executionConfiguration }) =>
+              executionConfiguration.adapterKind === "wps-aippt-browser",
+          ) &&
+          wpsAiPptBrowserDriver.provenance !== "PRODUCTION_REPLAY"
         ) {
           return Promise.reject(
             new Error(
               "Production Bakeoff rejects caller-supplied WPS browser sessions",
+            ),
+          );
+        }
+        if (
+          doubaoBrowserDriver !== undefined &&
+          selections.some(
+            ({ executionConfiguration }) =>
+              executionConfiguration.adapterKind === "doubao-web-ppt",
+          ) &&
+          doubaoBrowserDriver.provenance !== "PRODUCTION_REPLAY"
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff rejects caller-supplied Doubao browser sessions",
             ),
           );
         }
@@ -2787,6 +2871,19 @@ export function createBakeoffHarness({
           return Promise.reject(
             new Error(
               "Production Bakeoff rejects caller-supplied Qwen browser sessions",
+            ),
+          );
+        }
+        if (
+          selections.some(
+            ({ productPackage }) =>
+              productPackage.provenance === "PRODUCTION_REPLAY",
+          ) &&
+          !isExplicitRealProviderReplay
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production replay requires explicit REAL_PROVIDER_CAPTURE lineage",
             ),
           );
         }
@@ -2897,6 +2994,7 @@ export function createBakeoffHarness({
           attemptCheckpointStore,
           browserProfileLock,
           safeRasterRenderer,
+          doubaoBrowserDriver,
         },
       );
       return coalesceBakeoffJob(

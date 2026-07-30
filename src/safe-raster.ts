@@ -30,6 +30,7 @@ function crc32(content: Uint8Array): number {
 
 function assertSafePng(content: Uint8Array, label: string): void {
   if (
+    content.byteLength > 64 * 1024 * 1024 ||
     content.byteLength < 33 ||
     content[0] !== 0x89 ||
     content[1] !== 0x50 ||
@@ -67,6 +68,7 @@ function assertSafePng(content: Uint8Array, label: string): void {
     "cHRM",
     "gAMA",
     "sRGB",
+    "sBIT",
     "pHYs",
     "tRNS",
   ]);
@@ -105,6 +107,49 @@ function assertSafePng(content: Uint8Array, label: string): void {
   }
   if (!sawIdat || !sawIend || offset !== content.byteLength) {
     throw new Error(`${label} PNG is incomplete`);
+  }
+}
+
+export async function validatedSafePngDimensions(
+  content: Uint8Array,
+  label: string,
+): Promise<{
+  readonly width: number;
+  readonly height: number;
+}> {
+  assertSafePng(content, label);
+  try {
+    const image = sharp(Buffer.from(content), {
+      animated: false,
+      failOn: "error",
+      limitInputPixels: 33_554_432,
+      sequentialRead: true,
+    });
+    const metadata = await image.metadata();
+    if (
+      metadata.format !== "png" ||
+      (metadata.pages !== undefined && metadata.pages !== 1) ||
+      metadata.width === undefined ||
+      metadata.height === undefined
+    ) {
+      throw new Error("unexpected decoded PNG metadata");
+    }
+    const decoded = await image.raw().toBuffer({
+      resolveWithObject: true,
+    });
+    if (
+      decoded.info.width !== metadata.width ||
+      decoded.info.height !== metadata.height ||
+      decoded.data.byteLength === 0
+    ) {
+      throw new Error("decoded PNG dimensions are inconsistent");
+    }
+    return Object.freeze({
+      width: metadata.width,
+      height: metadata.height,
+    });
+  } catch (error) {
+    throw new Error(`${label} PNG decode failed`, { cause: error });
   }
 }
 
@@ -230,6 +275,66 @@ export async function createAuthorizedSafeRasterManifest(input: {
     ...withoutHash,
     contentHash: calculateRenderManifestHash(
       artifact.contentHash,
+      withoutHash,
+    ),
+  });
+}
+
+export function createFailedSafeRasterManifest(input: {
+  readonly artifact: Artifact;
+  readonly renderer: string;
+  readonly rendererAuthorizationDecisionId: string;
+  readonly failure: unknown;
+  readonly renderManifestId: string;
+}): RenderManifest {
+  // The renderer failure belongs in an operator-controlled diagnostic channel,
+  // never in the durable evaluation Artifact. Error.message may contain
+  // subprocess stderr, local paths, API keys, JWTs, or other credentials.
+  void input.failure;
+  const failureCode = "RASTERIZATION_FAILED" as const;
+  const contactSheet = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">',
+    '<rect width="1280" height="720" fill="#fff"/>',
+    '<text x="40" y="80" font-size="28" fill="#111">',
+    "Static rendering failed; original artifact retained.",
+    "</text>",
+    "</svg>",
+  ].join("");
+  const withoutHash: Omit<RenderManifest, "contentHash"> = {
+    renderManifestId: input.renderManifestId,
+    artifactId: input.artifact.artifactId,
+    provenance: input.artifact.provenance,
+    environmentOrigin: input.artifact.environmentOrigin,
+    renderer: input.renderer,
+    rendererAuthorizationDecisionId:
+      input.rendererAuthorizationDecisionId,
+    renderOutcome: "failed",
+    fidelity: Object.freeze({
+      status: "unknown",
+      notes: Object.freeze([
+        `${failureCode}: static rendering failed; inspect the authorized operator diagnostic channel`,
+      ]),
+    }),
+    pageCount: input.artifact.pageCount,
+    renderPolicy: {
+      fontPack: "unavailable",
+      resolution: "unavailable",
+      colorProfile: "unavailable",
+      animationPolicy: "first_frame",
+      externalAssetPolicy: "network_disabled",
+    },
+    slides: Object.freeze([]),
+    contactSheet: Object.freeze({
+      filename: "render-failed.svg",
+      mimeType: "image/svg+xml",
+      content: contactSheet,
+      contentHash: sha256(new TextEncoder().encode(contactSheet)),
+    }),
+  };
+  return Object.freeze({
+    ...withoutHash,
+    contentHash: calculateRenderManifestHash(
+      input.artifact.contentHash,
       withoutHash,
     ),
   });

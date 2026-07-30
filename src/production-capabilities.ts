@@ -254,14 +254,30 @@ export function createHarnessOwnedProductionCapabilities(input: {
           const pageNumber = index + 1;
           const filename =
             `slide-${String(pageNumber).padStart(2, "0")}.png`;
-          const content = Uint8Array.from(
-            await readFile(
-              join(
-                input.renderer.slidesDirectory,
-                filename,
+          let content: Uint8Array;
+          try {
+            content = Uint8Array.from(
+              await readFile(
+                join(input.renderer.slidesDirectory, filename),
               ),
-            ),
-          );
+            );
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !("code" in error) ||
+              error.code !== "ENOENT"
+            ) {
+              throw error;
+            }
+            content = Uint8Array.from(
+              await readFile(
+                join(
+                  input.renderer.slidesDirectory,
+                  `slide-${pageNumber}.png`,
+                ),
+              ),
+            );
+          }
           return Object.freeze({
             pageNumber,
             filename,

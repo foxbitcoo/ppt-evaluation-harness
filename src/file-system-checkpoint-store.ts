@@ -4,6 +4,7 @@ import { resolve, sep } from "node:path";
 
 import type { ObservableAttemptEvent } from "./domain.ts";
 import type { AttemptCheckpointPort } from "./product-adapter.ts";
+import { parseStrictJson } from "./strict-json.ts";
 
 function canonicalLine(event: ObservableAttemptEvent): string {
   return `${JSON.stringify(event)}\n`;
@@ -58,7 +59,13 @@ export class FileSystemAttemptCheckpointStore
     const prior = existing
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as ObservableAttemptEvent)
+      .map(
+        (line, index) =>
+          parseStrictJson(
+            line,
+            `Attempt checkpoint line ${index + 1}`,
+          ) as ObservableAttemptEvent,
+      )
       .find(({ eventId }) => eventId === event.eventId);
     if (prior !== undefined) {
       if (JSON.stringify(prior) !== JSON.stringify(event)) {
@@ -86,9 +93,12 @@ export class FileSystemAttemptCheckpointStore
         content
           .split("\n")
           .filter(Boolean)
-          .map((line) =>
+          .map((line, index) =>
             Object.freeze(
-              JSON.parse(line) as ObservableAttemptEvent,
+              parseStrictJson(
+                line,
+                `Attempt checkpoint line ${index + 1}`,
+              ) as ObservableAttemptEvent,
             ),
           ),
       );

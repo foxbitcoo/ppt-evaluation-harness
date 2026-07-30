@@ -401,6 +401,20 @@ function mutateStoredZipEntryText(
   return copy;
 }
 
+function renameStoredZipEntry(
+  content: Uint8Array,
+  from: string,
+  to: string,
+): Uint8Array {
+  assert.equal(Buffer.byteLength(from), Buffer.byteLength(to));
+  const copy = Uint8Array.from(content);
+  const offsets = storedZipEntryOffsets(copy, from);
+  const encoded = new TextEncoder().encode(to);
+  copy.set(encoded, offsets.centralOffset + 46);
+  copy.set(encoded, offsets.localOffset + 30);
+  return copy;
+}
+
 function storedZipEntryText(
   content: Uint8Array,
   entryName: string,
@@ -1168,6 +1182,341 @@ test("the WPS adapter decodes XML entities before rejecting external relationshi
       evaluationCase: VOLCANO_EVALUATION_CASE,
     }),
     /external relationship.*forbidden/i,
+  );
+});
+
+test("the OPC validator rejects ActiveX and OLE relationship types even when their targets are internal", async () => {
+  const originalType =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+  const activeType = "urn:activeX/oleObject".padEnd(
+    originalType.length,
+    "x",
+  );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "_rels/.rels",
+    originalType,
+    activeType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-relationship",
+      runId: "run-wps-activex-relationship",
+      attemptId: "attempt-wps-activex-relationship-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*relationship/i,
+  );
+});
+
+test("the OPC validator normalizes percent-encoded unreserved bytes before checking relationship types", async () => {
+  const originalType =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+  const encodedActiveType = "urn:active%58/oleObject".padEnd(
+    originalType.length,
+    "x",
+  );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "_rels/.rels",
+    originalType,
+    encodedActiveType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-percent-activex-type",
+      runId: "run-wps-percent-activex-type",
+      attemptId: "attempt-wps-percent-activex-type-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*relationship/i,
+  );
+});
+
+test("the OPC validator normalizes percent-encoded OLE relationship targets before checking active content", async () => {
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "_rels/.rels",
+    "ppt/presentation.xml",
+    "ppt/%6fleObjects/xxx",
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-percent-ole-target",
+      runId: "run-wps-percent-ole-target",
+      attemptId: "attempt-wps-percent-ole-target-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*relationship/i,
+  );
+});
+
+test("the OPC validator normalizes percent-encoded content-type PartName values before checking active content", async () => {
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "[Content_Types].xml",
+    "ppt/presentation.xml",
+    "ppt/%61ctiveX/x.binx",
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-percent-activex-part-name",
+      runId: "run-wps-percent-activex-part-name",
+      attemptId: "attempt-wps-percent-activex-part-name-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*content type/i,
+  );
+});
+
+test("the OPC validator rejects repeated or reserved percent encoding before URI safety decisions", async () => {
+  const originalType =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+  const ambiguousType = "urn:active%2558/oleObject".padEnd(
+    originalType.length,
+    "x",
+  );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "_rels/.rels",
+    originalType,
+    ambiguousType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-ambiguous-encoded-type",
+      runId: "run-wps-ambiguous-encoded-type",
+      attemptId: "attempt-wps-ambiguous-encoded-type-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /ambiguous encoding/i,
+  );
+});
+
+test("the OPC validator rejects ActiveX content types on otherwise nonessential package parts", async () => {
+  const originalType =
+    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+  const activeType = "application/vnd.ms-office.activeX+xml".padEnd(
+    originalType.length,
+    "x",
+  );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "[Content_Types].xml",
+    originalType,
+    activeType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-content-type",
+      runId: "run-wps-activex-content-type",
+      attemptId: "attempt-wps-activex-content-type-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*content type/i,
+  );
+});
+
+test("the OPC validator decodes XML entities before rejecting an ActiveX content type", async () => {
+  const originalType =
+    "application/vnd.openxmlformats-officedocument.extended-properties+xml";
+  const obfuscatedActiveType =
+    "application/vnd.ms-office.active&#88;+xml".padEnd(
+      originalType.length,
+      "x",
+    );
+  const corrupted = mutateStoredZipEntryText(
+    await knownGoodPptxBytes(),
+    "[Content_Types].xml",
+    originalType,
+    obfuscatedActiveType,
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-content-type-entity",
+      runId: "run-wps-activex-content-type-entity",
+      attemptId: "attempt-wps-activex-content-type-entity-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*content type/i,
+  );
+});
+
+test("the OPC validator rejects a ppt/activeX package part before resolving slide relationships", async () => {
+  const corrupted = renameStoredZipEntry(
+    await knownGoodPptxBytes(),
+    "ppt/slides/slide1.xml",
+    "ppt/activeX/payload01",
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-activex-part",
+      runId: "run-wps-activex-part",
+      attemptId: "attempt-wps-activex-part-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*package part/i,
+  );
+});
+
+test("the OPC validator normalizes percent-encoded ZIP part names before checking active content", async () => {
+  const corrupted = renameStoredZipEntry(
+    await knownGoodPptxBytes(),
+    "ppt/slides/slide1.xml",
+    "ppt/%61ctiveX/x.binxx",
+  );
+  const adapter = new WpsAiPptProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        capturedBrowserResult(corrupted),
+      ),
+    },
+  );
+
+  await assert.rejects(
+    execute({
+      jobId: "job-wps-percent-activex-package-part",
+      runId: "run-wps-percent-activex-package-part",
+      attemptId: "attempt-wps-percent-activex-package-part-1",
+      attemptSeq: 1,
+      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    }),
+    /active content.*package part/i,
   );
 });
 

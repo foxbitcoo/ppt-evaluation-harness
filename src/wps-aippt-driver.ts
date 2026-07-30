@@ -212,10 +212,16 @@ export interface WpsAiPptBrowserDriverEvidence
     | "LIVE_BROWSER_AUTOMATION"
     | "REAL_PROVIDER_CAPTURE"
     | "TEST_FIXTURE";
-  readonly driverVersion: typeof WPS_AIPPT_BROWSER_DRIVER_VERSION;
-  readonly browserProfileDigest: typeof WPS_AIPPT_BROWSER_PROFILE_DIGEST;
+  readonly driverVersion: string;
+  readonly browserProfileDigest: `sha256:${string}`;
   readonly implementationDigest: `sha256:${string}`;
   readonly configurationDigest: `sha256:${string}`;
+  readonly captureReceipt?: {
+    readonly captureId: string;
+    readonly artifactContentHash: `sha256:${string}`;
+    readonly traceDigest: `sha256:${string}`;
+    readonly renderDigest: `sha256:${string}`;
+  };
 }
 
 const HARNESS_OWNED_PRODUCTION_DRIVER_EVIDENCE:

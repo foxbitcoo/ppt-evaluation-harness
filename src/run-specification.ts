@@ -225,7 +225,12 @@ function sourceFiles(directory: URL): readonly URL[] {
         directory,
       );
       if (entry.isDirectory()) return sourceFiles(child);
-      return entry.isFile() && entry.name.endsWith(".ts") ? [child] : [];
+      return entry.isFile() &&
+        entry.name.endsWith(".ts") &&
+        entry.name !== "doubao-recovery-checkpoints.ts" &&
+        entry.name !== "embedded-build-manifest.ts"
+        ? [child]
+        : [];
     });
 }
 
