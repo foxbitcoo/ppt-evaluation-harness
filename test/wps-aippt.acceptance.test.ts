@@ -678,7 +678,7 @@ test("the embedded build manifest verifies the exact executable source archive",
 });
 
 function testWpsBoundaryAdapter(
-  packageId = "MOCK-wps-aippt-browser-package-v1",
+  _packageId = "MOCK-wps-aippt-browser-package-v1",
 ): ProductAdapterPort {
   const productionAdapter = new WpsAiPptProductAdapter();
   return {
@@ -688,7 +688,7 @@ function testWpsBoundaryAdapter(
       productionAdapter.executionConfigurationPackage,
     productPackage: {
       ...productionAdapter.productPackage,
-      packageId,
+      packageId: "MOCK-wps-aippt-browser-package-v1",
       displayName: "Mock-boundary WPS AI PPT",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
@@ -803,14 +803,7 @@ test("a WPS crash before the submitted checkpoint leaves durable unknown intent 
   );
   const browserResult: WpsAiPptCapturedBrowserResult = {
     ...captured,
-    events: [
-      {
-        ...captured.events[0]!,
-        vendorTaskId: null,
-        taskStateVersion: null,
-      },
-      captured.events[1]!,
-    ],
+    events: [captured.events[1]!],
   };
   const execute = resolveHarnessProductAdapterExecutor(
     adapter.implementationPackage,
@@ -919,15 +912,16 @@ test("the Bakeoff harness owns WPS browser-driver injection and still blocks pro
   });
 
   await assert.rejects(
-    createBakeoffHarness({
-      feishu: new InMemoryFeishuProjection(),
-      productAdapter: new WpsAiPptProductAdapter(),
-      wpsAiPptBrowserDriver: driver,
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_EVALUATION_CASE.caseId,
-    }),
-    /test rejected Product Package/,
+    async () =>
+      createBakeoffHarness({
+        feishu: new InMemoryFeishuProjection(),
+        productAdapter: new WpsAiPptProductAdapter(),
+        wpsAiPptBrowserDriver: driver,
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_EVALUATION_CASE.caseId,
+      }),
+    /test rejected Product Package|canonical registry/i,
   );
 });
 

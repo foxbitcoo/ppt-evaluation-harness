@@ -5,6 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  acquireProductionClaimBoundToAttemptState,
+  assertProductionVendorEgressSafe,
+} from "../src/bakeoff.ts";
+import {
   FileSystemEgressAuthorizationAudit,
   InMemoryFeishuProjection,
   InMemoryAttemptCheckpointStore,
@@ -16,8 +20,12 @@ import {
   MockWpsProductAdapter,
   VENDOR_GENERATION_TIMEOUT_MS,
   VOLCANO_CASE_ID,
+  VOLCANO_EVALUATION_CASE,
+  attemptSubmissionState,
   createBakeoffHarness,
   createComparisonReportService,
+  createHarnessProviderExecutionNotStartedCheckpoint,
+  isHarnessProviderExecutionNotStartedCheckpoint,
   sha256Bytes,
   type ArtifactScoreTableRecord,
   type AttemptCheckpointPort,
@@ -25,6 +33,7 @@ import {
   type ComparisonRecord,
   type EvaluationCaseRecord,
   type FeishuReportDraft,
+  type ObservableAttemptEvent,
   type ProductAdapterPort,
   type ProductGapCardRecord,
   type RunRecord,
@@ -38,6 +47,280 @@ type CallerExecutionKeys = Extract<
 const productAdapterPortHasNoCallerExecutionKeys:
   CallerExecutionKeys extends never ? true : false = true;
 void productAdapterPortHasNoCallerExecutionKeys;
+
+test("ordered submission state resolves explicit non-submission but never downgrades submitted evidence", () => {
+  const command = {
+    jobId: "job-submission-state",
+    runId: "run-submission-state",
+    attemptId: "run-submission-state-attempt-1",
+    attemptSeq: 1,
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  } as const;
+  const control =
+    createHarnessProviderExecutionNotStartedCheckpoint({
+      jobId: command.jobId,
+      caseId: command.evaluationCase.caseId,
+      runId: command.runId,
+      attemptId: command.attemptId,
+      attemptSeq: command.attemptSeq,
+    });
+  const intent: ObservableAttemptEvent = {
+    ...control,
+    eventId: `${control.attemptId}-submission-intent`,
+    eventType: "submission_intent",
+    writerId: "adapter@1",
+    evidenceRef: "harness://submission-intent",
+    submissionEvidenceAtCheckpoint: "unknown",
+    taskStateVersion: null,
+    adapterVersion: "adapter@1",
+  };
+  const explicitNotSubmitted: ObservableAttemptEvent = {
+    ...intent,
+    eventId: `${control.attemptId}-not-submitted`,
+    eventType: "query_not_submitted",
+    submissionEvidenceAtCheckpoint: "not_submitted",
+  };
+  const submitted: ObservableAttemptEvent = {
+    ...intent,
+    eventId: `${control.attemptId}-submitted`,
+    eventType: "query_submitted",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_submission_state",
+    taskStateVersion: "submitted@1",
+  };
+
+  assert.equal(
+    attemptSubmissionState([
+      control,
+      intent,
+      explicitNotSubmitted,
+    ]),
+    "not_submitted",
+  );
+  assert.equal(
+    attemptSubmissionState([intent, control]),
+    "unknown",
+  );
+  assert.equal(
+    attemptSubmissionState([
+      intent,
+      submitted,
+      explicitNotSubmitted,
+    ]),
+    "submitted",
+  );
+  assert.equal(
+    isHarnessProviderExecutionNotStartedCheckpoint(
+      control,
+      command,
+    ),
+    true,
+  );
+  assert.equal(
+    isHarnessProviderExecutionNotStartedCheckpoint(
+      {
+        ...control,
+        observedAt: "2026-07-31T00:00:00.000Z",
+      },
+      command,
+    ),
+    false,
+  );
+  assert.equal(
+    isHarnessProviderExecutionNotStartedCheckpoint(
+      {
+        ...control,
+        reconciliationObservedState: "unknown",
+      },
+      command,
+    ),
+    false,
+  );
+});
+
+const PRODUCTION_CLAIM_TEST_PROTOCOL = Object.freeze({
+  protocolId: "production-query-default-cost-v1",
+  referencePackMode: "automatic" as const,
+  timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+  retryPolicy: "one_if_provably_not_submitted" as const,
+  resultSelectionPolicy:
+    "first_policy_compliant_artifact" as const,
+  cancellationPolicy:
+    "independent_vendor_runs_continue" as const,
+});
+const PRODUCTION_CLAIM_TEST_SECURITY_CONTEXT_HASH =
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
+
+test("production claim checkpoints are restart-idempotent and bind both allowed Attempts into a stable claim", async () => {
+  const checkpointStore = new InMemoryAttemptCheckpointStore(
+    "production-claim-restart-idempotency",
+  );
+  const scope = {
+    jobId: "job-production-claim-restart",
+    caseId: VOLCANO_CASE_ID,
+    runIds: ["run-production-claim-restart"],
+  };
+  const claimHashes: string[] = [];
+  const acquire = () =>
+    acquireProductionClaimBoundToAttemptState({
+      scope,
+      protocolSnapshot: PRODUCTION_CLAIM_TEST_PROTOCOL,
+      securityContextHash:
+        PRODUCTION_CLAIM_TEST_SECURITY_CONTEXT_HASH,
+      checkpointStore,
+      async acquireClaim({
+        claimHash,
+        attemptSubmissionSummary,
+      }) {
+        claimHashes.push(claimHash);
+        assert.deepEqual(
+          attemptSubmissionSummary.map(
+            ({ attemptSeq, submissionState }) => ({
+              attemptSeq,
+              submissionState,
+            }),
+          ),
+          [
+            { attemptSeq: 1, submissionState: "not_submitted" },
+            { attemptSeq: 2, submissionState: "not_submitted" },
+          ],
+        );
+        return "claimed" as const;
+      },
+    });
+
+  await acquire();
+  await acquire();
+
+  assert.equal(checkpointStore.snapshot().length, 2);
+  assert.equal(claimHashes.length, 2);
+  assert.equal(claimHashes[0], claimHashes[1]);
+  assert.deepEqual(
+    checkpointStore.snapshot().map(
+      ({ attemptSeq, sourceAt, observedAt }) => ({
+        attemptSeq,
+        sourceAt,
+        observedAt,
+      }),
+    ),
+    [
+      {
+        attemptSeq: 1,
+        sourceAt: "1970-01-01T00:00:00.000Z",
+        observedAt: "1970-01-01T00:00:00.000Z",
+      },
+      {
+        attemptSeq: 2,
+        sourceAt: "1970-01-01T00:00:00.000Z",
+        observedAt: "1970-01-01T00:00:00.000Z",
+      },
+    ],
+  );
+});
+
+test("production claim handoff rejects an old-owner Attempt-2 submission committed after the scan", async () => {
+  const checkpointStore = new InMemoryAttemptCheckpointStore(
+    "production-claim-attempt-2-race",
+  );
+  const scope = {
+    jobId: "job-production-claim-attempt-2-race",
+    caseId: VOLCANO_CASE_ID,
+    runIds: ["run-production-claim-attempt-2-race"],
+  };
+  let claimAcquired = false;
+
+  await assert.rejects(
+    acquireProductionClaimBoundToAttemptState({
+      scope,
+      protocolSnapshot: PRODUCTION_CLAIM_TEST_PROTOCOL,
+      securityContextHash:
+        PRODUCTION_CLAIM_TEST_SECURITY_CONTEXT_HASH,
+      checkpointStore,
+      async acquireClaim() {
+        claimAcquired = true;
+        const attemptId =
+          "run-production-claim-attempt-2-race-attempt-2";
+        await checkpointStore.append({
+          eventId: `${attemptId}-old-owner-submitted`,
+          jobId: scope.jobId,
+          caseId: scope.caseId,
+          runId: scope.runIds[0]!,
+          attemptId,
+          attemptSeq: 2,
+          eventType: "query_submitted",
+          sourceAt: "2026-07-31T00:00:00.000Z",
+          observedAt: "2026-07-31T00:00:00.001Z",
+          writerId: "old-owner-adapter@1",
+          evidenceRef:
+            "provider://old-owner/attempt-2/submitted",
+          submissionEvidenceAtCheckpoint: "submitted",
+          vendorTaskId: "task_old_owner_attempt_2",
+          taskStateVersion: "submitted@1",
+          adapterVersion: "old-owner-adapter@1",
+          artifactId: null,
+        });
+        return "claimed" as const;
+      },
+    }),
+    /attempt-2.*submission state changed.*claim/i,
+  );
+  assert.equal(claimAcquired, true);
+});
+
+test("the final vendor-egress read rejects an Attempt-2 submission even while Attempt-1 is current", async () => {
+  const checkpointStore = new InMemoryAttemptCheckpointStore(
+    "production-vendor-egress-attempt-2-race",
+  );
+  const runId = "run-production-vendor-egress-race";
+  const scope = {
+    jobId: "job-production-vendor-egress-race",
+    caseId: VOLCANO_CASE_ID,
+    runIds: [runId],
+  };
+  await acquireProductionClaimBoundToAttemptState({
+    scope,
+    protocolSnapshot: PRODUCTION_CLAIM_TEST_PROTOCOL,
+    securityContextHash:
+      PRODUCTION_CLAIM_TEST_SECURITY_CONTEXT_HASH,
+    checkpointStore,
+    async acquireClaim() {
+      return "claimed" as const;
+    },
+  });
+  const attempt2 = `${runId}-attempt-2`;
+  await checkpointStore.append({
+    eventId: `${attempt2}-late-submitted`,
+    jobId: scope.jobId,
+    caseId: scope.caseId,
+    runId,
+    attemptId: attempt2,
+    attemptSeq: 2,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-31T00:01:00.000Z",
+    observedAt: "2026-07-31T00:01:00.001Z",
+    writerId: "old-owner-adapter@1",
+    evidenceRef: "provider://old-owner/late-submitted",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_old_owner_late_attempt_2",
+    taskStateVersion: "submitted@1",
+    adapterVersion: "old-owner-adapter@1",
+    artifactId: null,
+  });
+
+  await assert.rejects(
+    assertProductionVendorEgressSafe({
+      jobId: scope.jobId,
+      caseId: scope.caseId,
+      runId,
+      attemptId: `${runId}-attempt-1`,
+      attemptSeq: 1,
+      checkpointStore,
+    }),
+    /attempt-2.*found submitted.*retry suppressed/i,
+  );
+});
 
 function deterministicDeadline(
   options: {
@@ -850,14 +1133,15 @@ test("production rejects every Mock lineage even when every visible provenance l
     },
   };
   await assert.rejects(
-    createBakeoffHarness({
-      feishu: productionFeishu,
-      productAdapters: [relabeledAdapter],
-    }).startBakeoffJob({
-      environment: "production",
-      caseId: VOLCANO_CASE_ID,
-    }),
-    /production.*environment origin/i,
+    async () =>
+      createBakeoffHarness({
+        feishu: productionFeishu,
+        productAdapters: [relabeledAdapter],
+      }).startBakeoffJob({
+        environment: "production",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /production.*environment origin|canonical registry/i,
   );
 });
 
@@ -1516,7 +1800,7 @@ test("all selected vendors begin under one shared 30-minute Job deadline", async
   assert.equal(outcome.job.status, "completed");
 });
 
-test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", async () => {
+test("arbitrary caller package IDs cannot create additional canonical Runs", () => {
   const wps = new MockWpsProductAdapter();
   const inheritedKeyAdapter: ProductAdapterPort = {
     implementationPackage: wps.implementationPackage,
@@ -1529,26 +1813,19 @@ test("arbitrary package IDs use own-safe stable IDs with a 128-bit digest", asyn
     },
   };
 
-  const runOnce = async () => {
-    const feishu = new InMemoryFeishuProjection();
-    await createBakeoffHarness({
-      feishu,
-      productAdapters: [inheritedKeyAdapter],
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_CASE_ID,
-    });
-    return feishu
-      .snapshot()
-      .runRecordTable.find(({ recordType }) => recordType === "vendor_run")
-      ?.recordId;
-  };
-
-  const firstRunId = await runOnce();
-  const secondRunId = await runOnce();
-  assert.equal(firstRunId, secondRunId);
-  assert.match(firstRunId ?? "", /^MOCK-run-proto-[a-f0-9]{32}-volcano-v1$/);
-  assert.doesNotMatch(firstRunId ?? "", /\[object Object\]/);
+  const feishu = new InMemoryFeishuProjection();
+  assert.throws(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapters: [inheritedKeyAdapter],
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /canonical registry/i,
+  );
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
 });
 
 test("measured deadline time overrides a successful adapter's self-reported elapsed time", async () => {
@@ -1885,45 +2162,63 @@ test("package metadata and derived Run IDs are snapshotted before any adapter ex
   assert.equal(qwenRun?.product, "Mock Qwen PPT");
 });
 
-test("distinct package Runs cannot persist the same Artifact ID", async () => {
+test("the canonical registry rejects spoofed Product Package identity and destination", async () => {
   const wps = new MockWpsProductAdapter();
-  const duplicateArtifactAdapters: ProductAdapterPort[] = [
-    {
-      implementationPackage: wps.implementationPackage,
-      executionConfigurationPackage:
-        wps.executionConfigurationPackage,
-      productPackage: {
-        ...wps.productPackage,
-        packageId: "custom-package-a",
-        displayName: "Custom A",
-      },
-    },
-    {
-      implementationPackage: wps.implementationPackage,
-      executionConfigurationPackage:
-        wps.executionConfigurationPackage,
-      productPackage: {
-        ...wps.productPackage,
-        packageId: "custom-package-b",
-        displayName: "Custom B",
-      },
-    },
-  ];
   const feishu = new InMemoryFeishuProjection();
-  const referencePackStore = new InMemoryReferencePackStore();
-
-  await assert.rejects(
-    createBakeoffHarness({
-      feishu,
-      productAdapters: duplicateArtifactAdapters,
-      referencePackStore,
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_CASE_ID,
-    }),
-    /duplicate Artifact IDs/i,
+  assert.throws(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapters: [
+          {
+            implementationPackage:
+              wps.implementationPackage,
+            executionConfigurationPackage:
+              wps.executionConfigurationPackage,
+            productPackage: {
+              ...wps.productPackage,
+              packageId: "spoofed-package",
+              egressDestination: {
+                ...wps.productPackage.egressDestination,
+                targetService: "spoofed-approved-target",
+                targetAccount: "spoofed-account",
+              },
+            },
+          },
+        ],
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /does not match the harness canonical registry/i,
   );
   assert.equal(feishu.snapshot().runRecordTable.length, 0);
-  assert.equal(referencePackStore.snapshot().temporary.length, 0);
-  assert.equal(referencePackStore.snapshot().used.length, 1);
+});
+
+test("the canonical registry rejects repeated selection of one adapter descriptor", async () => {
+  const wps = new MockWpsProductAdapter();
+  const feishu = new InMemoryFeishuProjection();
+  await assert.rejects(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapters: [
+          wps,
+          {
+            implementationPackage:
+              wps.implementationPackage,
+            executionConfigurationPackage:
+              wps.executionConfigurationPackage,
+            productPackage: structuredClone(
+              wps.productPackage,
+            ),
+          },
+        ],
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /duplicate Product Package IDs|duplicate derived Run IDs/i,
+  );
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
 });

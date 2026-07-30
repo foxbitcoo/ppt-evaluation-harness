@@ -1059,20 +1059,7 @@ test("Bakeoff fails closed before a vendor call when its call-boundary egress au
     implementationPackage: delegate.implementationPackage,
     executionConfigurationPackage:
       delegate.executionConfigurationPackage,
-    productPackage: {
-      packageId: "MOCK-denied-vendor-package-v1",
-      vendorId: "denied-vendor",
-      displayName: "Denied Vendor",
-      adapterVersion: "denied-vendor-adapter@1",
-      provenance: "MOCK",
-      environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-      egressDestination: {
-        targetService: "denied-vendor-service",
-        targetAccount: "denied-vendor-test-account",
-        targetRegion: "test",
-        subprocessors: [],
-      },
-    },
+    productPackage: delegate.productPackage,
   };
   const authorization: EgressAuthorizationPort = {
     async authorize(request) {

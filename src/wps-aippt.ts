@@ -14,7 +14,9 @@ import {
   PRODUCTION_ENVIRONMENT_ORIGIN,
 } from "./environment-origin.ts";
 import {
+  attemptSubmissionState,
   createProviderSubmissionIntentCheckpoint,
+  isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
   parseAdapterExecutionConfiguration,
   type AttemptCheckpointPort,
@@ -1203,7 +1205,11 @@ function createWpsAiPptProductAdapterExecutor(
         event.attemptId !== command.attemptId ||
         event.attemptSeq !== command.attemptSeq ||
         event.caseId !== command.evaluationCase.caseId ||
-        event.adapterVersion !== WPS_AIPPT_ADAPTER_VERSION
+        (!isHarnessProviderExecutionNotStartedCheckpoint(
+          event,
+          command,
+        ) &&
+          event.adapterVersion !== WPS_AIPPT_ADAPTER_VERSION)
       ) {
         throw new Error(
           "Recovered WPS checkpoint lineage does not match the Attempt",
@@ -1324,7 +1330,8 @@ function createWpsAiPptProductAdapterExecutor(
       if (
         persistedEvents.some(
           isUnresolvedProviderSubmissionIntent,
-        )
+        ) &&
+        attemptSubmissionState(persistedEvents) === "unknown"
       ) {
         return {
           terminalReason: "task_state_unknown",
@@ -1339,6 +1346,7 @@ function createWpsAiPptProductAdapterExecutor(
         };
       }
     }
+    const browserStreamStartIndex = persistedEvents.length;
     const runBrowser = resolveRegisteredWpsAiPptBrowserDriver(
       browserDriver,
       async (event) => {
@@ -1451,7 +1459,9 @@ function createWpsAiPptProductAdapterExecutor(
         manualActions: Object.freeze([]),
       };
     }
-    const events = Object.freeze([...persistedEvents]);
+    const events = Object.freeze(
+      persistedEvents.slice(browserStreamStartIndex),
+    );
     if (events.length !== result.events.length) {
       throw new Error(
         "WPS browser driver did not stream every observable event",

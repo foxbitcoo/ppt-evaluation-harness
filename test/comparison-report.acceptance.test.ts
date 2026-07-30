@@ -532,6 +532,98 @@ test("comparison rejects mismatched persisted compatibility fingerprints before 
   assert.equal(after.reports.length, before.reports.length);
 });
 
+test("comparison rejects a copied compatibility fingerprint that no longer matches the persisted Scorecard inputs", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    artifactScores: source.artifactScores.map((record) =>
+      record.runId !== "MOCK-run-qwen-volcano-v1"
+        ? record
+        : {
+            ...record,
+            scorecard: {
+              ...record.scorecard,
+              evaluationInputManifest: {
+                ...record.scorecard.evaluationInputManifest,
+                referencePackHash:
+                  "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+              },
+            },
+          },
+    ),
+  }));
+
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /fingerprint|Scorecard|evaluation input|lineage/i,
+  );
+});
+
+test("comparison rejects a Scorecard that omits one of the six scoring dimensions even when its copied fingerprint matches", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const projection = withComparisonSourceOverride(feishu, (source) => ({
+    ...source,
+    artifactScores: source.artifactScores.map((record) =>
+      record.runId !== "MOCK-run-qwen-volcano-v1"
+        ? record
+        : {
+            ...record,
+            scorecard: {
+              ...record.scorecard,
+              dimensions: record.scorecard.dimensions.slice(0, -1),
+            },
+          },
+    ),
+  }));
+
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /six unique scoring dimensions|incompatible dimensions/i,
+  );
+});
+
 test("comparison rejects production-shaped LIVE_PRODUCTION and PRODUCTION_REPLAY scorecards when their outer projection provenance is the same", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
@@ -643,6 +735,180 @@ test("Artifact Score projection rejects inconsistent capture execution provenanc
   assert.equal(target.snapshot().artifactScoreTable.length, 0);
 });
 
+test("Artifact Score projection rejects evaluation input hashes that do not match the persisted Artifact and Render Manifest", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockQwenProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  assert.ok(score);
+
+  await assert.rejects(
+    feishu.appendArtifactScore({
+      ...score,
+      scorecard: {
+        ...score.scorecard,
+        evaluationInputManifest: {
+          ...score.scorecard.evaluationInputManifest,
+          artifactHash:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        },
+      },
+    }),
+    /evaluation input|Artifact|lineage/i,
+  );
+  await assert.rejects(
+    feishu.appendArtifactScore({
+      ...score,
+      scorecard: {
+        ...score.scorecard,
+        evaluationInputManifest: {
+          ...score.scorecard.evaluationInputManifest,
+          renderManifestHash:
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        },
+      },
+    }),
+    /evaluation input|Render Manifest|lineage/i,
+  );
+});
+
+test("Artifact Score projection rejects a production-shaped score whose persisted capture has different execution provenance", async () => {
+  const source = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = source.snapshot();
+  const qwenCapture = snapshot.capturedArtifactTable.find(
+    ({ runId }) => runId === "MOCK-run-qwen-volcano-v1",
+  );
+  const qwenScore = snapshot.artifactScoreTable.find(
+    ({ runId }) => runId === "MOCK-run-qwen-volcano-v1",
+  );
+  assert.ok(qwenCapture);
+  assert.ok(qwenScore);
+
+  const target = new InMemoryFeishuProjection();
+  for (const evaluationCase of snapshot.caseTable) {
+    await target.upsertCase(evaluationCase);
+  }
+  for (const run of snapshot.runRecordTable) {
+    await target.appendRunRecord({
+      ...run,
+      provenance: "PRODUCTION",
+    });
+  }
+  await target.appendCapturedArtifact({
+    ...qwenCapture,
+    provenance: "PRODUCTION",
+    artifact: {
+      ...qwenCapture.artifact,
+      provenance: "LIVE_PRODUCTION",
+    },
+    renderManifest: {
+      ...qwenCapture.renderManifest,
+      provenance: "LIVE_PRODUCTION",
+    },
+  });
+
+  await assert.rejects(
+    target.appendArtifactScore({
+      ...qwenScore,
+      provenance: "PRODUCTION",
+      artifact: {
+        ...qwenScore.artifact,
+        provenance: "PRODUCTION_REPLAY",
+      },
+      renderManifest: {
+        ...qwenScore.renderManifest,
+        provenance: "PRODUCTION_REPLAY",
+      },
+      scorecard: {
+        ...qwenScore.scorecard,
+        provenance: "PRODUCTION_REPLAY",
+      },
+    }),
+    /captured artifact|cross-table|lineage/i,
+  );
+  assert.equal(target.snapshot().artifactScoreTable.length, 0);
+});
+
+test("comparison source readback fails closed when Captured Artifact and Artifact Score payloads diverge", async () => {
+  const source = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = source.snapshot();
+  const corrupted = {
+    ...snapshot,
+    artifactScoreTable: snapshot.artifactScoreTable.map((record, index) =>
+      index !== 0
+        ? record
+        : {
+            ...record,
+            artifact: {
+              ...record.artifact,
+              filename: "cross-table-conflict.pptx",
+            },
+          },
+    ),
+  };
+  const readback = source.forkForStaging(corrupted);
+
+  await assert.rejects(
+    readback.loadComparisonReportSource(bakeoff.job.jobId),
+    /captured artifact|cross-table|lineage/i,
+  );
+});
+
+test("Captured Artifact projection rejects a record outside its persisted Job, Case, and Run lineage", async () => {
+  const source = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [new MockQwenProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+    executionMode: "capture_only",
+  });
+  const snapshot = source.snapshot();
+  const capture = snapshot.capturedArtifactTable[0];
+  assert.ok(capture);
+  const feishu = new InMemoryFeishuProjection();
+  for (const evaluationCase of snapshot.caseTable) {
+    await feishu.upsertCase(evaluationCase);
+  }
+  for (const run of snapshot.runRecordTable) {
+    await feishu.appendRunRecord(run);
+  }
+
+  await assert.rejects(
+    feishu.appendCapturedArtifact({
+      ...capture,
+      caseId: "unrelated-case",
+    }),
+    /Job|Case|Run|relational lineage/i,
+  );
+});
+
 test("comparison rejects Codex Judge scorecards produced by different stable execution identities", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
@@ -730,7 +996,7 @@ test("comparison rejects Codex Judge scorecards produced by different stable exe
         },
       ],
     }),
-    /judge|execution|compatible for direct comparison/i,
+    /judge|execution|fingerprint|compatible for direct comparison/i,
   );
 });
 
@@ -908,6 +1174,63 @@ test("replaying the same stable Bakeoff IDs is idempotent while conflicting audi
       },
     }),
     /identity conflict/i,
+  );
+});
+
+test("Artifact Score projection rejects a second row for the same logical Scorecard ID", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu,
+    productAdapters: [new MockQwenProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  assert.ok(score);
+
+  await assert.rejects(
+    feishu.appendArtifactScore({
+      ...score,
+      recordId: `${score.recordId}:duplicate`,
+    }),
+    /recordId|Scorecard ID|identity conflict/i,
+  );
+  assert.equal(feishu.snapshot().artifactScoreTable.length, 1);
+});
+
+test("Artifact Score readback fails closed when recovery contains duplicate logical Scorecard IDs", async () => {
+  const source = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [new MockQwenProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = source.snapshot();
+  const score = snapshot.artifactScoreTable[0];
+  assert.ok(score);
+  const readback = source.forkForStaging({
+    ...snapshot,
+    artifactScoreTable: [
+      score,
+      {
+        ...score,
+        recordId: `${score.recordId}:duplicate`,
+      },
+    ],
+  });
+
+  await assert.rejects(
+    readback.loadArtifactScoreByScorecardId(
+      score.scorecard.scorecardId,
+    ),
+    /duplicate|multiple|identity/i,
+  );
+  await assert.rejects(
+    readback.loadComparisonReportSource(score.jobId),
+    /duplicate|multiple|identity|recordId/i,
   );
 });
 

@@ -144,6 +144,12 @@ export {
   type CreateComparisonReportCommand,
 } from "./comparison-report.ts";
 export {
+  REQUIRED_SCORE_DIMENSIONS,
+  assertArtifactScoreCompatibility,
+  assertCompleteScoreDimensions,
+  expectedComparisonCompatibilityFingerprint,
+} from "./comparison-compatibility.ts";
+export {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
@@ -246,7 +252,10 @@ export {
   type MockAdapterScenario,
 } from "./mock-wps.ts";
 export {
+  attemptSubmissionState,
+  createHarnessProviderExecutionNotStartedCheckpoint,
   InMemoryAttemptCheckpointStore,
+  isHarnessProviderExecutionNotStartedCheckpoint,
   parseAdapterExecutionConfiguration,
   type AttemptCheckpointPort,
   type ArtifactCandidate,

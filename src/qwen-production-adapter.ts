@@ -19,7 +19,9 @@ import type {
   TerminalReason,
 } from "./domain.ts";
 import {
+  attemptSubmissionState,
   createProviderSubmissionIntentCheckpoint,
+  isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
 } from "./product-adapter.ts";
 import type {
@@ -1171,7 +1173,11 @@ function qwenExecutor(
           event.runId !== command.runId ||
           event.attemptId !== command.attemptId ||
           event.attemptSeq !== command.attemptSeq ||
-          event.adapterVersion !== QWEN_ADAPTER_VERSION
+          (!isHarnessProviderExecutionNotStartedCheckpoint(
+            event,
+            command,
+          ) &&
+            event.adapterVersion !== QWEN_ADAPTER_VERSION)
         ) {
           throw new Error(
             "Recovered Qwen checkpoint lineage does not match the Attempt",
@@ -1223,7 +1229,8 @@ function qwenExecutor(
         if (
           recoveredEvents.some(
             isUnresolvedProviderSubmissionIntent,
-          )
+          ) &&
+          attemptSubmissionState(recoveredEvents) === "unknown"
         ) {
           return Object.freeze({
             terminalReason: "task_state_unknown",
@@ -1244,89 +1251,95 @@ function qwenExecutor(
             staticRenders: Object.freeze([]),
           });
         }
-        throw new Error(
-          "Recovered Qwen checkpoints require vendor task identity and state version",
-        );
-      }
-      const reconciliationQuery = {
-          vendorTaskId:
-            latestTaskCheckpoint.vendorTaskId as `task_${string}`,
-          taskStateVersion:
-            latestTaskCheckpoint.taskStateVersion as string,
-          eventHistoryHash: sha256(
-            textEncoder.encode(JSON.stringify(recoveredEvents)),
-          ),
-          artifactContentHash: null,
-        };
-      const reconciliation = testOnlyReconciliation
-        ? reconcileTestQwenTask(
-            reconciliationDriver!,
-            reconciliationQuery,
-          )
-        : reconcileRegisteredQwenTask(
-            reconciliationDriver,
-            reconciliationQuery,
+        if (
+          attemptSubmissionState(recoveredEvents) !==
+          "not_submitted"
+        ) {
+          throw new Error(
+            "Recovered Qwen checkpoints require vendor task identity and state version",
           );
-      const reconciliationEvent = Object.freeze({
-        eventId: `${command.attemptId}-qwen-reconciliation-${recoveredEvents.length + 1}`,
-        jobId: command.jobId,
-        caseId: command.evaluationCase.caseId,
-        runId: command.runId,
-        attemptId: command.attemptId,
-        attemptSeq: command.attemptSeq,
-        eventType: "task_reconciliation_result",
-        sourceAt: reconciliation.observedAt,
-        observedAt: reconciliation.observedAt,
-        writerId: QWEN_ADAPTER_VERSION,
-        evidenceRef: reconciliation.evidenceId,
-        sourceUrl:
-          `urn:qwen-evidence:${reconciliation.evidenceId}`,
-        submissionEvidenceAtCheckpoint: recoveredEvents.some(
-          ({ submissionEvidenceAtCheckpoint }) =>
-            submissionEvidenceAtCheckpoint === "submitted",
-        )
-          ? "submitted" as const
-          : "unknown" as const,
-        vendorTaskId: reconciliation.query.vendorTaskId,
-        taskStateVersion: reconciliation.query.taskStateVersion,
-        adapterVersion: QWEN_ADAPTER_VERSION,
-        artifactId: null,
-        reconciliationObservedState: reconciliation.observedState,
-        reconciliationTerminalReason:
-          terminalReasonForQwenReconciliation(
-            reconciliation.observedState,
+        }
+      } else {
+        const reconciliationQuery = {
+            vendorTaskId:
+              latestTaskCheckpoint.vendorTaskId as `task_${string}`,
+            taskStateVersion:
+              latestTaskCheckpoint.taskStateVersion as string,
+            eventHistoryHash: sha256(
+              textEncoder.encode(JSON.stringify(recoveredEvents)),
+            ),
+            artifactContentHash: null,
+          };
+        const reconciliation = testOnlyReconciliation
+          ? reconcileTestQwenTask(
+              reconciliationDriver!,
+              reconciliationQuery,
+            )
+          : reconcileRegisteredQwenTask(
+              reconciliationDriver,
+              reconciliationQuery,
+            );
+        const reconciliationEvent = Object.freeze({
+          eventId: `${command.attemptId}-qwen-reconciliation-${recoveredEvents.length + 1}`,
+          jobId: command.jobId,
+          caseId: command.evaluationCase.caseId,
+          runId: command.runId,
+          attemptId: command.attemptId,
+          attemptSeq: command.attemptSeq,
+          eventType: "task_reconciliation_result",
+          sourceAt: reconciliation.observedAt,
+          observedAt: reconciliation.observedAt,
+          writerId: QWEN_ADAPTER_VERSION,
+          evidenceRef: reconciliation.evidenceId,
+          sourceUrl:
+            `urn:qwen-evidence:${reconciliation.evidenceId}`,
+          submissionEvidenceAtCheckpoint: recoveredEvents.some(
+            ({ submissionEvidenceAtCheckpoint }) =>
+              submissionEvidenceAtCheckpoint === "submitted",
+          )
+            ? "submitted" as const
+            : "unknown" as const,
+          vendorTaskId: reconciliation.query.vendorTaskId,
+          taskStateVersion: reconciliation.query.taskStateVersion,
+          adapterVersion: QWEN_ADAPTER_VERSION,
+          artifactId: null,
+          reconciliationObservedState: reconciliation.observedState,
+          reconciliationTerminalReason:
+            terminalReasonForQwenReconciliation(
+              reconciliation.observedState,
+            ),
+          reconciliationArtifactReference:
+            artifactReferenceForQwenReconciliation(
+              reconciliation.observedState,
+              reconciliation.query.vendorTaskId,
+            ),
+        });
+        await checkpointStore?.append(reconciliationEvent);
+        const reconciledEvents = Object.freeze([
+          ...recoveredEvents.map((event) =>
+            Object.freeze(structuredClone(event)),
           ),
-        reconciliationArtifactReference:
-          artifactReferenceForQwenReconciliation(
-            reconciliation.observedState,
-            reconciliation.query.vendorTaskId,
-          ),
-      });
-      await checkpointStore?.append(reconciliationEvent);
-      const reconciledEvents = Object.freeze([
-        ...recoveredEvents.map((event) =>
-          Object.freeze(structuredClone(event)),
-        ),
-        reconciliationEvent,
-      ]);
-      return Object.freeze({
-        terminalReason:
-          reconciliationEvent.reconciliationTerminalReason,
-        blockReason: null,
-        submissionEvidence: recoveredEvents.some(
-          ({ submissionEvidenceAtCheckpoint }) =>
-            submissionEvidenceAtCheckpoint === "submitted",
-        )
-          ? "submitted"
-          : "unknown",
-        elapsedMs: 0,
-        artifactCandidates: Object.freeze([]),
-        observableEvents: reconciledEvents,
-        observedConfiguration: null,
-        trace: Object.freeze([]),
-        manualActions: Object.freeze([]),
-        staticRenders: Object.freeze([]),
-      });
+          reconciliationEvent,
+        ]);
+        return Object.freeze({
+          terminalReason:
+            reconciliationEvent.reconciliationTerminalReason,
+          blockReason: null,
+          submissionEvidence: recoveredEvents.some(
+            ({ submissionEvidenceAtCheckpoint }) =>
+              submissionEvidenceAtCheckpoint === "submitted",
+          )
+            ? "submitted"
+            : "unknown",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: reconciledEvents,
+          observedConfiguration: null,
+          trace: Object.freeze([]),
+          manualActions: Object.freeze([]),
+          staticRenders: Object.freeze([]),
+        });
+      }
     }
     if (recordSubmissionIntent) {
       await checkpointStore?.append(

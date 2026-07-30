@@ -11,12 +11,14 @@ import {
   ProjectionStaleBaselineError,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   VOLCANO_CASE_ID,
+  calculateRenderManifestHash,
   canonicalJsonBytes,
   createBakeoffHarness,
   createComparisonReportService,
   createHarnessOwnedLarkBaseProjection,
   createLarkReportCollectionMarkdown,
   createVerifiedLarkCliTransport,
+  expectedComparisonCompatibilityFingerprint,
   requireEgressAuthorization,
   sha256Bytes,
   type EgressAuthorizationAuditPort,
@@ -250,23 +252,76 @@ async function threeVendorProductionSeed(): Promise<FeishuProjectionSnapshot> {
     ),
   );
   const seed = productionize(source.snapshot());
-  const safelyMaterializedSeed: FeishuProjectionSnapshot = {
-    ...seed,
-    capturedArtifactTable: seed.capturedArtifactTable.map(
-      (record) => ({
+  const capturedArtifactTable = seed.capturedArtifactTable.map(
+    (record) => {
+      const rendered = {
+        ...record.renderManifest,
+        slides: record.renderManifest.slides.map((slide) => ({
+          ...slide,
+          filename: slide.filename.replace(/\.svg$/i, ".png"),
+          mimeType: "image/png" as const,
+          content: png,
+          contentHash: sha256(png),
+        })),
+      };
+      const {
+        contentHash: _previousRenderManifestHash,
+        ...renderManifestHashInput
+      } = rendered;
+      return {
         ...record,
         renderManifest: {
-          ...record.renderManifest,
-          slides: record.renderManifest.slides.map((slide) => ({
-            ...slide,
-            filename: slide.filename.replace(/\.svg$/i, ".png"),
-            mimeType: "image/png",
-            content: png,
-            contentHash: sha256(png),
-          })),
+          ...rendered,
+          contentHash: calculateRenderManifestHash(
+            record.artifact.contentHash,
+            renderManifestHashInput,
+          ),
         },
-      }),
-    ),
+      };
+    },
+  );
+  const capturesByArtifactId = new Map(
+    capturedArtifactTable.map((record) => [
+      record.artifactId,
+      record,
+    ]),
+  );
+  const evaluationCase = seed.caseTable[0];
+  const job = seed.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const protocolSnapshot = job?.protocolSnapshot;
+  assert.ok(evaluationCase);
+  assert.ok(protocolSnapshot);
+  const artifactScoreTable = seed.artifactScoreTable.map((record) => {
+    const capture = capturesByArtifactId.get(record.artifactId);
+    assert.ok(capture);
+    const scorecard = {
+      ...record.scorecard,
+      evaluationInputManifest: {
+        ...record.scorecard.evaluationInputManifest,
+        artifactHash: capture.artifact.contentHash,
+        renderManifestHash: capture.renderManifest.contentHash,
+        renderer: capture.renderManifest.renderer,
+      },
+    };
+    return {
+      ...record,
+      artifact: capture.artifact,
+      renderManifest: capture.renderManifest,
+      scorecard,
+      comparisonCompatibilityFingerprint:
+        expectedComparisonCompatibilityFingerprint(
+          scorecard,
+          protocolSnapshot,
+          evaluationCase,
+        ),
+    };
+  });
+  const safelyMaterializedSeed: FeishuProjectionSnapshot = {
+    ...seed,
+    capturedArtifactTable,
+    artifactScoreTable,
   };
   assert.doesNotMatch(
     JSON.stringify(safelyMaterializedSeed),

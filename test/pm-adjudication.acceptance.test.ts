@@ -57,6 +57,56 @@ async function createScoredWpsProjection(): Promise<{
   return { feishu, scorecardId, jobId: outcome.job.jobId };
 }
 
+test("effective Scorecard readback fails closed on duplicate logical Scorecard identities", async () => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const snapshot = feishu.snapshot();
+  const score = snapshot.artifactScoreTable[0];
+  assert.ok(score);
+  const readback = feishu.forkForStaging({
+    ...snapshot,
+    artifactScoreTable: [
+      score,
+      {
+        ...score,
+        recordId: `${score.recordId}:duplicate`,
+      },
+    ],
+  });
+
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: readback,
+    }).getEffectiveScorecard(scorecardId),
+    /duplicate|multiple|identity/i,
+  );
+});
+
+test("effective Scorecard readback fails closed when its Artifact payload diverges from the Captured Artifact", async () => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const snapshot = feishu.snapshot();
+  const readback = feishu.forkForStaging({
+    ...snapshot,
+    artifactScoreTable: snapshot.artifactScoreTable.map(
+      (score) => ({
+        ...score,
+        artifact: {
+          ...score.artifact,
+          filename: "effective-score-cross-table-conflict.pptx",
+        },
+      }),
+    ),
+  });
+
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: readback,
+    }).getEffectiveScorecard(scorecardId),
+    /Captured Artifact|cross-table|lineage/i,
+  );
+});
+
 test("a PM adjudication is append-only and exposes the latest human score without overwriting the model score", async () => {
   const { feishu, scorecardId } = await createScoredWpsProjection();
   const service = createScoreAdjudicationService({ feishu });

@@ -7,7 +7,9 @@ import type {
   ObservableAttemptEvent,
 } from "./domain.ts";
 import {
+  attemptSubmissionState,
   createProviderSubmissionIntentCheckpoint,
+  isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
 } from "./product-adapter.ts";
 import type {
@@ -1078,9 +1080,14 @@ export function resolveDoubaoProductionExecutor(
             event.jobId !== command.jobId ||
             event.runId !== command.runId ||
             event.attemptId !== command.attemptId ||
+            event.attemptSeq !== command.attemptSeq ||
             event.caseId !== command.evaluationCase.caseId ||
-            event.adapterVersion !==
-              DOUBAO_PRODUCTION_ADAPTER_VERSION,
+            (!isHarnessProviderExecutionNotStartedCheckpoint(
+              event,
+              command,
+            ) &&
+              event.adapterVersion !==
+                DOUBAO_PRODUCTION_ADAPTER_VERSION),
         )
       ) {
         throw new Error(
@@ -1153,7 +1160,10 @@ export function resolveDoubaoProductionExecutor(
           ]),
         });
       }
-      if (recovered.some(isUnresolvedProviderSubmissionIntent)) {
+      if (
+        recovered.some(isUnresolvedProviderSubmissionIntent) &&
+        attemptSubmissionState(recovered) === "unknown"
+      ) {
         return Object.freeze({
           terminalReason: "task_state_unknown",
           blockReason: null,
@@ -1207,12 +1217,14 @@ export function resolveDoubaoProductionExecutor(
         manualActions,
       });
     }
-    await checkpointStore?.append(
-      createProviderSubmissionIntentCheckpoint(
-        command,
-        DOUBAO_PRODUCTION_ADAPTER_VERSION,
-      ),
-    );
+    if (executionMode === "live") {
+      await checkpointStore?.append(
+        createProviderSubmissionIntentCheckpoint(
+          command,
+          DOUBAO_PRODUCTION_ADAPTER_VERSION,
+        ),
+      );
+    }
     const submission = await activeDriver.submitFrozenQuery({
       ...operation,
       vendorPrompt: VOLCANO_EVALUATION_CASE.vendorPrompt,

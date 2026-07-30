@@ -37,6 +37,10 @@ import {
   projectionProvenanceCoversCapture,
 } from "./provenance.ts";
 import { createScoreAdjudicationService } from "./score-adjudication.ts";
+import {
+  assertArtifactScoreCompatibility,
+  assertCompleteScoreDimensions,
+} from "./comparison-compatibility.ts";
 
 export interface CreateComparisonReportCommand {
   readonly jobId: string;
@@ -91,9 +95,18 @@ function scoredRunById<ScoreRecord extends ArtifactScoreTableRecord>(
   const score =
     scorecardId === undefined
       ? candidates[0]
-      : candidates.find(
-          (record) => record.scorecard.scorecardId === scorecardId,
-        );
+      : (() => {
+          const matches = candidates.filter(
+            (record) =>
+              record.scorecard.scorecardId === scorecardId,
+          );
+          if (matches.length > 1) {
+            throw new Error(
+              `Scorecard identity is duplicated: ${scorecardId}`,
+            );
+          }
+          return matches[0];
+        })();
   if (run === undefined || score === undefined || run.product === null) {
     throw new Error(`Scored vendor Run not found: ${runId}`);
   }
@@ -228,6 +241,23 @@ function comparePair(
     throw new Error("Selected Runs are not compatible for direct comparison");
   }
   const sharedProvenance = left.score.provenance;
+  assertCompleteScoreDimensions(
+    left.score.effectiveScorecard.dimensions,
+    "Left effective Scorecard",
+  );
+  assertCompleteScoreDimensions(
+    right.score.effectiveScorecard.dimensions,
+    "Right effective Scorecard",
+  );
+  const leftDimensionNames = left.score.effectiveScorecard.dimensions
+    .map(({ dimension }) => dimension)
+    .sort();
+  const rightDimensionNames = right.score.effectiveScorecard.dimensions
+    .map(({ dimension }) => dimension)
+    .sort();
+  if (!isDeepStrictEqual(leftDimensionNames, rightDimensionNames)) {
+    throw new Error("Selected Scorecards use incompatible dimensions");
+  }
 
   const rightDimensions = dimensionsByName(
     right.score.effectiveScorecard.dimensions,
@@ -955,6 +985,13 @@ export function createComparisonReportService({
           const source = await writeProjection.loadComparisonReportSource(
             command.jobId,
           );
+          for (const score of source.artifactScores) {
+            assertArtifactScoreCompatibility(
+              score,
+              source.evaluationCase,
+              source.job.protocolSnapshot,
+            );
+          }
           const adjudicationService = createScoreAdjudicationService({
             feishu: writeProjection,
           });

@@ -40,7 +40,17 @@ advisory lock, attested by canonical path, exact executable hash, and exact
 usage/version contract before acquisition. The lock holder emits a no-shell
 handshake only after `lockf` owns the lock; release waits for the holder to
 exit, and an owner crash closes its pipe so the OS releases the lock without
-stale-file deletion. It covers each stable-ID search, create, and readback; an
+stale-file deletion. If an acquired holder exits before an explicit release,
+the owner process immediately fail-stops; it cannot continue a critical
+section after another worker can acquire the OS lock.
+
+Lock names do not depend on caller labels such as `targetAccount` or on a raw
+URL spelling. The Base resource identity binds the configured Base token and
+sorted unique physical table IDs. Claim and report-bearing projection locks
+also acquire a deterministically ordered Docx resource lock bound to the exact
+document token and canonical Feishu origin. Production rejects Base URLs with
+a trailing slash, query, fragment, non-canonical spelling, or an origin alias.
+It covers each stable-ID search, create, and readback; an
 already-corrupt duplicate set fails closed and is never “repaired” by deleting
 a record another process may already use. The same boundary covers a complete
 Job projection from marker read through Docx CAS, Base rows and attachments,
@@ -74,6 +84,11 @@ one durable checkpoint and every checkpoint is still `not_submitted`. The
 abort records the exact not-submitted attempt IDs, abort time, claim epoch,
 owner token, PID, and OS process-start identity. A later claimant must create a
 new epoch; an old owner cannot revive or overwrite the aborted epoch.
+The sentinel holder and all of its pipes are explicitly released after a
+durable commit marker, a persisted safe pre-submission abort, or explicit
+transport disposal. Unknown or submitted attempt state is not converted to a
+safe abort; durable checkpoints continue to suppress unsafe provider retry
+after disposal or process loss.
 After that binding, production writes the document once per projection
 revision as a complete report collection: one Chinese H1, then the primary
 report and every current auxiliary A/B report as independently identified
@@ -131,13 +146,16 @@ report, but retained captures still require hash-verified Artifact storage.
 
 Production validates every selected adapter's execution mode against its
 Product Package provenance before durable claims, provider execution, or any
-egress authorization is used. `PRODUCTION_REPLAY` remains eligible only through
-its harness-owned immutable capture receipt and registered, hash-verified
-replay package. The WPS receipt allowlist binds the known retained Artifact,
-Trace, render, and package identity. Qwen currently has no complete captured
-PPTX receipt, so its retained partial attempt cannot become a production
-replay Artifact. Caller-provided sessions and Mock bytes cannot mint either
-receipt. For `LIVE_PRODUCTION`, the
+egress authorization is used. Every Mock, WPS, Qwen, and Doubao adapter must
+return the exact deep-equal Product Package registered by the harness for its
+product, mode, and implementation; caller-supplied or internally reconstructed
+near-matches fail closed. `PRODUCTION_REPLAY` remains eligible only through its
+harness-owned immutable capture receipt and registered, hash-verified replay
+package. The WPS receipt allowlist binds the known retained Artifact, Trace,
+render, and package identity. Qwen currently has no complete captured PPTX
+receipt, so its retained partial attempt cannot become a production replay
+Artifact. Caller-provided sessions and Mock bytes cannot mint either receipt.
+For `LIVE_PRODUCTION`, the
 selected harness-owned executable or bridge must already be embedded and pass
 its fixed-file/hash readiness check.
 
@@ -280,9 +298,18 @@ authorization expires and proves that no `record-upsert` command is invoked.
 Before any provider adapter runs, production:
 
 - checks Feishu for a Job marker, Job row, or any selected vendor Run row;
-- reads durable attempt-1 checkpoints and suppresses retry for submitted or
-  unknown states; and
-- writes and reads back a stable remote Job claim.
+- creates or reads stable control checkpoints for both allowed attempts;
+- computes a canonical attempt-1/attempt-2 submission-state summary and binds
+  its hash into the stable remote Job claim;
+- rereads that exact summary immediately after claim acquisition; and
+- rereads all allowed attempt states again immediately before each vendor
+  egress, suppressing retry whenever any applicable state is submitted or
+  unknown.
+
+Attempt state is monotonic: `submitted` can never be downgraded, while an
+explicit durable `not_submitted` observation may resolve a prior `unknown`
+control state. Replay consumes retained evidence and never writes a live
+submission intent.
 
 A matching completed marker is never accepted on self-reported marker payload
 alone: every Case, Run, Artifact, Score, Comparison, Gap, and workflow row is

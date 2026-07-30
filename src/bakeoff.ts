@@ -39,6 +39,9 @@ import {
   planCompatibleComparisonPairs,
 } from "./comparison-report.ts";
 import {
+  expectedComparisonCompatibilityFingerprint,
+} from "./comparison-compatibility.ts";
+import {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   assertEnvironmentOriginAllowed,
@@ -77,6 +80,7 @@ import {
 } from "./fixtures/volcano-case.ts";
 import {
   renderStaticArtifact,
+  resolveCanonicalProductPackage,
   resolveHarnessProductAdapterExecutor,
   resolveHarnessProductAdapterExecutorForTest,
 } from "./mock-wps.ts";
@@ -101,6 +105,8 @@ import {
   assertHarnessOwnedWpsLiveBridgeReady,
 } from "./wps-aippt-live-bridge.ts";
 import {
+  attemptSubmissionState,
+  createHarnessProviderExecutionNotStartedCheckpoint,
   InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
   type AttemptCheckpointPort,
@@ -795,6 +801,241 @@ class UnresolvedAttemptShutdownError extends Error {
   }
 }
 
+const MAX_PROVIDER_ATTEMPTS = 2;
+
+export interface ProductionAttemptSubmissionSummary {
+  readonly attemptId: string;
+  readonly attemptSeq: number;
+  readonly runId: string;
+  readonly submissionState: SubmissionEvidence;
+}
+
+interface ProductionAttemptScope {
+  readonly jobId: string;
+  readonly caseId: string;
+  readonly runIds: readonly string[];
+}
+
+async function ensureProductionAttemptControlCheckpoints(
+  scope: ProductionAttemptScope,
+  checkpointStore: AttemptCheckpointPort,
+): Promise<void> {
+  await Promise.all(
+    scope.runIds.flatMap((runId) =>
+      Array.from(
+        { length: MAX_PROVIDER_ATTEMPTS },
+        (_, offset) => offset + 1,
+      ).map(async (attemptSeq) => {
+        const attemptId = `${runId}-attempt-${attemptSeq}`;
+        await checkpointStore.append(
+          createHarnessProviderExecutionNotStartedCheckpoint({
+            jobId: scope.jobId,
+            caseId: scope.caseId,
+            runId,
+            attemptId,
+            attemptSeq,
+          }),
+        );
+      }),
+    ),
+  );
+}
+
+async function readProductionAttemptSubmissionSummary(
+  scope: ProductionAttemptScope,
+  checkpointStore: AttemptCheckpointPort,
+): Promise<readonly ProductionAttemptSubmissionSummary[]> {
+  if (checkpointStore.readAttempt === undefined) {
+    throw new Error("durable checkpoint read is unavailable");
+  }
+  return Object.freeze(
+    await Promise.all(
+      scope.runIds.flatMap((runId) =>
+        Array.from(
+          { length: MAX_PROVIDER_ATTEMPTS },
+          (_, offset) => offset + 1,
+        ).map(async (attemptSeq) => {
+          const attemptId = `${runId}-attempt-${attemptSeq}`;
+          const events =
+            await checkpointStore.readAttempt!(attemptId);
+          if (
+            events.length === 0 ||
+            events.some(
+              (event) =>
+                event.jobId !== scope.jobId ||
+                event.caseId !== scope.caseId ||
+                event.runId !== runId ||
+                event.attemptId !== attemptId ||
+                event.attemptSeq !== attemptSeq,
+            )
+          ) {
+            throw new Error(
+              `Production Attempt checkpoint lineage is incomplete: ${attemptId}`,
+            );
+          }
+          return Object.freeze({
+            attemptId,
+            attemptSeq,
+            runId,
+            submissionState: attemptSubmissionState(events),
+          });
+        }),
+      ),
+    ),
+  );
+}
+
+function assertProductionAttemptSummarySafe(
+  summary: readonly ProductionAttemptSubmissionSummary[],
+): void {
+  const unresolved = summary.find(
+    ({ submissionState }) =>
+      submissionState !== "not_submitted",
+  );
+  if (unresolved !== undefined) {
+    throw new UnresolvedAttemptShutdownError(
+      unresolved.attemptId,
+      `production restart found ${unresolved.submissionState} attempt state; provider retry suppressed`,
+    );
+  }
+}
+
+export async function acquireProductionClaimBoundToAttemptState<T>(
+  input: {
+    readonly scope: ProductionAttemptScope;
+    readonly protocolSnapshot: BakeoffProtocolSnapshot;
+    readonly securityContextHash: `sha256:${string}`;
+    readonly checkpointStore: AttemptCheckpointPort;
+    readonly acquireClaim: (claim: {
+      readonly claimHash: `sha256:${string}`;
+      readonly attemptSubmissionSummaryHash: `sha256:${string}`;
+      readonly attemptSubmissionSummary:
+        readonly ProductionAttemptSubmissionSummary[];
+    }) => Promise<T>;
+  },
+): Promise<{
+  readonly claimHash: `sha256:${string}`;
+  readonly attemptSubmissionSummary:
+    readonly ProductionAttemptSubmissionSummary[];
+  readonly result: T;
+}> {
+  await ensureProductionAttemptControlCheckpoints(
+    input.scope,
+    input.checkpointStore,
+  );
+  let attemptSubmissionSummary:
+    readonly ProductionAttemptSubmissionSummary[];
+  try {
+    attemptSubmissionSummary =
+      await readProductionAttemptSubmissionSummary(
+        input.scope,
+        input.checkpointStore,
+      );
+  } catch (error) {
+    throw new UnresolvedAttemptShutdownError(
+      `${input.scope.runIds[0] ?? "unknown-run"}-attempt-1`,
+      "production restart checkpoint recovery is unavailable",
+      error,
+    );
+  }
+  assertProductionAttemptSummarySafe(attemptSubmissionSummary);
+  const attemptSubmissionSummaryHash = sha256Json(
+    attemptSubmissionSummary,
+  );
+  const claimHash = sha256Json({
+    schemaVersion: "production-job-claim-v1",
+    jobId: input.scope.jobId,
+    caseId: input.scope.caseId,
+    runIds: input.scope.runIds,
+    protocolSnapshot: input.protocolSnapshot,
+    securityContextHash: input.securityContextHash,
+    attemptSubmissionSummaryHash,
+  });
+  const result = await input.acquireClaim({
+    claimHash,
+    attemptSubmissionSummaryHash,
+    attemptSubmissionSummary,
+  });
+  let postClaimAttemptSubmissionSummary:
+    readonly ProductionAttemptSubmissionSummary[];
+  try {
+    postClaimAttemptSubmissionSummary =
+      await readProductionAttemptSubmissionSummary(
+        input.scope,
+        input.checkpointStore,
+      );
+  } catch (error) {
+    throw new UnresolvedAttemptShutdownError(
+      `${input.scope.runIds[0] ?? "unknown-run"}-attempt-1`,
+      "post-claim checkpoint recovery is unavailable",
+      error,
+    );
+  }
+  if (
+    !isDeepStrictEqual(
+      postClaimAttemptSubmissionSummary,
+      attemptSubmissionSummary,
+    )
+  ) {
+    throw new UnresolvedAttemptShutdownError(
+      postClaimAttemptSubmissionSummary.find(
+        (entry, index) =>
+          !isDeepStrictEqual(
+            entry,
+            attemptSubmissionSummary[index],
+          ),
+      )?.attemptId ??
+        `${input.scope.runIds[0] ?? "unknown-run"}-attempt-1`,
+      "attempt submission state changed while the production claim was acquired",
+    );
+  }
+  return Object.freeze({
+    claimHash,
+    attemptSubmissionSummary,
+    result,
+  });
+}
+
+export async function assertProductionVendorEgressSafe(input: {
+  readonly jobId: string;
+  readonly caseId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly attemptSeq: number;
+  readonly checkpointStore: AttemptCheckpointPort;
+}): Promise<void> {
+  let summary: readonly ProductionAttemptSubmissionSummary[];
+  try {
+    summary = await readProductionAttemptSubmissionSummary(
+      {
+        jobId: input.jobId,
+        caseId: input.caseId,
+        runIds: [input.runId],
+      },
+      input.checkpointStore,
+    );
+  } catch (error) {
+    throw new UnresolvedAttemptShutdownError(
+      input.attemptId,
+      "vendor egress checkpoint recovery is unavailable",
+      error,
+    );
+  }
+  assertProductionAttemptSummarySafe(summary);
+  if (
+    !summary.some(
+      (entry) =>
+        entry.attemptId === input.attemptId &&
+        entry.attemptSeq === input.attemptSeq,
+    )
+  ) {
+    throw new UnresolvedAttemptShutdownError(
+      input.attemptId,
+      "vendor egress could not bind the current Attempt",
+    );
+  }
+}
+
 function snapshotProductSelections(
   adapters: readonly ProductAdapterPort[],
   environment: "test" | "production",
@@ -813,21 +1054,6 @@ function snapshotProductSelections(
 ): readonly SelectedProductAdapter[] {
   return Object.freeze(
     adapters.map((adapter) => {
-      const productPackage = Object.freeze({
-        ...adapter.productPackage,
-        egressDestination: Object.freeze(
-          structuredClone(adapter.productPackage.egressDestination),
-        ),
-        ...(adapter.productPackage.evaluationConfiguration === undefined
-          ? {}
-          : {
-              evaluationConfiguration: Object.freeze(
-                structuredClone(
-                  adapter.productPackage.evaluationConfiguration,
-                ),
-              ),
-            }),
-      });
       const implementationPackage =
         Object.freeze<ProductAdapterImplementationPackage>({
           packageName: adapter.implementationPackage.packageName,
@@ -850,6 +1076,41 @@ function snapshotProductSelections(
         parseAdapterExecutionConfiguration(
           executionConfigurationPackage,
         );
+      const canonicalProductPackage =
+        resolveCanonicalProductPackage(
+          executionConfiguration,
+          environment,
+        );
+      if (
+        !isDeepStrictEqual(
+          adapter.productPackage,
+          canonicalProductPackage,
+        )
+      ) {
+        throw new Error(
+          `Product Package descriptor does not match the harness canonical registry: ${executionConfiguration.adapterKind}:${executionConfiguration.scenario}`,
+        );
+      }
+      const productPackage = Object.freeze({
+        ...structuredClone(canonicalProductPackage),
+        environmentOrigin:
+          canonicalProductPackage.environmentOrigin,
+        egressDestination: Object.freeze(
+          structuredClone(
+            canonicalProductPackage.egressDestination,
+          ),
+        ),
+        ...(canonicalProductPackage.evaluationConfiguration ===
+        undefined
+          ? {}
+          : {
+              evaluationConfiguration: Object.freeze(
+                structuredClone(
+                  canonicalProductPackage.evaluationConfiguration,
+                ),
+              ),
+            }),
+      });
       const browserDriverEvidence =
         executionConfiguration.adapterKind === "wps-aippt-browser"
           ? registeredWpsAiPptBrowserDriverEvidence(
@@ -1275,72 +1536,6 @@ function sha256Json(value: unknown): `sha256:${string}` {
     .digest("hex")}`;
 }
 
-function comparisonCompatibilityFingerprint(
-  scorecard: ArtifactScorecard,
-  protocolSnapshot: BakeoffProtocolSnapshot,
-  evaluationCase = VOLCANO_EVALUATION_CASE,
-) {
-  const judge = scorecard.judgeLineage;
-  return Object.freeze({
-    caseManifestHash: sha256Json(evaluationCase),
-    caseInputHash: sha256Json({
-      vendorPrompt: evaluationCase.vendorPrompt,
-    }),
-    track: evaluationCase.track,
-    protocolHash: sha256Json(protocolSnapshot),
-    rubricVersion: scorecard.rubricVersion,
-    scenarioWeightProfile: null,
-    judgeConfigurationHash:
-      judge === null
-        ? sha256Json({ scorer: "mock-score@1" })
-        : sha256Json({
-            provider: judge.provider,
-            adapterVersion: judge.adapterVersion,
-            requestedModel: judge.requestedModel,
-            responseModel: judge.responseModel,
-            promptVersion: judge.promptVersion,
-            promptHash: judge.promptHash,
-            configHash: judge.configHash,
-            schemaHash: judge.schemaHash,
-            executionIdentity:
-              judge.provider === "codex_cli" &&
-              judge.executionEvidence !== undefined
-                ? {
-                    schemaVersion:
-                      judge.executionEvidence.schemaVersion,
-                    binaryHash:
-                      judge.executionEvidence.binaryHash,
-                    fixedArgumentsHash:
-                      judge.executionEvidence.fixedArgumentsHash,
-                    sandboxBinaryHash:
-                      judge.executionEvidence.sandboxBinaryHash,
-                    sandboxProfileHash:
-                      judge.executionEvidence.sandboxProfileHash,
-                  }
-                : null,
-          }),
-    renderPipelineHash: sha256Json({
-      renderer: scorecard.evaluationInputManifest.renderer,
-      renderOutcome:
-        scorecard.deliveryQualityGates.find(
-          ({ gate }) => gate === "sufficient_faithful_visual_input",
-        )?.status ?? "NOT_ASSESSABLE",
-    }),
-    designJudgmentSurfaceHash: sha256Json({
-      surfaceClass: "canonical",
-      renderer: scorecard.evaluationInputManifest.renderer,
-      compatibilityStatus:
-        scorecard.deliveryQualityGates.find(
-          ({ gate }) => gate === "sufficient_faithful_visual_input",
-        )?.status === "PASS"
-          ? "compatible"
-          : "visual_comparison_prohibited",
-    }),
-    referencePackHash:
-      scorecard.evaluationInputManifest.referencePackHash,
-  });
-}
-
 function attemptRecord(input: {
   readonly context: BakeoffExecutionContext;
   readonly productPackage: ProductPackageSnapshot;
@@ -1459,6 +1654,11 @@ async function executeVendor(
   judgeDestination: EgressDestinationMetadata,
   attemptCheckpointStore: AttemptCheckpointPort,
   onReferencePackUse: (evaluationAttemptId: string) => void,
+  beforeVendorEgress?: (input: {
+    readonly runId: string;
+    readonly attemptId: string;
+    readonly attemptSeq: number;
+  }) => Promise<void>,
 ): Promise<CapturedVendorResult> {
   const {
     execute,
@@ -1492,6 +1692,11 @@ async function executeVendor(
         artifactCandidates: [],
       };
     } else {
+      await beforeVendorEgress?.({
+        runId,
+        attemptId,
+        attemptSeq,
+      });
       const vendorAuthorization =
         await requireEgressAuthorization(egressAuthorization, {
           requestId: `vendor-generation:${attemptId}`,
@@ -2284,6 +2489,8 @@ export function createBakeoffHarness({
       let productionClaim: {
         readonly claimHash: `sha256:${string}`;
         readonly authorization: ApprovedEgressAuthorization;
+        readonly attemptSubmissionSummary:
+          readonly ProductionAttemptSubmissionSummary[];
       } | null = null;
       if (command.environment === "production") {
         if (command.executionMode !== "capture_only") {
@@ -2320,99 +2527,82 @@ export function createBakeoffHarness({
         );
       }
       if (command.environment === "production") {
-        const remoteState =
-          await readHarnessOwnedLarkProductionJobState(feishu, {
-            jobId: context.jobId,
-            runIds: selectedRunIds,
+        const boundClaim =
+          await acquireProductionClaimBoundToAttemptState({
+            scope: {
+              jobId: context.jobId,
+              caseId: context.evaluationCase.caseId,
+              runIds: selectedRunIds,
+            },
+            protocolSnapshot,
+            securityContextHash,
+            checkpointStore: attemptCheckpointStore,
+            async acquireClaim({ claimHash }) {
+              const remoteState =
+                await readHarnessOwnedLarkProductionJobState(feishu, {
+                  jobId: context.jobId,
+                  runIds: selectedRunIds,
+                });
+              if (remoteState.state !== "absent") {
+                throw new Error(
+                  `Production Bakeoff remote recovery required before provider execution: ${remoteState.state}`,
+                );
+              }
+              const claimAuthorization =
+                await requireEgressAuthorization(
+                  egressAuthorization,
+                  {
+                    requestId:
+                      `operational-ledger-production-claim:${context.jobId}:${claimHash}`,
+                    jobId: context.jobId,
+                    runId: null,
+                    attemptId: null,
+                    dataClassification:
+                      context.evaluationCase.dataClassification,
+                    sourceOwner:
+                      context.evaluationCase.sourceOwner,
+                    processingPurpose:
+                      "operational_ledger_projection_storage",
+                    targetKind: "storage",
+                    targetService:
+                      feishu.egressDestination.targetService,
+                    targetAccount:
+                      feishu.egressDestination.targetAccount,
+                    targetRegion:
+                      feishu.egressDestination.targetRegion,
+                    subprocessors:
+                      feishu.egressDestination.subprocessors,
+                    contentFields: ["production_job_claim"],
+                    payloadHash: claimHash,
+                    requiredRedactions: [],
+                  },
+                  clock,
+                );
+              await egressAudit.append(claimAuthorization);
+              const claimed =
+                await claimHarnessOwnedLarkProductionJob(
+                  feishu,
+                  {
+                    jobId: context.jobId,
+                    runIds: selectedRunIds,
+                    claimHash,
+                    authorization: claimAuthorization,
+                    clock,
+                  },
+                );
+              if (claimed !== "claimed") {
+                throw new Error(
+                  "Production Bakeoff remote claim already exists; provider execution suppressed",
+                );
+              }
+              return claimAuthorization;
+            },
           });
-        if (remoteState.state !== "absent") {
-          throw new Error(
-            `Production Bakeoff remote recovery required before provider execution: ${remoteState.state}`,
-          );
-        }
-        for (const runId of selectedRunIds) {
-          const attemptId = `${runId}-attempt-1`;
-          let checkpoints: readonly ObservableAttemptEvent[];
-          try {
-            if (attemptCheckpointStore.readAttempt === undefined) {
-              throw new Error("durable checkpoint read is unavailable");
-            }
-            checkpoints =
-              await attemptCheckpointStore.readAttempt(attemptId);
-          } catch (error) {
-            throw new UnresolvedAttemptShutdownError(
-              attemptId,
-              "production restart checkpoint recovery is unavailable",
-              error,
-            );
-          }
-          if (
-            checkpoints.length > 0 &&
-            !checkpoints.every(
-              ({ submissionEvidenceAtCheckpoint }) =>
-                submissionEvidenceAtCheckpoint === "not_submitted",
-            )
-          ) {
-            throw new UnresolvedAttemptShutdownError(
-              attemptId,
-              "production restart found submitted or unknown attempt state; provider retry suppressed",
-            );
-          }
-        }
-        const claimHash = sha256Json({
-          schemaVersion: "production-job-claim-v1",
-          jobId: context.jobId,
-          caseId: command.caseId,
-          runIds: selectedRunIds,
-          protocolSnapshot: bakeoffProtocolSnapshot(
-            command.referencePackMode ?? "automatic",
-            command.environment,
-          ),
-          securityContextHash,
-        });
-        const claimAuthorization = await requireEgressAuthorization(
-          egressAuthorization,
-          {
-            requestId:
-              `operational-ledger-production-claim:${context.jobId}:${claimHash}`,
-            jobId: context.jobId,
-            runId: null,
-            attemptId: null,
-            dataClassification:
-              context.evaluationCase.dataClassification,
-            sourceOwner: context.evaluationCase.sourceOwner,
-            processingPurpose:
-              "operational_ledger_projection_storage",
-            targetKind: "storage",
-            targetService: feishu.egressDestination.targetService,
-            targetAccount: feishu.egressDestination.targetAccount,
-            targetRegion: feishu.egressDestination.targetRegion,
-            subprocessors: feishu.egressDestination.subprocessors,
-            contentFields: ["production_job_claim"],
-            payloadHash: claimHash,
-            requiredRedactions: [],
-          },
-          clock,
-        );
-        await egressAudit.append(claimAuthorization);
-        const claimed = await claimHarnessOwnedLarkProductionJob(
-          feishu,
-          {
-            jobId: context.jobId,
-            runIds: selectedRunIds,
-            claimHash,
-            authorization: claimAuthorization,
-            clock,
-          },
-        );
-        if (claimed !== "claimed") {
-          throw new Error(
-            "Production Bakeoff remote claim already exists; provider execution suppressed",
-          );
-        }
         productionClaim = Object.freeze({
-          claimHash,
-          authorization: claimAuthorization,
+          claimHash: boundClaim.claimHash,
+          authorization: boundClaim.result,
+          attemptSubmissionSummary:
+            boundClaim.attemptSubmissionSummary,
         });
       }
 
@@ -2422,33 +2612,6 @@ export function createBakeoffHarness({
         stagedReferencePack,
       } = await (async () => {
         try {
-          if (productionClaim !== null) {
-            const checkpointedAt = clock.now();
-            await Promise.all(
-              selectedRunIds.map(async (runId) => {
-                const attemptId = `${runId}-attempt-1`;
-                await attemptCheckpointStore.append({
-                  eventId: `${attemptId}-provider-not-started`,
-                  jobId: context.jobId,
-                  caseId: command.caseId,
-                  runId,
-                  attemptId,
-                  attemptSeq: 1,
-                  eventType: "provider_execution_not_started",
-                  sourceAt: context.fixedTime,
-                  observedAt: checkpointedAt,
-                  writerId: "bakeoff-harness@1",
-                  evidenceRef:
-                    `harness://${context.jobId}/${attemptId}/provider-not-started`,
-                  submissionEvidenceAtCheckpoint:
-                    "not_submitted",
-                  vendorTaskId: null,
-                  taskStateVersion: "pre_provider@1",
-                  artifactId: null,
-                });
-              }),
-            );
-          }
           const runSpecificationReferences = new Map<
             string,
             RunSpecificationReference
@@ -2512,29 +2675,37 @@ export function createBakeoffHarness({
             const notSubmittedAttemptIds: string[] = [];
             let abortIsProvenSafe = true;
             for (const runId of selectedRunIds) {
-              const attemptId = `${runId}-attempt-1`;
-              let checkpoints: readonly ObservableAttemptEvent[];
-              try {
-                checkpoints =
-                  await attemptCheckpointStore.readAttempt(
-                    attemptId,
-                  );
-              } catch {
-                abortIsProvenSafe = false;
-                break;
-              }
-              if (
-                checkpoints.length === 0 ||
-                !checkpoints.every(
-                  ({ submissionEvidenceAtCheckpoint }) =>
-                    submissionEvidenceAtCheckpoint ===
-                    "not_submitted",
-                )
+              for (
+                let attemptSeq = 1;
+                attemptSeq <= MAX_PROVIDER_ATTEMPTS;
+                attemptSeq += 1
               ) {
-                abortIsProvenSafe = false;
-                break;
+                const attemptId =
+                  `${runId}-attempt-${attemptSeq}`;
+                let checkpoints:
+                  readonly ObservableAttemptEvent[];
+                try {
+                  checkpoints =
+                    await attemptCheckpointStore.readAttempt(
+                      attemptId,
+                    );
+                } catch {
+                  abortIsProvenSafe = false;
+                  break;
+                }
+                if (
+                  checkpoints.length === 0 ||
+                  attemptSubmissionState(checkpoints) !==
+                    "not_submitted"
+                ) {
+                  abortIsProvenSafe = false;
+                  break;
+                }
+                if (attemptSeq === 1) {
+                  notSubmittedAttemptIds.push(attemptId);
+                }
               }
-              notSubmittedAttemptIds.push(attemptId);
+              if (!abortIsProvenSafe) break;
             }
             if (
               abortIsProvenSafe &&
@@ -2592,6 +2763,20 @@ export function createBakeoffHarness({
               (evaluationAttemptId) => {
                 evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
               },
+              command.environment === "production"
+                ? async ({ runId, attemptId, attemptSeq }) => {
+                    await assertProductionVendorEgressSafe({
+                      jobId: context.jobId,
+                      caseId:
+                        context.evaluationCase.caseId,
+                      runId,
+                      attemptId,
+                      attemptSeq,
+                      checkpointStore:
+                        attemptCheckpointStore,
+                    });
+                  }
+                : undefined,
             );
           const evidence = selection.browserDriverEvidence;
           return evidence === null
@@ -2795,7 +2980,7 @@ export function createBakeoffHarness({
             renderManifest: result.renderManifest,
             scorecard: result.scorecard,
             comparisonCompatibilityFingerprint:
-              comparisonCompatibilityFingerprint(
+              expectedComparisonCompatibilityFingerprint(
                 result.scorecard,
                 protocolSnapshot,
                 context.evaluationCase,

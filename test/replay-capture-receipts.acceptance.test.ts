@@ -26,7 +26,11 @@ import {
   InMemoryTombstoneLedger,
 } from "../src/retention.ts";
 import type { Artifact, RenderManifest } from "../src/domain.ts";
-import type { ProductAttemptResult } from "../src/product-adapter.ts";
+import {
+  InMemoryAttemptCheckpointStore,
+  createHarnessProviderExecutionNotStartedCheckpoint,
+  type ProductAttemptResult,
+} from "../src/product-adapter.ts";
 import {
   createWpsAiPptRealProviderReplayPackage,
 } from "../src/wps-aippt-driver.ts";
@@ -385,6 +389,65 @@ test(
         ?.captureReceipt?.captureId,
       "wps-real-provider-20260728-round5-resolution-final",
     );
+  },
+);
+
+test(
+  "WPS production replay accepts the harness provider-not-started control checkpoint on its first execution",
+  { skip: !KNOWN_WPS_CAPTURE_AVAILABLE },
+  async () => {
+    const fixture = await knownWpsReceiptFixture();
+    const driver = createWpsAiPptRealProviderReplayPackage({
+      captureId:
+        "wps-real-provider-20260728-round5-resolution-final",
+      sessions: [fixture.session],
+      renderedPages: fixture.renderedPages,
+    });
+    const adapter = new WpsAiPptReplayAdapter();
+    const checkpointStore =
+      new InMemoryAttemptCheckpointStore(
+        "wps-harness-control-integration",
+      );
+    const artifactContent = (
+      fixture.session as Extract<
+        WpsAiPptBrowserResult,
+        { outcome: "captured" }
+      >
+    ).artifact.content;
+    const artifactSuffix =
+      `-artifact-${sha256(artifactContent).slice(7, 23)}`;
+    const attemptId = fixture.artifactIdentity.artifactId.slice(
+      0,
+      -artifactSuffix.length,
+    );
+    const command = {
+      jobId: "job-wps-harness-control-integration",
+      runId: fixture.artifactIdentity.runId,
+      attemptId,
+      attemptSeq: 1,
+      timeoutMs: 30 * 60 * 1_000,
+      signal: new AbortController().signal,
+      evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
+    } as const;
+    await checkpointStore.append(
+      createHarnessProviderExecutionNotStartedCheckpoint({
+        jobId: command.jobId,
+        caseId: command.evaluationCase.caseId,
+        runId: command.runId,
+        attemptId: command.attemptId,
+        attemptSeq: command.attemptSeq,
+      }),
+    );
+    const execute = resolveWpsAiPptProductAdapterExecutor(
+      adapter.implementationPackage,
+      adapter.executionConfiguration,
+      driver,
+      checkpointStore,
+    );
+
+    const result = await execute(command) as ProductAttemptResult;
+    assert.equal(result.terminalReason, "success");
+    assert.equal(result.artifactCandidates.length, 1);
   },
 );
 

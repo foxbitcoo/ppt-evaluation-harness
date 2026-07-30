@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import type {
   Artifact,
@@ -260,6 +261,10 @@ export interface AttemptCheckpointPort {
 
 export const PROVIDER_SUBMISSION_INTENT_EVENT_TYPE =
   "submission_intent" as const;
+export const HARNESS_PROVIDER_EXECUTION_NOT_STARTED_EVENT_TYPE =
+  "provider_execution_not_started" as const;
+const HARNESS_PROVIDER_EXECUTION_NOT_STARTED_TIMESTAMP =
+  "1970-01-01T00:00:00.000Z";
 
 export function createProviderSubmissionIntentCheckpoint(
   command: ProductRunCommand,
@@ -299,6 +304,82 @@ export function isUnresolvedProviderSubmissionIntent(
     (event.taskStateVersion === null ||
       event.taskStateVersion === undefined)
   );
+}
+
+export function createHarnessProviderExecutionNotStartedCheckpoint(
+  input: {
+    readonly jobId: string;
+    readonly caseId: string;
+    readonly runId: string;
+    readonly attemptId: string;
+    readonly attemptSeq: number;
+  },
+): ObservableAttemptEvent {
+  return Object.freeze({
+    eventId: `${input.attemptId}-provider-not-started`,
+    jobId: input.jobId,
+    caseId: input.caseId,
+    runId: input.runId,
+    attemptId: input.attemptId,
+    attemptSeq: input.attemptSeq,
+    eventType: HARNESS_PROVIDER_EXECUTION_NOT_STARTED_EVENT_TYPE,
+    sourceAt: HARNESS_PROVIDER_EXECUTION_NOT_STARTED_TIMESTAMP,
+    observedAt: HARNESS_PROVIDER_EXECUTION_NOT_STARTED_TIMESTAMP,
+    writerId: "bakeoff-harness@1",
+    evidenceRef:
+      `harness://${input.jobId}/${input.attemptId}/provider-not-started`,
+    submissionEvidenceAtCheckpoint: "not_submitted",
+    vendorTaskId: null,
+    taskStateVersion: "pre_provider@1",
+    artifactId: null,
+  });
+}
+
+export function isHarnessProviderExecutionNotStartedCheckpoint(
+  event: ObservableAttemptEvent,
+  command: ProductRunCommand,
+): boolean {
+  return isDeepStrictEqual(
+    event,
+    createHarnessProviderExecutionNotStartedCheckpoint({
+      jobId: command.jobId,
+      caseId: command.evaluationCase.caseId,
+      runId: command.runId,
+      attemptId: command.attemptId,
+      attemptSeq: command.attemptSeq,
+    }),
+  );
+}
+
+export function attemptSubmissionState(
+  events: readonly ObservableAttemptEvent[],
+): SubmissionEvidence {
+  let state: SubmissionEvidence = "not_submitted";
+  for (const event of events) {
+    const observed = event.submissionEvidenceAtCheckpoint;
+    if (observed === "submitted") {
+      state = "submitted";
+      continue;
+    }
+    if (state === "submitted" || observed === undefined) {
+      continue;
+    }
+    if (observed === "unknown") {
+      state = "unknown";
+      continue;
+    }
+    if (observed === "not_submitted") {
+      if (
+        event.eventType !==
+          HARNESS_PROVIDER_EXECUTION_NOT_STARTED_EVENT_TYPE &&
+        event.adapterVersion !== undefined &&
+        event.writerId === event.adapterVersion
+      ) {
+        state = "not_submitted";
+      }
+    }
+  }
+  return state;
 }
 
 export class InMemoryAttemptCheckpointStore

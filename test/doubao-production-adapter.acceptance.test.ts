@@ -815,6 +815,7 @@ test("the harness retries once only after proven non-submission and never retrie
     productPackage: {
       ...productionAdapter.productPackage,
       packageId: "MOCK-doubao-production-boundary-v1",
+      displayName: "Mock-boundary Doubao PPT",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
       egressDestination: {
@@ -1354,12 +1355,15 @@ test("deadline shutdown completes when durable reconciliation confirms the submi
   const checkpoints = new InMemoryAttemptCheckpointStore(
     "doubao-deadline-vendor-failed",
   );
+  const runId =
+    "MOCK-run-mock-doubao-production-boundary--f06b6b1c3ff3fdd00f55761d6926e4ea-volcano-v1";
+  const attemptId = `${runId}-attempt-1`;
   await checkpoints.append({
-    eventId: "MOCK-run-doubao-volcano-v1-attempt-1-event-1",
+    eventId: `${attemptId}-event-1`,
     jobId: "MOCK-job-volcano-v1",
     caseId: VOLCANO_EVALUATION_CASE.caseId,
-    runId: "MOCK-run-doubao-volcano-v1",
-    attemptId: "MOCK-run-doubao-volcano-v1-attempt-1",
+    runId,
+    attemptId,
     attemptSeq: 1,
     eventType: "query_submitted",
     sourceAt: "2026-07-27T06:00:10.000Z",
@@ -1379,7 +1383,8 @@ test("deadline shutdown completes when durable reconciliation confirms the submi
       productionAdapter.executionConfigurationPackage,
     productPackage: {
       ...productionAdapter.productPackage,
-      packageId: "MOCK-doubao-package-v1",
+      packageId: "MOCK-doubao-production-boundary-v1",
+      displayName: "Mock-boundary Doubao PPT",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
       egressDestination: {
@@ -1429,8 +1434,7 @@ test("deadline shutdown completes when durable reconciliation confirms the submi
   const attempt = feishu
     .snapshot()
     .runRecordTable.find(
-      ({ recordId }) =>
-        recordId === "MOCK-run-doubao-volcano-v1-attempt-1",
+      ({ recordId }) => recordId === attemptId,
     );
 
   assert.equal(outcome.job.status, "failed");

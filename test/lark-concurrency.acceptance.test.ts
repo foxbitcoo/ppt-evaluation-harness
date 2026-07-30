@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   readFileSync,
 } from "node:fs";
@@ -125,6 +125,155 @@ test("the single-workstation advisory mutex is released after its owner crashes"
     } catch {
       // The expected crash path already terminated it.
     }
+    await rm(lockRoot, { recursive: true, force: true });
+  }
+});
+
+test("an acquired mutex fail-stops its owner when the lock holder crashes", async () => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-holder-crash-test-"),
+  );
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const childScript = [
+    `import { acquireLarkSingleWorkstationMutexForTest } from ${JSON.stringify(moduleUrl)};`,
+    `await acquireLarkSingleWorkstationMutexForTest({ lockRoot: ${JSON.stringify(lockRoot)}, scope: "holder-crash", waitTimeoutMs: 3_000 });`,
+    'process.stdout.write("ready\\n");',
+    "setInterval(() => {}, 1_000);",
+  ].join("\n");
+  const owner = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      childScript,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let ownerOutput = "";
+  let ownerError = "";
+  owner.stdout.setEncoding("utf8");
+  owner.stdout.on("data", (value: string) => {
+    ownerOutput += value;
+  });
+  owner.stderr.setEncoding("utf8");
+  owner.stderr.on("data", (value: string) => {
+    ownerError += value;
+  });
+  const ownerExit = new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveExit, rejectExit) => {
+    owner.once("error", rejectExit);
+    owner.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+  const processRows = (): readonly {
+    readonly processId: number;
+    readonly parentProcessId: number;
+    readonly command: string;
+  }[] =>
+    execFileSync(
+      "/bin/ps",
+      ["-axo", "pid=,ppid=,comm="],
+      { encoding: "utf8" },
+    )
+      .trim()
+      .split("\n")
+      .map((line) => line.trim().split(/\s+/, 3))
+      .map(([processId, parentProcessId, command]) => ({
+        processId: Number(processId),
+        parentProcessId: Number(parentProcessId),
+        command: command ?? "",
+      }));
+  const waitForOutput = async (
+    expected: string,
+    timeoutMs: number,
+  ): Promise<void> => {
+    const deadline = Date.now() + timeoutMs;
+    while (!ownerOutput.includes(expected) && Date.now() < deadline) {
+      await new Promise<void>((resolveWait) => {
+        setTimeout(resolveWait, 10);
+      });
+    }
+    if (!ownerOutput.includes(expected)) {
+      throw new Error(
+        `mutex owner output timed out: ${ownerOutput}\n${ownerError}`,
+      );
+    }
+  };
+  try {
+    await waitForOutput("ready\n", 5_000);
+    const lockfProcess = processRows().find(
+      ({ parentProcessId, command }) =>
+        parentProcessId === owner.pid &&
+        command === "/usr/bin/lockf",
+    );
+    assert.ok(lockfProcess, "the owner must have one lockf child");
+    let holderProcess:
+      | {
+          readonly processId: number;
+          readonly parentProcessId: number;
+          readonly command: string;
+        }
+      | undefined;
+    const holderDeadline = Date.now() + 2_000;
+    while (holderProcess === undefined && Date.now() < holderDeadline) {
+      holderProcess = processRows().find(
+        ({ parentProcessId }) =>
+          parentProcessId === lockfProcess.processId,
+      );
+      if (holderProcess === undefined) {
+        await new Promise<void>((resolveWait) => {
+          setTimeout(resolveWait, 10);
+        });
+      }
+    }
+    assert.ok(holderProcess, "lockf must have one holder child");
+    process.kill(holderProcess.processId, "SIGKILL");
+
+    const exitResult = await Promise.race([
+      ownerExit.then((result) => ({
+        kind: "exit" as const,
+        result,
+      })),
+      new Promise<{ readonly kind: "timeout" }>((resolveTimeout) => {
+        const timeout = setTimeout(
+          () => resolveTimeout({ kind: "timeout" }),
+          2_000,
+        );
+        timeout.unref();
+      }),
+    ]);
+    assert.notEqual(
+      exitResult.kind,
+      "timeout",
+      "the old owner must fail-stop instead of continuing without its lock",
+    );
+    assert.deepEqual(
+      exitResult.kind === "exit" ? exitResult.result : null,
+      { code: null, signal: "SIGKILL" },
+    );
+
+    const releaseReplacement =
+      await acquireLarkSingleWorkstationMutexForTest({
+        lockRoot,
+        scope: "holder-crash",
+        waitTimeoutMs: 3_000,
+      });
+    await releaseReplacement();
+  } finally {
+    try {
+      owner.kill("SIGKILL");
+    } catch {
+      // The expected fail-stop path already terminated it.
+    }
+    await ownerExit.catch(() => undefined);
     await rm(lockRoot, { recursive: true, force: true });
   }
 });
@@ -340,6 +489,245 @@ test("an advisory lease sentinel distinguishes PID reuse within one start-time s
   }
 });
 
+test("terminal leases reclaim every holder process across multiple Jobs", async () => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-lease-reclaim-test-"),
+  );
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const workerScript = [
+    'import { execFileSync } from "node:child_process";',
+    `import { createLarkExecutionLeaseForTest } from ${JSON.stringify(moduleUrl)};`,
+    "for (let index = 1; index <= 3; index += 1) {",
+    `  const lease = createLarkExecutionLeaseForTest({ lockRoot: ${JSON.stringify(lockRoot)}, leaseId: \`lease-job-\${index}\`, processId: process.pid, processStartIdentity: "multi-job-worker" });`,
+    '  if (!await lease.isActive(lease.leaseId, lease.processId, lease.processStartIdentity)) throw new Error("lease did not activate");',
+    '  if (!("release" in lease) || typeof lease.release !== "function") throw new Error("lease has no terminal release");',
+    "  await lease.release();",
+    '  const lockfChildren = execFileSync("/bin/ps", ["-axo", "ppid=,comm="], { encoding: "utf8" }).split("\\n").map((line) => line.trim().split(/\\s+/, 2)).filter(([parentProcessId, command]) => Number(parentProcessId) === process.pid && command === "/usr/bin/lockf");',
+    '  if (lockfChildren.length !== 0) throw new Error(`Job ${index} retained ${lockfChildren.length} lockf child`);',
+    "}",
+    'process.stdout.write("three-jobs-reclaimed\\n");',
+  ].join("\n");
+  const worker = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      workerScript,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  let errorOutput = "";
+  worker.stdout.setEncoding("utf8");
+  worker.stdout.on("data", (value: string) => {
+    output += value;
+  });
+  worker.stderr.setEncoding("utf8");
+  worker.stderr.on("data", (value: string) => {
+    errorOutput += value;
+  });
+  try {
+    const exit = await new Promise<{
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }>((resolveExit, rejectExit) => {
+      worker.once("error", rejectExit);
+      worker.once("close", (code, signal) => {
+        resolveExit({ code, signal });
+      });
+    });
+    assert.deepEqual(
+      exit,
+      { code: 0, signal: null },
+      errorOutput,
+    );
+    assert.equal(output, "three-jobs-reclaimed\n");
+  } finally {
+    try {
+      worker.kill("SIGKILL");
+    } catch {
+      // The expected path already exited.
+    }
+    await rm(lockRoot, { recursive: true, force: true });
+  }
+});
+
+test("a durably committed marker releases its execution lease", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_COMMIT_RELEASE_BASE_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basCommitReleaseToken";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+  });
+  const clock = {
+    clockId: "commit-release-clock",
+    now: () => FIXED_TIME,
+  };
+  let storedFields: Record<string, unknown> | null = null;
+  let releaseCount = 0;
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock,
+      claimLeaseForTest: {
+        leaseId: "commit-release-lease",
+        processId: 7001,
+        processStartIdentity: "commit-release-process",
+        async isActive() {
+          return true;
+        },
+        async release() {
+          releaseCount += 1;
+        },
+      },
+      async run(args) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") {
+          return storedFields === null
+            ? {
+                ok: true,
+                data: {
+                  data: [],
+                  field_id_list: [
+                    "fldStable",
+                    "fldPayload",
+                    "fldHash",
+                  ],
+                  fields: ["稳定ID", "载荷", "载荷哈希"],
+                  has_more: false,
+                  record_id_list: [],
+                },
+              }
+            : {
+                ok: true,
+                data: {
+                  data: [[
+                    storedFields["稳定ID"],
+                    storedFields["载荷"],
+                    storedFields["载荷哈希"],
+                  ]],
+                  field_id_list: [
+                    "fldStable",
+                    "fldPayload",
+                    "fldHash",
+                  ],
+                  fields: ["稳定ID", "载荷", "载荷哈希"],
+                  has_more: false,
+                  record_id_list: ["recCommitRelease"],
+                },
+              };
+        }
+        if (command === "+record-upsert") {
+          storedFields = JSON.parse(
+            args[args.indexOf("--json") + 1]!,
+          ) as Record<string, unknown>;
+          return {
+            ok: true,
+            data: {
+              created: true,
+              record: { record_id: "recCommitRelease" },
+            },
+          };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "commit-release-parent",
+      jobId: "job-commit-release",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["commit_marker"],
+      payloadHash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  await transport.commitBatch({
+    schemaVersion: "lark-projection-commit-v2",
+    jobId: "job-commit-release",
+    batchHash:
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    authorizationDecisionId: authorization.decisionId,
+    recordCount: 1,
+    attachmentCount: 0,
+    reportUrls: [],
+    reportCollectionHash: null,
+    reportDocumentRevision: null,
+    pageEvidenceUrls: [],
+    attachments: [],
+    committedAt: FIXED_TIME,
+    previousBatchHash: null,
+    revision: 1,
+    authorization,
+  });
+  assert.equal(
+    releaseCount,
+    1,
+    "the durable terminal marker must release the lease holder",
+  );
+});
+
+test("disposing a transport releases its execution lease", async () => {
+  let releaseCount = 0;
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: LARK_TEST_CONFIGURATION,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock: {
+        clockId: "transport-dispose-clock",
+        now: () => FIXED_TIME,
+      },
+      claimLeaseForTest: {
+        leaseId: "transport-dispose-lease",
+        processId: 7002,
+        processStartIdentity: "transport-dispose-process",
+        async isActive() {
+          return true;
+        },
+        async release() {
+          releaseCount += 1;
+        },
+      },
+      async run() {
+        throw new Error("dispose must not invoke lark-cli");
+      },
+    });
+  assert.equal(
+    typeof transport.dispose,
+    "function",
+    "the transport must expose an explicit terminal lifecycle",
+  );
+  await transport.dispose!();
+  assert.equal(releaseCount, 1);
+});
+
 test("verified Lark production rejects a configuration without one fixed machine lock root", async () => {
   const {
     lockRootPath: _lockRootPath,
@@ -354,6 +742,28 @@ test("verified Lark production rejects a configuration without one fixed machine
     }),
     /fixed machine lock root/i,
   );
+});
+
+test("verified Lark production rejects non-canonical or aliased Base URLs", async () => {
+  for (const baseWebUrl of [
+    `${LARK_TEST_CONFIGURATION.baseWebUrl}/`,
+    `${LARK_TEST_CONFIGURATION.baseWebUrl}?view=grid`,
+    `${LARK_TEST_CONFIGURATION.baseWebUrl}#record`,
+    "https://alias.feishu.cn/base/ppt-evaluation",
+  ]) {
+    await assert.rejects(
+      createVerifiedLarkCliTransport({
+        configuration: {
+          ...LARK_TEST_CONFIGURATION,
+          baseWebUrl,
+        },
+        egressAuthorization: allowLarkMutation,
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }),
+      /canonical Base URL/i,
+      baseWebUrl,
+    );
+  }
 });
 
 test("workers with different TMPDIR values still share the configured machine lock root", async () => {
@@ -426,6 +836,156 @@ test("workers with different TMPDIR values still share the configured machine lo
     await rm(lockRoot, { recursive: true, force: true });
     await rm(workerTmp, { recursive: true, force: true });
   }
+});
+
+test("equivalent Base URL spellings cannot split one stable-record mutex", async (context) => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-resource-scope-test-"),
+  );
+  const baseTokenVariable = "PPT_EVAL_RESOURCE_SCOPE_BASE_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basResourceScopeToken";
+  context.after(async () => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    await rm(lockRoot, { recursive: true, force: true });
+  });
+  const clock = {
+    clockId: "resource-scope-clock",
+    now: () => FIXED_TIME,
+  };
+  const audit = new InMemoryEgressAuthorizationAudit();
+  const payload = '{"caseId":"resource-scope-case"}';
+  const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
+  let stored:
+    | {
+        readonly recordId: string;
+        readonly fields: Record<string, unknown>;
+      }
+    | null = null;
+  const entered: string[] = [];
+  let releaseFirst!: () => void;
+  const firstRelease = new Promise<void>((resolveRelease) => {
+    releaseFirst = resolveRelease;
+  });
+  const searchEnvelope = () => ({
+    ok: true,
+    data: {
+      data:
+        stored === null
+          ? []
+          : [[
+              stored.fields["稳定ID"],
+              stored.fields["载荷"],
+              stored.fields["载荷哈希"],
+            ]],
+      field_id_list: ["fldStable", "fldPayload", "fldHash"],
+      fields: ["稳定ID", "载荷", "载荷哈希"],
+      has_more: false,
+      record_id_list: stored === null ? [] : [stored.recordId],
+    },
+  });
+  const createTransport = (
+    caller: "first" | "second",
+    baseWebUrl: string,
+  ) =>
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        lockRootPath: lockRoot,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+        baseWebUrl,
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: audit,
+      clock,
+      async run(args) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") return searchEnvelope();
+        if (command === "+record-upsert") {
+          entered.push(caller);
+          if (caller === "first") await firstRelease;
+          const recordIdIndex = args.indexOf("--record-id");
+          const fields = JSON.parse(
+            args[args.indexOf("--json") + 1]!,
+          ) as Record<string, unknown>;
+          const recordId =
+            recordIdIndex === -1
+              ? "recResourceScope1"
+              : args[recordIdIndex + 1]!;
+          stored = { recordId, fields };
+          return {
+            ok: true,
+            data: {
+              ...(recordIdIndex === -1
+                ? { created: true }
+                : { updated: true }),
+              record: { record_id: recordId },
+            },
+          };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "resource-scope-parent",
+      jobId: "job-resource-scope",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["case_table"],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  const command = {
+    tableKey: "cases" as const,
+    stableId: "case:resource-scope-case",
+    payload,
+    payloadHash,
+    idempotencyKey: "resource-scope-upsert",
+    authorization,
+  };
+  const first = createTransport(
+    "first",
+    "https://example.feishu.cn/base/basResourceScopeToken",
+  ).upsertRecord(command);
+  const firstDeadline = Date.now() + 3_000;
+  while (!entered.includes("first") && Date.now() < firstDeadline) {
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, 10);
+    });
+  }
+  assert.deepEqual(entered, ["first"]);
+  const second = createTransport(
+    "second",
+    "https://example.feishu.cn/base/basResourceScopeToken/",
+  ).upsertRecord(command);
+  await new Promise<void>((resolveWait) => {
+    setTimeout(resolveWait, 150);
+  });
+  const enteredBeforeRelease = [...entered];
+  releaseFirst();
+  await Promise.allSettled([first, second]);
+  assert.deepEqual(
+    enteredBeforeRelease,
+    ["first"],
+    "the equivalent remote Base must still have one critical section",
+  );
+  assert.deepEqual(entered, ["first", "second"]);
 });
 
 test("a late concurrent stable-ID create cannot delete a record already returned to a caller", async (context) => {
@@ -830,6 +1390,7 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
     "lease-c",
     "lease-d",
   ]);
+  const releasedLeases = new Set<string>();
   const observedProcessStarts = new Map<number, string>([
     [1001, "process-start-a"],
     [1002, "process-start-b"],
@@ -961,6 +1522,10 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
             (candidateProcessStartIdentity === undefined ||
               observedProcessStarts.get(candidateProcessId) ===
                 candidateProcessStartIdentity)),
+        async release() {
+          releasedLeases.add(leaseId);
+          activeLeases.delete(leaseId);
+        },
       },
     } as Parameters<
       typeof createLarkCliTransportForMutationBoundaryTest
@@ -974,6 +1539,7 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
           processId: number,
           processStartIdentity?: string,
         ) => Promise<boolean>;
+        readonly release: () => Promise<void>;
       };
     });
   const authorization = await requireEgressAuthorization(
@@ -1059,6 +1625,11 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
     notSubmittedAttemptIds: ["run-claim-lease-attempt-1"],
     abortedAt: "2020-01-01T00:00:01.000Z",
   });
+  assert.equal(
+    releasedLeases.has("lease-c"),
+    true,
+    "a durably safe abort must release its lease sentinel",
+  );
   observedProcessStarts.set(1003, "process-start-d");
   const safeAbortReplacement = createTransport(
     "lease-d",

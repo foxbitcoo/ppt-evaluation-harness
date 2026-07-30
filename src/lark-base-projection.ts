@@ -53,8 +53,12 @@ export type LarkProjectionTableKey =
 export interface LarkBaseProjectionTransportPort {
   readonly transportId: string;
   readonly pageEvidenceBaseUrl: string;
+  dispose?(): Promise<void>;
   acquireProjectionMutex?(
     jobId: string,
+    options?: {
+      readonly requireReportDocument?: boolean;
+    },
   ): Promise<() => Promise<void>>;
   withProjectionMutex?<T>(
     jobId: string,
@@ -349,6 +353,7 @@ interface LarkExecutionLeasePort {
     processId: number,
     processStartIdentity: string,
   ): Promise<boolean>;
+  release(): Promise<void>;
 }
 
 function larkExecutionLeaseSentinelPath(
@@ -376,7 +381,11 @@ function createProcessLarkExecutionLease(options: {
     options.processStartIdentity ?? LARK_PROCESS_START_IDENTITY;
   let sentinelRelease: (() => Promise<void>) | null = null;
   let sentinelAcquisition: Promise<void> | null = null;
+  let released = false;
   const ensureSentinelOwned = async (): Promise<void> => {
+    if (released) {
+      throw new Error("Lark execution lease is already released");
+    }
     if (sentinelRelease !== null) return;
     sentinelAcquisition ??= (async () => {
       const release = await acquireMacOsAdvisoryLock(
@@ -402,6 +411,7 @@ function createProcessLarkExecutionLease(options: {
         candidateProcessId === processId &&
         candidateProcessStartIdentity === processStartIdentity
       ) {
+        if (released) return false;
         await ensureSentinelOwned();
         return true;
       }
@@ -422,6 +432,18 @@ function createProcessLarkExecutionLease(options: {
         throw error;
       }
     },
+    async release(): Promise<void> {
+      if (released) return;
+      released = true;
+      if (sentinelAcquisition !== null) {
+        await sentinelAcquisition;
+      }
+      const release = sentinelRelease;
+      sentinelRelease = null;
+      if (release !== null) {
+        await release();
+      }
+    },
   });
 }
 
@@ -438,6 +460,70 @@ function larkMutexRoot(
     );
   }
   return root;
+}
+
+function larkBaseConcurrencyIdentity(
+  configuration: LarkCliProjectionConfiguration,
+): string {
+  const baseToken =
+    process.env[configuration.baseTokenEnvironmentVariable]?.trim();
+  if (baseToken === undefined || baseToken.length === 0) {
+    throw new Error(
+      `Lark Base credential ${configuration.baseTokenEnvironmentVariable} is unavailable`,
+    );
+  }
+  const tableIds = [
+    ...new Set(Object.values(configuration.tables)),
+  ].sort();
+  return canonicalPayload({
+    schemaVersion: "lark-base-concurrency-resource-v1",
+    baseToken,
+    tableIds,
+  });
+}
+
+function larkReportDocumentToken(
+  configuration: LarkCliProjectionConfiguration,
+): string {
+  const value =
+    process.env[
+      configuration.reportDocumentTokenEnvironmentVariable
+    ];
+  if (value === undefined || value.trim().length === 0) {
+    throw new Error(
+      `Lark report document ${configuration.reportDocumentTokenEnvironmentVariable} is unavailable`,
+    );
+  }
+  const trimmed = value.trim();
+  const urlMatch = /\/docx\/([a-zA-Z0-9_-]{8,128})(?:[?#/]|$)/.exec(
+    trimmed,
+  );
+  const token = urlMatch?.[1] ?? trimmed;
+  if (!/^[a-zA-Z0-9_-]{8,128}$/.test(token)) {
+    throw new Error("Lark report document token is invalid");
+  }
+  return token;
+}
+
+function larkReportConcurrencyIdentity(
+  configuration: LarkCliProjectionConfiguration,
+): string {
+  return canonicalPayload({
+    schemaVersion: "lark-report-concurrency-resource-v1",
+    documentToken: larkReportDocumentToken(configuration),
+    expectedOrigin: configuration.reportDocumentExpectedOrigin,
+  });
+}
+
+function larkOperationMutexScope(
+  kind: "projection" | "stable-record" | "claim" | "preflight",
+  identity: string,
+): string {
+  return canonicalPayload({
+    schemaVersion: "lark-single-workstation-mutex-scope-v2",
+    kind,
+    identity,
+  });
 }
 
 function processIsAlive(processId: number): boolean {
@@ -618,8 +704,15 @@ async function acquireMacOsAdvisoryLock(
             code === 75
               ? "Lark single-workstation durable mutex wait timed out"
               : `macOS lockf exited before acquisition with ${String(code ?? signal)}`,
-          ),
+            ),
         );
+      } else if (!releaseRequested) {
+        // A critical section must never outlive the helper that owns its OS
+        // lock. There is no safe in-process recovery after another worker may
+        // have observed the lock as available, so production deliberately
+        // fails the whole owner process closed.
+        process.kill(process.pid, "SIGKILL");
+        return;
       }
       resolveClosed({ code, signal });
     });
@@ -675,6 +768,18 @@ async function acquireMacOsAdvisoryLock(
     if (released) return;
     released = true;
     releaseRequested = true;
+    if (options.unrefAfterAcquisition === true) {
+      child.ref();
+      (
+        child.stdin as typeof child.stdin & { ref(): void }
+      ).ref();
+      (
+        child.stdout as typeof child.stdout & { ref(): void }
+      ).ref();
+      (
+        child.stderr as typeof child.stderr & { ref(): void }
+      ).ref();
+    }
     child.stdin.end(LOCKF_RELEASE_COMMAND);
     const { code, signal } = await closedPromise;
     if (
@@ -695,6 +800,8 @@ async function acquireLarkSingleWorkstationMutex(
   scope: string,
   options: {
     readonly waitTimeoutMs?: number;
+    readonly resourceIdentityForTest?: string;
+    readonly includeReportDocument?: boolean;
   } = {},
 ): Promise<() => Promise<void>> {
   if (
@@ -707,11 +814,46 @@ async function acquireLarkSingleWorkstationMutex(
   }
   const root = larkMutexRoot(configuration);
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const lockPath = join(root, `${sha256(scope).slice("sha256:".length)}.lock`);
-  return await acquireMacOsAdvisoryLock(
-    lockPath,
-    options.waitTimeoutMs ?? LARK_MUTEX_WAIT_TIMEOUT_MS,
-  );
+  const resourceIdentities =
+    options.resourceIdentityForTest === undefined
+      ? [
+          larkBaseConcurrencyIdentity(configuration),
+          ...(options.includeReportDocument === true
+            ? [larkReportConcurrencyIdentity(configuration)]
+            : []),
+        ].sort()
+      : [options.resourceIdentityForTest];
+  const releases: (() => Promise<void>)[] = [];
+  try {
+    for (const resourceIdentity of resourceIdentities) {
+      const lockPath = join(
+        root,
+        `${sha256(canonicalPayload({
+          resourceIdentity,
+          operationScope: scope,
+        })).slice("sha256:".length)}.lock`,
+      );
+      releases.push(
+        await acquireMacOsAdvisoryLock(
+          lockPath,
+          options.waitTimeoutMs ?? LARK_MUTEX_WAIT_TIMEOUT_MS,
+        ),
+      );
+    }
+  } catch (error) {
+    for (const release of releases.reverse()) {
+      await release();
+    }
+    throw error;
+  }
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    for (const release of releases.reverse()) {
+      await release();
+    }
+  };
 }
 
 /**
@@ -753,8 +895,15 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
     },
     options.scope,
     options.waitTimeoutMs === undefined
-      ? {}
-      : { waitTimeoutMs: options.waitTimeoutMs },
+      ? {
+          resourceIdentityForTest:
+            "lark-mutex-public-test-resource-v1",
+        }
+      : {
+          waitTimeoutMs: options.waitTimeoutMs,
+          resourceIdentityForTest:
+            "lark-mutex-public-test-resource-v1",
+        },
   );
 }
 
@@ -789,6 +938,27 @@ function assertHttps(value: string, label: string): void {
 function assertHttpsBase(value: string, label: string): void {
   if (!/^https:\/\/[^/\s]+(?:\/.*)?$/.test(value)) {
     throw new Error(`${label} requires a real HTTPS base URL`);
+  }
+}
+
+function assertCanonicalLarkBaseWebUrl(
+  value: string,
+  expectedOrigin: string,
+): void {
+  const parsed = new URL(value);
+  if (
+    parsed.origin !== expectedOrigin ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0 ||
+    parsed.pathname === "/" ||
+    parsed.pathname.endsWith("/") ||
+    parsed.toString() !== value
+  ) {
+    throw new Error(
+      "Verified Lark transport requires one canonical Base URL on the configured Feishu origin",
+    );
   }
 }
 
@@ -1708,7 +1878,9 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
     try {
       if (this.#transport.acquireProjectionMutex !== undefined) {
         releaseProjectionMutex =
-          await this.#transport.acquireProjectionMutex(jobId);
+          await this.#transport.acquireProjectionMutex(jobId, {
+            requireReportDocument: snapshot.reports.length > 0,
+          });
       }
       const assertAuthorizationCurrent = () =>
         assertApprovedEgressAuthorizationCurrent(
@@ -2678,6 +2850,7 @@ class VerifiedLarkCliTransport
   readonly #clock: ClockPort;
   readonly #runner: LarkCliJsonRunner;
   readonly #executionLease: LarkExecutionLeasePort;
+  #executionLeaseReleased = false;
 
   constructor(
     binaryPath: string,
@@ -2720,6 +2893,16 @@ class VerifiedLarkCliTransport
     return await this.#runner(args, options);
   }
 
+  async #releaseExecutionLease(): Promise<void> {
+    if (this.#executionLeaseReleased) return;
+    this.#executionLeaseReleased = true;
+    await this.#executionLease.release();
+  }
+
+  async dispose(): Promise<void> {
+    await this.#releaseExecutionLease();
+  }
+
   async #withMutex<T>(
     kind: "projection" | "stable-record" | "claim",
     identity: string,
@@ -2727,13 +2910,10 @@ class VerifiedLarkCliTransport
   ): Promise<T> {
     const release = await acquireLarkSingleWorkstationMutex(
       this.#configuration,
-      canonicalPayload({
-        schemaVersion: "lark-single-workstation-mutex-scope-v1",
-        targetAccount: this.#configuration.targetAccount,
-        baseWebUrl: this.#configuration.baseWebUrl,
-        kind,
-        identity,
-      }),
+      larkOperationMutexScope(kind, identity),
+      {
+        includeReportDocument: kind === "claim",
+      },
     );
     try {
       return await operation();
@@ -2757,17 +2937,18 @@ class VerifiedLarkCliTransport
 
   async acquireProjectionMutex(
     jobId: string,
+    options: {
+      readonly requireReportDocument?: boolean;
+    } = {},
   ): Promise<() => Promise<void>> {
     nonEmpty(jobId, "Lark projection mutex Job ID");
     return await acquireLarkSingleWorkstationMutex(
       this.#configuration,
-      canonicalPayload({
-        schemaVersion: "lark-single-workstation-mutex-scope-v1",
-        targetAccount: this.#configuration.targetAccount,
-        baseWebUrl: this.#configuration.baseWebUrl,
-        kind: "projection",
-        identity: jobId,
-      }),
+      larkOperationMutexScope("projection", jobId),
+      {
+        includeReportDocument:
+          options.requireReportDocument === true,
+      },
     );
   }
 
@@ -2826,24 +3007,7 @@ class VerifiedLarkCliTransport
   }
 
   #reportDocumentToken(): string {
-    const value =
-      process.env[
-        this.#configuration.reportDocumentTokenEnvironmentVariable
-      ];
-    if (value === undefined || value.trim().length === 0) {
-      throw new Error(
-        `Lark report document ${this.#configuration.reportDocumentTokenEnvironmentVariable} is unavailable`,
-      );
-    }
-    const trimmed = value.trim();
-    const urlMatch = /\/docx\/([a-zA-Z0-9_-]{8,128})(?:[?#/]|$)/.exec(
-      trimmed,
-    );
-    const token = urlMatch?.[1] ?? trimmed;
-    if (!/^[a-zA-Z0-9_-]{8,128}$/.test(token)) {
-      throw new Error("Lark report document token is invalid");
-    }
-    return token;
+    return larkReportDocumentToken(this.#configuration);
   }
 
   async #fetchReportDocument(): Promise<LarkDocumentReadback> {
@@ -2951,11 +3115,11 @@ class VerifiedLarkCliTransport
     const releaseConcurrencyProbe =
       await acquireLarkSingleWorkstationMutex(
         this.#configuration,
-        canonicalPayload({
-          schemaVersion: "lark-single-workstation-preflight-v1",
-          targetAccount: this.#configuration.targetAccount,
-          baseWebUrl: this.#configuration.baseWebUrl,
-        }),
+        larkOperationMutexScope("preflight", "transport"),
+        {
+          includeReportDocument:
+            options.requireReportDocument === true,
+        },
       );
     await releaseConcurrencyProbe();
     const baseToken = this.#baseToken();
@@ -2969,7 +3133,11 @@ class VerifiedLarkCliTransport
       "Lark report document expected origin",
     );
     const baseWebUrl = new URL(this.#configuration.baseWebUrl);
-    if (!baseWebUrl.pathname.split("/").includes(baseToken)) {
+    if (
+      decodeURIComponent(
+        baseWebUrl.pathname.split("/").filter(Boolean).at(-1) ?? "",
+      ) !== baseToken
+    ) {
       throw new Error(
         "Lark Base web URL is not bound to the configured Base token",
       );
@@ -4371,6 +4539,7 @@ class VerifiedLarkCliTransport
               "Production Job pre-submission abort proof conflicts",
             );
           }
+          await this.#releaseExecutionLease();
           return;
         }
         if (
@@ -4430,6 +4599,7 @@ class VerifiedLarkCliTransport
             `lark-job-claim-abort:${command.jobId}:${command.claimHash}:${lease.claimEpoch}:${encodeURIComponent(this.#executionLease.leaseId)}`,
           authorization: command.authorization,
         });
+        await this.#releaseExecutionLease();
       },
     );
   }
@@ -4448,6 +4618,7 @@ class VerifiedLarkCliTransport
         `lark-commit:${command.jobId}:${command.batchHash}`,
       authorization,
     });
+    await this.#releaseExecutionLease();
   }
 }
 
@@ -4556,6 +4727,10 @@ export async function createVerifiedLarkCliTransport(options: {
       "Lark report document expected origin must be an exact HTTPS origin",
     );
   }
+  assertCanonicalLarkBaseWebUrl(
+    options.configuration.baseWebUrl,
+    reportOrigin.origin,
+  );
   const transport = new VerifiedLarkCliTransport(
     binaryPath,
     options.configuration,

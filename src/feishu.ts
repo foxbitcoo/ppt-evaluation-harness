@@ -32,6 +32,9 @@ import {
   captureExecutionProvenance,
   projectionProvenanceCoversCapture,
 } from "./provenance.ts";
+import {
+  assertArtifactScoreCompatibility,
+} from "./comparison-compatibility.ts";
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -92,6 +95,62 @@ function cloneWithEnvironmentOrigin<
     ...structuredClone(record),
     environmentOrigin: record.environmentOrigin,
   };
+}
+
+function capturedArtifactMatchesScore(
+  capture: CapturedArtifactTableRecord,
+  score: ArtifactScoreTableRecord,
+): boolean {
+  return (
+    capture.caseId === score.caseId &&
+    capture.jobId === score.jobId &&
+    capture.runId === score.runId &&
+    capture.artifactId === score.artifactId &&
+    capture.provenance === score.provenance &&
+    capture.environmentOrigin === score.environmentOrigin &&
+    isDeepStrictEqual(capture.artifact, score.artifact) &&
+    isDeepStrictEqual(capture.renderManifest, score.renderManifest)
+  );
+}
+
+function assertCaptureScoreBindings(
+  captures: readonly CapturedArtifactTableRecord[],
+  scores: readonly ArtifactScoreTableRecord[],
+): void {
+  for (const score of scores) {
+    const matchingCaptures = captures.filter(
+      ({ artifactId }) => artifactId === score.artifactId,
+    );
+    if (
+      matchingCaptures.length !== 1 ||
+      !capturedArtifactMatchesScore(matchingCaptures[0]!, score)
+    ) {
+      throw new Error(
+        "Artifact Score cross-table lineage does not match exactly one persisted Captured Artifact",
+      );
+    }
+  }
+}
+
+function assertArtifactScoreIdentities(
+  scores: readonly ArtifactScoreTableRecord[],
+): void {
+  const recordIds = new Set<string>();
+  const scorecardIds = new Set<string>();
+  for (const score of scores) {
+    const scorecardId = score.scorecard.scorecardId;
+    if (
+      score.recordId !== scorecardId ||
+      recordIds.has(score.recordId) ||
+      scorecardIds.has(scorecardId)
+    ) {
+      throw new Error(
+        "Artifact Score readback contains duplicate or inconsistent record and logical Scorecard identities",
+      );
+    }
+    recordIds.add(score.recordId);
+    scorecardIds.add(scorecardId);
+  }
 }
 
 export interface EvaluationCaseTablePort {
@@ -170,6 +229,7 @@ export interface ReportDocumentPort {
 }
 
 export interface ComparisonReportSource {
+  readonly evaluationCase: EvaluationCaseRecord;
   readonly job: RunRecord;
   readonly vendorRuns: readonly RunRecord[];
   readonly capturedArtifacts: readonly CapturedArtifactTableRecord[];
@@ -356,6 +416,57 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
   }
 
+  #assertArtifactProjectionRelations(
+    record: CapturedArtifactTableRecord | ArtifactScoreTableRecord,
+  ): {
+    readonly evaluationCase: EvaluationCaseRecord;
+    readonly job: RunRecord;
+    readonly run: RunRecord;
+  } {
+    const jobs = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "bakeoff_job" &&
+        candidate.jobId === record.jobId,
+    );
+    const cases = this.#caseTable.filter(
+      ({ caseId }) => caseId === record.caseId,
+    );
+    const runs = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "vendor_run" &&
+        candidate.recordId === record.runId,
+    );
+    const job = jobs[0];
+    const evaluationCase = cases[0];
+    const run = runs[0];
+    if (
+      jobs.length !== 1 ||
+      cases.length !== 1 ||
+      runs.length !== 1 ||
+      job === undefined ||
+      evaluationCase === undefined ||
+      run === undefined ||
+      job.caseId !== record.caseId ||
+      evaluationCase.caseId !== job.caseId ||
+      run.jobId !== record.jobId ||
+      run.caseId !== record.caseId ||
+      run.parentRecordId !== job.recordId ||
+      job.selectedRunIds === null ||
+      !job.selectedRunIds.includes(record.runId) ||
+      run.artifactId !== record.artifactId ||
+      job.provenance !== record.provenance ||
+      run.provenance !== record.provenance ||
+      job.environmentOrigin !== record.environmentOrigin ||
+      run.environmentOrigin !== record.environmentOrigin ||
+      evaluationCase.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "Artifact projection relational lineage does not match exactly one persisted Job, Case, and vendor Run",
+      );
+    }
+    return { evaluationCase, job, run };
+  }
+
   async #runProjectionExclusive<T>(
     operation: () => Promise<T>,
   ): Promise<T> {
@@ -456,6 +567,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       "Render manifest",
     );
     this.#assertAllowed(record.scorecard.environmentOrigin, "Evaluation");
+    if (record.recordId !== record.scorecard.scorecardId) {
+      throw new Error(
+        "Artifact Score recordId must equal its logical Scorecard ID",
+      );
+    }
     const captureProvenance = captureExecutionProvenance(
       record.artifact,
       record.renderManifest,
@@ -481,8 +597,29 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "Artifact score projection contains inconsistent lineage",
       );
     }
+    const { evaluationCase, job } =
+      this.#assertArtifactProjectionRelations(record);
+    assertArtifactScoreCompatibility(
+      record,
+      evaluationCase,
+      job.protocolSnapshot,
+    );
+    const captures = this.#capturedArtifactTable.filter(
+      ({ artifactId }) => artifactId === record.artifactId,
+    );
+    if (
+      captures.length !== 1 ||
+      !capturedArtifactMatchesScore(captures[0]!, record)
+    ) {
+      throw new Error(
+        "Artifact Score cross-table lineage does not match exactly one persisted Captured Artifact",
+      );
+    }
     const existing = this.#artifactScoreTable.find(
-      (candidate) => candidate.recordId === record.recordId,
+      (candidate) =>
+        candidate.recordId === record.recordId ||
+        candidate.scorecard.scorecardId ===
+          record.scorecard.scorecardId,
     );
     if (existing !== undefined) {
       if (!isDeepStrictEqual(existing, record)) {
@@ -640,12 +777,29 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async loadArtifactScoreByScorecardId(
     scorecardId: string,
   ): Promise<ArtifactScoreTableRecord> {
-    const score = this.#artifactScoreTable.find(
+    assertArtifactScoreIdentities(this.#artifactScoreTable);
+    const matchingScores = this.#artifactScoreTable.filter(
       ({ scorecard }) => scorecard.scorecardId === scorecardId,
     );
-    if (score === undefined) {
+    if (matchingScores.length !== 1) {
+      if (matchingScores.length > 1) {
+        throw new Error(
+          `Artifact Scorecard identity is duplicated: ${scorecardId}`,
+        );
+      }
       throw new Error(`Artifact Scorecard not found: ${scorecardId}`);
     }
+    const score = matchingScores[0]!;
+    const relations = this.#assertArtifactProjectionRelations(score);
+    assertArtifactScoreCompatibility(
+      score,
+      relations.evaluationCase,
+      relations.job.protocolSnapshot,
+    );
+    assertCaptureScoreBindings(
+      this.#capturedArtifactTable,
+      [score],
+    );
     return {
       ...structuredClone(score),
       environmentOrigin: score.environmentOrigin,
@@ -685,8 +839,23 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "Artifact capture projection contains inconsistent lineage",
       );
     }
+    this.#assertArtifactProjectionRelations(record);
+    const linkedScores = this.#artifactScoreTable.filter(
+      ({ artifactId }) => artifactId === record.artifactId,
+    );
+    if (
+      linkedScores.some(
+        (score) => !capturedArtifactMatchesScore(record, score),
+      )
+    ) {
+      throw new Error(
+        "Captured Artifact identity conflict: cross-table lineage conflicts with a persisted Artifact Score",
+      );
+    }
     const existing = this.#capturedArtifactTable.find(
-      (candidate) => candidate.recordId === record.recordId,
+      (candidate) =>
+        candidate.recordId === record.recordId ||
+        candidate.artifactId === record.artifactId,
     );
     if (existing !== undefined) {
       if (!isDeepStrictEqual(existing, record)) {
@@ -1032,7 +1201,16 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       job.reportUrl === null
         ? null
         : (this.#reports.find(({ url }) => url === job.reportUrl) ?? null);
-    return {
+    const evaluationCase = this.#caseTable.find(
+      ({ caseId }) => caseId === job.caseId,
+    );
+    if (evaluationCase === undefined) {
+      throw new Error(
+        `Evaluation Case record not found for Bakeoff Job: ${jobId}`,
+      );
+    }
+    const source: ComparisonReportSource = {
+      evaluationCase: cloneWithEnvironmentOrigin(evaluationCase),
       job: cloneRun(job),
       vendorRuns: this.#runRecordTable
         .filter(
@@ -1060,6 +1238,23 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
               environmentOrigin: primaryReport.environmentOrigin,
             },
     };
+    for (const capture of source.capturedArtifacts) {
+      this.#assertArtifactProjectionRelations(capture);
+    }
+    for (const score of source.artifactScores) {
+      const relations = this.#assertArtifactProjectionRelations(score);
+      assertArtifactScoreCompatibility(
+        score,
+        relations.evaluationCase,
+        relations.job.protocolSnapshot,
+      );
+    }
+    assertArtifactScoreIdentities(source.artifactScores);
+    assertCaptureScoreBindings(
+      source.capturedArtifacts,
+      source.artifactScores,
+    );
+    return source;
   }
 
   async loadComparisonReportSource(
