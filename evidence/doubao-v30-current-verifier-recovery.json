@@ -18,12 +18,12 @@
   },
   "verifierBuildIdentity": {
     "schemaVersion": "ppt-evaluation-build-identity-v1",
-    "specCommitSha": "3abc7971f4f56e437130efc04c85002afd24c872",
+    "specCommitSha": "6a6f7cb5351a7add0ee607878b1ea4fe6fc55d61",
     "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-    "sourceArchiveDigest": "sha256:a321db2714e35eff5026ea18a9e092de2d58da7761d6701d7195df149e40e5dc",
-    "sourceArchiveEntryCount": 44,
-    "embeddedManifestHash": "sha256:c9945d95fbe4a8a0d1bfb5592a1e7230bb1a4654644da02bad446e783222701e",
-    "manifestHash": "sha256:2bd1f5db6a959cf8cb2382f9035a75f9549274d985149097095713da8d36a696"
+    "sourceArchiveDigest": "sha256:f8a2ac5f7a0c92efd81d2868a82b6e2abe1327beee3ea043daba8c2bfd31aedc",
+    "sourceArchiveEntryCount": 45,
+    "embeddedManifestHash": "sha256:1d3692e5d0212f87099f6a9985cb9af71e2b0d24c2a462b7d6bc13a8fc5ae6f3",
+    "manifestHash": "sha256:5004dd20d90a964150641a374042b140c925bc5b1c6916c623dc045cb22cedc2"
   },
   "rendererAuthorizationEvidence": {
     "decisionId": "doubao-replay:b7b30a5f6730e1de522c6164",
@@ -43,5 +43,5 @@
     "contactSheetPngCount": 1
   },
   "recoveryCliResultHash": "sha256:4c1013c84dcc01dba070bfc52975bff7233f72b22312e2682353351765d81ff2",
-  "resultHash": "sha256:fa8a24c850bb5591605b675b98b3ccdf749b9fafeec45c7d67f7471259a51d61"
+  "resultHash": "sha256:cb58b001e4eb7523e0bfe2b172e64bdf0b7cbd59943a543b57727a79f912358a"
 }

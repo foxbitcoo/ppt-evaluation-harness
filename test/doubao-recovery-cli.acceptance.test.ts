@@ -1108,7 +1108,7 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
     recoveryCliResultHash:
       "sha256:4c1013c84dcc01dba070bfc52975bff7233f72b22312e2682353351765d81ff2",
     resultHash:
-      "sha256:REPLACE_AFTER_CURRENT_VERIFIER_FREEZE",
+      "sha256:cb58b001e4eb7523e0bfe2b172e64bdf0b7cbd59943a543b57727a79f912358a",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
