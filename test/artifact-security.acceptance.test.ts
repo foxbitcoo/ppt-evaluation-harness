@@ -462,6 +462,59 @@ function fixtureRenderManifest(): RenderManifest {
   };
 }
 
+test("ArtifactVault rejects a final renderer whose derivative set does not match the registered replay receipt", async () => {
+  const primary = new InMemoryImmutableBlobStore("primary");
+  const secondary = new InMemoryImmutableBlobStore("secondary");
+  const tombstones = new InMemoryTombstoneLedger();
+  const vault = createArtifactVault({
+    primary,
+    secondary,
+    egressAuthorization: APPROVED_EGRESS,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+    captureJournal: new InMemoryArtifactCaptureJournal(),
+    payloadInventory: new InMemoryPayloadInventory(tombstones),
+  });
+
+  await assert.rejects(
+    vault.capture({
+      jobId: "job-wrong-replay-renderer",
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "evaluation-owner",
+      artifact: fixtureArtifact(),
+      renderManifest: fixtureRenderManifest(),
+      productionExecutionEvidence: {
+        executionMode: "PRODUCTION_REPLAY",
+        captureSource: "REAL_PROVIDER_CAPTURE",
+        driverSessionId:
+          "session_replay_0123456789abcdef",
+        vendorTaskId: "task_registered_capture",
+        taskStateVersion: "artifact_exported@4",
+        driverVersion: "doubao-harness-browser-bridge@2",
+        adapterVersion: "doubao-web-ppt@1",
+        outcome: "captured",
+        artifactContentHash: ARTIFACT_HASH,
+        traceHash:
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        rasterManifestHash:
+          fixtureRenderManifest().contentHash,
+        captureReceipt: {
+          captureId: "registered-real-provider-capture",
+          artifactContentHash: ARTIFACT_HASH,
+          traceDigest:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          retainedPageDigest:
+            "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          renderDigest:
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        },
+      },
+    }),
+    /registered.*render.*receipt|render.*digest.*mismatch/i,
+  );
+  assert.deepEqual(primary.listKeys(), []);
+  assert.deepEqual(secondary.listKeys(), []);
+});
+
 test("ArtifactVault stores immutable original and derivative lineage in two controlled copies and verifies both readbacks", async () => {
   const primary = new InMemoryImmutableBlobStore("primary");
   const secondary = new InMemoryImmutableBlobStore("secondary");

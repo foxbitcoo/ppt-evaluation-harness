@@ -4,6 +4,18 @@ export {
 export {
   FileSystemAttemptCheckpointStore,
 } from "./file-system-checkpoint-store.ts";
+export { parseStrictJson } from "./strict-json.ts";
+export {
+  currentVerifierRecoveryEvidenceAttestedView,
+  doubaoRecoveryRawResultHash,
+  doubaoRecoveryResultAttestedView,
+  parseDoubaoCurrentVerifierRecoveryEvidence,
+  parseDoubaoRecoveryCliResult,
+  type DoubaoCurrentVerifierRecoveryEvidence,
+  type DoubaoCurrentVerifierRecoveryEvidenceAttestedView,
+  type DoubaoRecoveryCliResult,
+  type VerifiedBuildIdentity,
+} from "./doubao-current-verifier-evidence.ts";
 export {
   FileSystemBrowserProfileLock,
   InProcessBrowserProfileLock,
@@ -38,6 +50,7 @@ export {
 export {
   InMemoryImmutableBlobStore,
   InMemoryArtifactCaptureJournal,
+  calculateArtifactDerivativeSetHash,
   createArtifactVault,
   type ArtifactDerivativeLineage,
   type ArtifactCaptureJournalEvent,
@@ -181,8 +194,13 @@ export {
   type ArtifactCandidate,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
+  type ProductAdapterObservableEvent,
+  type ProductArtifactCaptureEvidence,
   type ProductAttemptResult,
   type ProductAdapterPort,
+  type ProductEvaluationConfigurationSnapshot,
+  type ObservedProductConfiguration,
+  type StaticRenderEvidence,
   type ProductExperienceConfiguration,
   type AccountCategoryObservation,
   type CommercialPlanObservation,
@@ -192,6 +210,46 @@ export {
   type SafeRasterRendererPort,
   type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
+export {
+  DOUBAO_PRODUCTION_ADAPTER_KIND,
+  DOUBAO_PRODUCTION_ADAPTER_VERSION,
+  DOUBAO_BROWSER_DRIVER_VERSION,
+  DOUBAO_BROWSER_PROFILE_DIGEST,
+  DOUBAO_VOLCANO_REAL_CAPTURE_ID,
+  DOUBAO_PRODUCTION_IMPLEMENTATION_PACKAGE,
+  DOUBAO_PRODUCTION_EXECUTION_CONFIGURATION_PACKAGE,
+  DOUBAO_PRODUCTION_REPLAY_EXECUTION_CONFIGURATION_PACKAGE,
+  DOUBAO_PRODUCTION_REPLAY_SCENARIO,
+  DOUBAO_PRODUCTION_SCENARIO,
+  DoubaoProductionProductAdapter,
+  DoubaoProductionReplayAdapter,
+  createDoubaoRealProviderReplayPackage,
+  registeredDoubaoBrowserDriverEvidence,
+  resolveDoubaoProductionExecutor,
+  type DoubaoBrowserDriverPort,
+  type DoubaoExportObservation,
+  type DoubaoExportPresentationCommand,
+  type DoubaoGenerationObservation,
+  type DoubaoPackageObservation,
+  type DoubaoRenderedPage,
+  type DoubaoRealProviderCapture,
+  type DoubaoRealProviderCaptureReceipt,
+  type DoubaoRenderObservation,
+  type DoubaoRenderPresentationCommand,
+  type DoubaoSubmissionObservation,
+  type DoubaoSubmitQueryCommand,
+  type DoubaoWaitForGenerationCommand,
+  type DoubaoTaskReconciliationEvidence,
+  type DoubaoTaskReconciliationQuery,
+} from "./doubao-production-adapter.ts";
+export {
+  DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+  trustedDoubaoRecoveryCheckpoint,
+  type DoubaoRecoverySha256,
+  type TrustedDoubaoRecoveryCheckpoint,
+  type TrustedDoubaoRecoveryReceipt,
+} from "./doubao-recovery-checkpoints.ts";
+export { resolveHarnessProductAdapterExecutor } from "./mock-wps.ts";
 export {
   WPS_AIPPT_ADAPTER_VERSION,
   WPS_AIPPT_EXPERIENCE_CONFIGURATION,

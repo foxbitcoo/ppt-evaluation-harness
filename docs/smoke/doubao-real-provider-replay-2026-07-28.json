@@ -1,0 +1,144 @@
+{
+  "schemaVersion": "doubao-real-provider-replay-smoke-v1",
+  "status": "observed_real_provider_replay_ingest_recovered",
+  "execution": {
+    "publicHarnessReplayIngest": true,
+    "liveAutomatedRun": false,
+    "browserRerun": false,
+    "captureSource": "REAL_PROVIDER_CAPTURE",
+    "executionMode": "PRODUCTION_REPLAY",
+    "submitCount": 1,
+    "retryCount": 0
+  },
+  "trace": {
+    "timestampGranularity": "Attempt start/submission share the first confirmed observation; generation-ready uses the artifact-capture observation as a conservative upper bound. The vendor-reported 9m 31s is retained as a label, not converted into an invented milestone timestamp.",
+    "conversationUrl": "https://www.doubao.com/chat/38435879568317954",
+    "vendorTaskId": "task_38435879568317954",
+    "attemptStartedAt": "2026-07-27T10:34:46.000Z",
+    "artifactCapturedAt": "2026-07-27T10:45:58.000Z",
+    "vendorReportedElapsed": "9m 31s",
+    "manualActions": [
+      "open a new Doubao task",
+      "select PPT mode",
+      "select detailed length",
+      "retain intelligent matching",
+      "enter the frozen 16-page Volcano prompt",
+      "submit exactly once",
+      "observe vendor completion label: 9m 31s",
+      "observe completed 16-page editor and enabled Download control",
+      "choose Download -> PPTX exactly once",
+      "validate the one retained PPTX after the download listener timed out",
+      "do not click export again; do not retry"
+    ]
+  },
+  "buildIdentity": {
+    "schemaVersion": "ppt-evaluation-build-identity-v1",
+    "specCommitSha": "fb08a1096bad8e63f33c27bd6add40e0ee6c792c",
+    "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    "sourceArchiveDigest": "sha256:5b6709475e79b7d6fcc591d5ba4eef6a6716e79afb8aec28e77575d4cccf9982",
+    "sourceArchiveEntryCount": 43,
+    "embeddedManifestHash": "sha256:acef32cac1bc94abfdbe4f2a1bae4d33f5a875d94eac534391e2430320c1388e",
+    "manifestHash": "sha256:8b525975499890ce4beab5b8f9367a2b0faa7cc5db4443b4f654bc67c10a5a95"
+  },
+  "artifact": {
+    "contentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    "byteSize": 5184523,
+    "pageCount": 16,
+    "provenance": "PRODUCTION_REPLAY"
+  },
+  "render": {
+    "outcome": "degraded",
+    "fidelity": {
+      "status": "degraded",
+      "notes": [
+        "slide 9 title clipping observed in retained render",
+        "overflow checker warning retained for slides 2-16",
+        "no quality retry was performed"
+      ]
+    },
+    "pageCount": 16,
+    "staticSlideHashes": [
+      "sha256:aaf610465bbc578d09cb211010fa27a2a3ebfd047a3a634f38ee2a4eb62a92c1",
+      "sha256:cf6a29008f403c3f5e5a7daa068775d9509cd771ee9c138285df70a9a699d4c6",
+      "sha256:57b3097c4d7ed4423264862fac857ef534d6fd0fd1a55f529f4fc7254a873b36",
+      "sha256:24ec618104a4fd4e26de5f939b00295f792dc86f204070d91342a7e9728228e5",
+      "sha256:d5d6b00c4877759e747fd4fe3cca7ff1c031263dcc66b4124b41cadaa3460772",
+      "sha256:782f6e4782bf61aabd99df05774da5b45b3d5938ca6336a3843a556a418c074d",
+      "sha256:1096b31d1e1e01c06f9b8127cb07e09645c971541d7e75bd6b8d99978c5d579f",
+      "sha256:3073936103d0cb6c19131880f871e47ef97f0e28d7c12c5496a03860fdb9499b",
+      "sha256:ce772893e297b9b40f2c4cb3706fe9f6f9f8002452c20dcf9502dd490a7d4872",
+      "sha256:9ac173b9732f4022c3cc3bb4b3c0f42321be8a67ba3f180f26de17f5062092c7",
+      "sha256:1e756960d2d048e6f0ab3ab0c40b4c52574ece00bc066b68f685b62a64793a50",
+      "sha256:1c7bbf9a540a6ee3ec72c1534356beeff2da32b8c9e60a2b05e4793a6b9114df",
+      "sha256:0eab76325c30fda5bedab7859140c2f222e2148ee8c6ca0b4993fc2ca558a5c7",
+      "sha256:442f49f120ff03794d5a10a1a0acbe35962d300861dd0fb3ec921de23bbf70f5",
+      "sha256:b4549b0d864bcb656aa42c9b54defbb896982c98b95463d52f771ade7b0d0e72",
+      "sha256:f830ca2598f9e9ad4e0cc68638295028fb9762a952228954d05f8e24c1ab7c11"
+    ],
+    "contactSheetHash": "sha256:345a0af832720fd7ce38aa6b31438f1d97a1f05a847bce2f186189bbb23a4ba7",
+    "contactSheetDimensions": "1280x720",
+    "warnings": [
+      "slide 9 title clipping observed in retained render",
+      "overflow checker warning retained for slides 2-16",
+      "no quality retry was performed"
+    ]
+  },
+  "recovery": {
+    "registryId": "doubao-real-provider-20260730-t09-v28",
+    "registryHash": "sha256:ed0b955226c305e5575671f33ae0615e43037671760dcb48b50b5fcca221e2db",
+    "rootReferences": {
+      "artifactPrimary": "root:doubao-replay-artifact-primary",
+      "artifactRecovery": "root:doubao-replay-artifact-recovery",
+      "runSpecification": "root:doubao-replay-run-specification",
+      "checkpoint": "root:doubao-replay-checkpoint",
+      "profileLock": "root:doubao-replay-profile-lock",
+      "operational": "root:doubao-replay-operational"
+    },
+    "artifactManifestHash": "sha256:5ed1ef141a11b0ad5658535777f786561cba01520f80f3c07582bb7f331c3ddd",
+    "cliArtifactIdentityHash": "sha256:d37a99031eb726a27a9baf02b053b130282f89d4508136c392524c428b742774",
+    "recoveredOriginalHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    "derivativeCount": 33,
+    "recoveredDerivativeCount": 33,
+    "cliRenderManifestHash": "sha256:11d68948fc4c200499af92b4acd4aed2a59bb2d22d7b47eaba6915f7c7db29d6",
+    "cliDerivativeCount": 33,
+    "cliRecoveredDerivativeCount": 33,
+    "cliDerivativeSetHash": "sha256:047f33568528b87be6abc3ce17898fdb98d36ed5f38742eed3d4b05db7e26826",
+    "runSpecificationHash": "sha256:bd398a6f1e54168d9a9b7f4fba317f6a3a92c777c8fe7a4368b17eefbd8f5c0d",
+    "browserDriverEvidence": {
+      "browserProfileDigest": "sha256:c6e451e70a930e80e799843cd8b1576d2bcaf47eb59c33ea1767e009fd599222",
+      "captureReceipt": {
+        "artifactContentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+        "captureId": "doubao-volcano-20260727-1845",
+        "renderDigest": "sha256:047f33568528b87be6abc3ce17898fdb98d36ed5f38742eed3d4b05db7e26826",
+        "retainedPageDigest": "sha256:8f9453b0cf3b88525d2ad69d7f0d854efd24cc7e86108fcafb82727912b46c3f",
+        "traceDigest": "sha256:594d9b94d81d98e4b8a1986db7353f6852ac17201076d85e5d6f64df505d40ad"
+      },
+      "captureSource": "REAL_PROVIDER_CAPTURE",
+      "configurationDigest": "sha256:b79c9b95ad7e8180ee67ff1cc5554f604ec748871e71cc8da2b3334cd5310f7b",
+      "driverId": "doubao-real-provider-replay",
+      "driverVersion": "doubao-harness-browser-bridge@2",
+      "implementationDigest": "sha256:2317479ba1044dba3f3989b33445924bb5f6456b11d11dc56c0525403e1b7c6a",
+      "provenance": "PRODUCTION_REPLAY"
+    },
+    "checkpointCount": 4,
+    "checkpointTraceHash": "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
+    "trustedRecoveryCheckpoint": {
+      "checkpointId": "doubao-volcano-20260727-real-provider-v1",
+      "purpose": "real_provider_recovery",
+      "schemaVersion": "doubao-recovery-checkpoint-v1"
+    },
+    "binaryValidation": {
+      "pptxSlideCount": 16,
+      "staticPngCount": 16,
+      "contactSheetPngCount": 1
+    },
+    "profileLock": {
+      "rootReference": "root:doubao-replay-profile-lock",
+      "lockId": "doubao-replay-profile-lock-v1"
+    },
+    "recoveryCommand": "node --import tsx scripts/recover-doubao-production-run.ts doubao-real-provider-20260730-t09-v28 root:doubao-replay-artifact-recovery root:doubao-replay-run-specification root:doubao-replay-checkpoint doubao-replay-artifact-recovery-v1 artifacts/artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4/manifest artifacts/artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4/original doubao-replay-run-specification-v1 run-specifications/bd398a6f1e54168d9a9b7f4fba317f6a3a92c777c8fe7a4368b17eefbd8f5c0d doubao-replay-checkpoints-v1 production-replay-run-doubao-web-ppt-real-provider-rep-d77ffcfc6c17d7cf2ad9e9a7972fce90-volcano-v1-attempt-1 doubao-volcano-20260727-real-provider-v1",
+    "recoveryCliExecuted": true,
+    "recoveryCliResultHash": "sha256:0e77e61c3dc9815513792f23cc847331e2bbe7f9592a2263571399eae492ba42",
+    "recoveryCliResultReference": "root:doubao-replay-operational:recovery-cli-result.json"
+  }
+}

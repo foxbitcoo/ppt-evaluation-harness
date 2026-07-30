@@ -28,6 +28,17 @@ export interface ProductPackageSnapshot {
   readonly environmentOrigin: EnvironmentOrigin;
   readonly egressDestination: EgressDestinationMetadata;
   readonly experienceConfiguration?: ProductExperienceConfiguration;
+  readonly evaluationConfiguration?: ProductEvaluationConfigurationSnapshot;
+}
+
+export interface ProductEvaluationConfigurationSnapshot {
+  readonly accountContext: "current_authenticated_account";
+  readonly benchmarkProtocol: "best_available_zero_incremental_cost";
+  readonly entryUrl: string;
+  readonly modelSelection: "best_available_for_current_account";
+  readonly networking: "enabled";
+  readonly purchasePolicy: "no_incremental_charge";
+  readonly requestedPageCount: 16;
 }
 
 export interface ProductExperienceConfiguration {
@@ -104,6 +115,15 @@ export interface ProductionDriverExecutionEvidence {
   readonly artifactContentHash: `sha256:${string}`;
   readonly traceHash: `sha256:${string}`;
   readonly liveBridgeTranscriptHash?: `sha256:${string}`;
+  readonly captureReceipt?: RealProviderCaptureReceiptEvidence;
+}
+
+export interface RealProviderCaptureReceiptEvidence {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly traceDigest: `sha256:${string}`;
+  readonly retainedPageDigest: `sha256:${string}`;
+  readonly renderDigest: `sha256:${string}`;
 }
 
 export interface TrustedBrowserDriverEvidence {
@@ -151,6 +171,71 @@ export interface SafeRasterRendererPort {
   }): Promise<SafeRasterCandidate>;
 }
 
+export interface ProductAdapterObservableEvent {
+  readonly eventType:
+    | "preflight_observed"
+    | "query_not_submitted"
+    | "query_submission_unknown"
+    | "query_submitted"
+    | "generation_ready"
+    | "generation_failed"
+    | "generation_timed_out"
+    | "waiting_for_human"
+    | "artifact_exported"
+    | "export_failed"
+    | "render_failed"
+    | "static_render_completed";
+  readonly observedAt: string;
+  readonly evidenceRef: string;
+}
+
+export interface DoubaoObservedProductConfiguration {
+  readonly sourceUrl: string;
+  readonly accountEvidence: "current_account_signed_in";
+  readonly planName: string;
+  readonly modelName: string;
+  readonly modeName: string;
+  readonly networking: "enabled";
+  readonly requestedPageCount: 16;
+  readonly bestAvailableForCurrentAccount: true;
+  readonly incrementalChargeRequired: false;
+}
+
+export interface QwenObservedProductConfiguration {
+  readonly actualUrl: string;
+  readonly accountReference: "current_signed_in_account";
+  readonly packageLabel: string;
+  readonly addedCost: "zero";
+  readonly modelLabel: string;
+  readonly expertMode: "enabled" | "disabled" | "unavailable";
+  readonly networking: "enabled";
+  readonly pageCount: 16;
+  readonly evidenceBindings?: Readonly<{
+    readonly package: `ev_${string}`;
+    readonly model: `ev_${string}`;
+    readonly configuration: `ev_${string}`;
+  }>;
+}
+
+export type ObservedProductConfiguration =
+  | DoubaoObservedProductConfiguration
+  | QwenObservedProductConfiguration;
+
+export interface StaticRenderEvidence {
+  readonly pageNumber: number;
+  readonly filename: string;
+  readonly mimeType: "image/png";
+  readonly byteSize: number;
+  readonly contentHash: `sha256:${string}`;
+}
+
+export interface ProductArtifactCaptureEvidence {
+  readonly renderer: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly artifactPageCount: number;
+  readonly staticRenders: readonly StaticRenderEvidence[];
+}
+
 export interface ProductAttemptResult {
   readonly terminalReason: TerminalReason;
   readonly blockReason: BlockReason | null;
@@ -159,6 +244,8 @@ export interface ProductAttemptResult {
   readonly artifactCandidates: readonly ArtifactCandidate[];
   readonly observableEvents?: readonly ObservableAttemptEvent[];
   readonly manualActions?: readonly string[];
+  readonly observedConfiguration?: ObservedProductConfiguration | null;
+  readonly captureEvidence?: ProductArtifactCaptureEvidence;
 }
 
 export interface AttemptCheckpointPort {

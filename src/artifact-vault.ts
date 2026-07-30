@@ -468,6 +468,28 @@ function identityBytes(identity: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(canonicalValue(identity)));
 }
 
+export function calculateArtifactDerivativeSetHash(
+  derivatives: readonly Pick<
+    ArtifactDerivativeLineage,
+    "derivativeId" | "contentHash"
+  >[],
+): `sha256:${string}` {
+  return sha256(
+    new TextEncoder().encode(
+      JSON.stringify(
+      derivatives
+        .map(({ derivativeId, contentHash }) => ({
+          derivativeId,
+          contentHash,
+        }))
+        .sort((left, right) =>
+          left.derivativeId.localeCompare(right.derivativeId),
+        ),
+      ),
+    ),
+  );
+}
+
 function assertSha256(
   content: Uint8Array,
   expected: `sha256:${string}`,
@@ -553,7 +575,9 @@ export function createArtifactVault({
       if (
         renderManifest.artifactId !== artifact.artifactId ||
         renderManifest.pageCount !== artifact.pageCount ||
-        renderManifest.slides.length !== artifact.pageCount
+        (renderManifest.renderOutcome === "failed"
+          ? renderManifest.slides.length !== 0
+          : renderManifest.slides.length !== artifact.pageCount)
       ) {
         throw new Error("Artifact package contains inconsistent lineage");
       }
@@ -638,6 +662,27 @@ export function createArtifactVault({
           pipelineVersion: renderManifest.renderer,
         }),
       ];
+      const captureReceipt =
+        command.productionExecutionEvidence?.captureReceipt;
+      const requiresDoubaoReplayReceipt =
+        command.productionExecutionEvidence?.executionMode ===
+          "PRODUCTION_REPLAY" &&
+        command.productionExecutionEvidence.captureSource ===
+          "REAL_PROVIDER_CAPTURE" &&
+        command.productionExecutionEvidence.adapterVersion ===
+          "doubao-web-ppt@1";
+      if (
+        (requiresDoubaoReplayReceipt && captureReceipt === undefined) ||
+        (captureReceipt !== undefined &&
+          (captureReceipt.artifactContentHash !==
+            artifact.contentHash ||
+            captureReceipt.renderDigest !==
+              calculateArtifactDerivativeSetHash(derivatives)))
+      ) {
+        throw new Error(
+          "Registered real-provider render receipt digest mismatch",
+        );
+      }
       const artifactMetadata = Object.freeze<ArtifactMetadata>({
         artifactId: artifact.artifactId,
         runId: artifact.runId,

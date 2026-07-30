@@ -10,6 +10,9 @@ import type {
 import type {
   RunSpecificationReference,
 } from "./run-specification.ts";
+import type {
+  ObservedProductConfiguration,
+} from "./product-adapter.ts";
 
 export const MOCK_PROVENANCE = "MOCK" as const;
 
@@ -133,6 +136,7 @@ export interface RunRecord {
   readonly timingPausedAt: string | null;
   readonly observableEvents: readonly ObservableAttemptEvent[] | null;
   readonly manualActions: readonly string[] | null;
+  readonly productConfigurationEvidence?: ObservedProductConfiguration | null;
   readonly costEvidence: CostEvidence | null;
   readonly provenance: ProvenanceLabel;
   readonly environmentOrigin: EnvironmentOrigin;
