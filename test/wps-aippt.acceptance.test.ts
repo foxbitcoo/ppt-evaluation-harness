@@ -756,7 +756,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:b3f1d4a260116fb65d5d891e0caeb38de9510f4cca1c27c0a2ea45b88d43b48c",
+        "sha256:f89282f9eb2197cd2e277400b751d1b97eab5fd2f8aa494e90e3e0dc8a98a9a2",
       sourceArchiveEntryCount: 45,
     },
   );
