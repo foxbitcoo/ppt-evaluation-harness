@@ -5,6 +5,15 @@ export {
   FileSystemAttemptCheckpointStore,
 } from "./file-system-checkpoint-store.ts";
 export {
+  FileSystemArtifactCaptureJournal,
+  FileSystemEgressAuthorizationAudit,
+  FileSystemJudgeEgressAudit,
+  FileSystemReferencePackStore,
+  assertHarnessOwnedDurableEgressAuthorizationAudit,
+  assertHarnessOwnedDurableJudgeEgressAudit,
+  assertHarnessOwnedDurableReferencePackStore,
+} from "./file-system-operational-durability.ts";
+export {
   FileSystemBrowserProfileLock,
   InProcessBrowserProfileLock,
   type BrowserProfileLockPort,
@@ -146,6 +155,31 @@ export {
   type ReviewEventTablePort,
   type RunRecordTablePort,
 } from "./feishu.ts";
+export {
+  CODEX_CLI_FIXED_ARGUMENTS_HASH,
+  CODEX_CLI_JUDGE_ADAPTER_VERSION,
+  FROZEN_CODEX_CLI_BINARY,
+  FROZEN_CODEX_CLI_SHA256,
+  assertCodexCliTranscriptIsDataOnly,
+  assertHarnessOwnedProductionJudge,
+  createCodexCliJudgeForTest,
+  createHarnessOwnedCodexCliJudge,
+  preflightHarnessOwnedProductionJudge,
+  type CodexCliJudgeTransportCommand,
+  type CodexCliJudgeTransportPort,
+  type CodexCliJudgeTransportResult,
+} from "./codex-cli-judge.ts";
+export {
+  FROZEN_LARK_CLI_BINARY,
+  FROZEN_LARK_CLI_SHA256,
+  assertHarnessOwnedLarkBaseProjection,
+  createHarnessOwnedLarkBaseProjection,
+  createLarkBaseProjectionForTest,
+  createVerifiedLarkCliTransport,
+  preflightHarnessOwnedLarkBaseProjection,
+  type LarkBaseProjectionTransportPort,
+  type LarkProjectionTableKey,
+} from "./lark-base-projection.ts";
 export {
   createScoreAdjudicationService,
   type AdjudicateDimensionCommand,

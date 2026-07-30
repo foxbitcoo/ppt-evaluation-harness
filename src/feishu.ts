@@ -261,6 +261,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     );
   }
 
+  protected async materializeAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+    _authorization: ApprovedEgressAuthorization,
+  ): Promise<FeishuProjectionSnapshot> {
+    return snapshot;
+  }
+
   #assertAllowed(origin: EnvironmentOrigin, entityName: string): void {
     assertEnvironmentOriginAllowed(origin, this.targetEnvironment, entityName);
   }
@@ -878,9 +885,14 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async createReport(draft: FeishuReportDraft): Promise<FeishuReport> {
     this.#assertJobActive(draft.jobId);
     this.#assertAllowed(draft.environmentOrigin, "Report");
+    const suppliedUrl = (draft as FeishuReport).url;
     const report = {
       ...draft,
-      url: `mock-feishu://documents/${draft.reportId}`,
+      url:
+        typeof suppliedUrl === "string" &&
+        /^https:\/\/[^/\s]+\/.+/.test(suppliedUrl)
+          ? suppliedUrl
+          : `mock-feishu://documents/${draft.reportId}`,
     };
     const existing = this.#reports.find(
       (candidate) => candidate.reportId === report.reportId,
@@ -1098,6 +1110,45 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         authorization,
         this.#clock,
       );
+      const materializedSnapshot =
+        await this.materializeAuthorizedSnapshot(
+          snapshot,
+          authorization,
+        );
+      const stableMaterializationView = (
+        candidate: FeishuProjectionSnapshot,
+      ) => ({
+        ...candidate,
+        runRecordTable: candidate.runRecordTable.map((record) => ({
+          ...record,
+          reportUrl: record.reportUrl === null ? null : "<report-url>",
+          auxiliaryReportUrls:
+            record.auxiliaryReportUrls === null
+              ? null
+              : record.auxiliaryReportUrls.map(() => "<report-url>"),
+        })),
+        reports: candidate.reports.map((report) => ({
+          ...report,
+          url: "<report-url>",
+        })),
+      });
+      if (
+        !isDeepStrictEqual(
+          stableMaterializationView(snapshot),
+          stableMaterializationView(materializedSnapshot),
+        ) ||
+        materializedSnapshot.reports.some(
+          ({ reportId, url }) =>
+            snapshot.reports.find(
+              (candidate) => candidate.reportId === reportId,
+            )?.url !== url &&
+            !/^https:\/\/[^/\s]+\/.+/.test(url),
+        )
+      ) {
+        throw new Error(
+          "Operational ledger materialization may change only report URLs to HTTPS evidence",
+        );
+      }
       while (true) {
         const observedMutationVersion = this.#mutationVersion;
         const working = new InMemoryFeishuProjection({
@@ -1105,41 +1156,41 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
           egressDestination: this.egressDestination,
         });
         working.#replaceSnapshot(this.snapshot());
-        for (const record of snapshot.caseTable) {
+        for (const record of materializedSnapshot.caseTable) {
           await working.upsertCase(record);
         }
-        for (const record of snapshot.runRecordTable) {
+        for (const record of materializedSnapshot.runRecordTable) {
           await working.appendRunRecord(record);
         }
-        for (const record of snapshot.capturedArtifactTable) {
+        for (const record of materializedSnapshot.capturedArtifactTable) {
           await working.appendCapturedArtifact(record);
         }
-        for (const record of snapshot.artifactScoreTable) {
+        for (const record of materializedSnapshot.artifactScoreTable) {
           await working.appendArtifactScore(record);
         }
-        for (const record of snapshot.adjudicationEventTable) {
+        for (const record of materializedSnapshot.adjudicationEventTable) {
           await working.appendAdjudicationEvent(record);
         }
-        for (const record of snapshot.reviewEventTable) {
+        for (const record of materializedSnapshot.reviewEventTable) {
           await working.appendReviewEvent(record);
         }
-        for (const record of snapshot.productGapCardTable) {
+        for (const record of materializedSnapshot.productGapCardTable) {
           if (record.recordType === "comparison") {
             await working.appendComparison(record);
           } else {
             await working.appendProductGapCard(record);
           }
         }
-        for (const record of snapshot.gapCardWorkflowEventTable) {
+        for (const record of materializedSnapshot.gapCardWorkflowEventTable) {
           await working.appendProductGapCardWorkflowEvent(record);
         }
-        for (const record of snapshot.githubIssueDeliveryReservationTable) {
+        for (const record of materializedSnapshot.githubIssueDeliveryReservationTable) {
           await working.reserveGitHubIssueDelivery(record);
         }
-        for (const record of snapshot.githubIssueLinkEventTable) {
+        for (const record of materializedSnapshot.githubIssueLinkEventTable) {
           await working.appendGitHubIssueLinkEvent(record);
         }
-        for (const report of snapshot.reports) {
+        for (const report of materializedSnapshot.reports) {
           const created = await working.createReport(report);
           if (!isDeepStrictEqual(created, report)) {
             throw new Error(

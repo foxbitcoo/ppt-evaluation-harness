@@ -46,6 +46,7 @@ export interface StagedReferencePack {
 
 export interface UsedReferencePackRecord {
   readonly recordId: string;
+  readonly stagingId: string;
   readonly jobId: string;
   readonly pack: ReferencePack;
   readonly scorecardIds: readonly string[];
@@ -59,6 +60,7 @@ export interface ReferencePackStoreSnapshot {
 }
 
 export interface ReferencePackStorePort {
+  readonly durability?: "ephemeral" | "durable";
   stage(
     pack: ReferencePack,
     input: { readonly jobId: string },
@@ -75,6 +77,7 @@ export interface ReferencePackStorePort {
 }
 
 export class InMemoryReferencePackStore implements ReferencePackStorePort {
+  readonly durability = "ephemeral" as const;
   readonly #temporary = new Map<string, StagedReferencePack>();
   readonly #used: UsedReferencePackRecord[] = [];
   readonly #now: () => string;
@@ -114,6 +117,7 @@ export class InMemoryReferencePackStore implements ReferencePackStorePort {
     }
     const record = Object.freeze({
       recordId: `reference-pack-usage:${input.jobId}:${staged.pack.contentHash}`,
+      stagingId,
       jobId: input.jobId,
       pack: staged.pack,
       scorecardIds: Object.freeze([...input.scorecardIds]),

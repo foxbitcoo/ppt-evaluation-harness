@@ -46,7 +46,7 @@ export function createMockReportDraft(
 ): FeishuReportDraft {
   const firstResult = results[0];
   if (firstResult === undefined) {
-    throw new Error("A Mock report requires at least one vendor Run");
+    throw new Error("A Case Sample report requires at least one vendor Run");
   }
   const vendorSections = results
     .map(
@@ -106,7 +106,11 @@ ${lineage.provenance === "MOCK" ? "> **MOCK 测试数据，禁止作为真实厂
 
 - Bakeoff Job：\`${jobId}\`
 - Job 状态：\`${jobStatus}\`
-- 证据等级：Case Sample（仅适用于当前固定 Mock 火山 Case）
+- 证据等级：Case Sample（${
+    lineage.provenance === "MOCK"
+      ? "仅适用于当前固定 Mock 火山 Case"
+      : "仅适用于当前真实火山 Case 的单次样本"
+  }）
 
 ${vendorSections}
 

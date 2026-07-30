@@ -66,6 +66,7 @@ export interface ArtifactCaptureJournalEvent {
 
 export interface ArtifactCaptureJournalPort {
   readonly journalId: string;
+  readonly durability?: "ephemeral" | "durable";
   beginAttempt(input: {
     readonly jobId: string;
     readonly artifactId: string;
@@ -88,6 +89,7 @@ export class InMemoryArtifactCaptureJournal
   implements ArtifactCaptureJournalPort
 {
   readonly journalId: string;
+  readonly durability = "ephemeral" as const;
   readonly #events: ArtifactCaptureJournalEvent[] = [];
   readonly #attemptCounts = new Map<string, number>();
 
@@ -378,6 +380,7 @@ export interface RecoveredArtifactPackage {
 export interface ArtifactVault {
   readonly storageProfile?: {
     readonly durability: "ephemeral" | "durable";
+    readonly captureJournalDurability?: "ephemeral" | "durable";
     readonly primaryStoreId: string;
     readonly secondaryStoreId: string;
     readonly recoveryReferencePrefix: string;
@@ -543,6 +546,8 @@ export function createArtifactVault({
         secondary.durability === "durable"
           ? "durable"
           : "ephemeral",
+      captureJournalDurability:
+        captureJournal.durability ?? "ephemeral",
       primaryStoreId: primary.storeId,
       secondaryStoreId: secondary.storeId,
       recoveryReferencePrefix:

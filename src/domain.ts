@@ -304,8 +304,10 @@ export interface JudgeFailureLineage {
 }
 
 export interface JudgeLineage {
-  readonly provider: "openai";
-  readonly adapterVersion: "openai-responses-judge@1";
+  readonly provider: "openai" | "codex_cli";
+  readonly adapterVersion:
+    | "openai-responses-judge@1"
+    | "codex-cli-judge@1";
   readonly requestedModel: "gpt-5.6-sol";
   readonly responseModel: string;
   readonly responseId: string;
@@ -326,6 +328,17 @@ export interface JudgeLineage {
   readonly rasterizedImageHashes: readonly RasterizedImageLineage[];
   readonly imageDetail: "high";
   readonly store: false;
+  readonly executionEvidence?: CodexCliJudgeExecutionEvidence;
+}
+
+export interface CodexCliJudgeExecutionEvidence {
+  readonly schemaVersion: "codex-cli-judge-execution-v1";
+  readonly binaryPath: string;
+  readonly binaryHash: `sha256:${string}`;
+  readonly fixedArgumentsHash: `sha256:${string}`;
+  readonly invocationHash: `sha256:${string}`;
+  readonly transcriptHash: `sha256:${string}`;
+  readonly resultHash: `sha256:${string}`;
 }
 
 export interface EvaluationInputManifest {
@@ -699,8 +712,19 @@ export interface BakeoffJobOutcome {
   readonly report: FeishuReport;
 }
 
+export interface CaptureOnlyBakeoffJobOutcome
+  extends Omit<
+    BakeoffJobOutcome,
+    "scorecard" | "scorecards" | "report"
+  > {
+  readonly scorecard: null;
+  readonly scorecards: readonly [];
+  readonly report: null;
+}
+
 export interface StartBakeoffJobCommand {
   readonly environment: "test" | "production";
   readonly caseId: string;
   readonly referencePackMode?: "automatic" | "force" | "off";
+  readonly executionMode?: "evaluate" | "capture_only";
 }

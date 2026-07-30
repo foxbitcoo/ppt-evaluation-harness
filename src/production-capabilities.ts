@@ -6,11 +6,11 @@ import { join, resolve } from "node:path";
 import sharp from "sharp";
 
 import {
-  InMemoryArtifactCaptureJournal,
   createArtifactVault,
   type ArtifactVault,
   type JobTombstoneLookupPort,
 } from "./artifact-vault.ts";
+import { FileSystemArtifactCaptureJournal } from "./file-system-operational-durability.ts";
 import {
   FileSystemBrowserProfileLock,
   type BrowserProfileLockPort,
@@ -73,6 +73,10 @@ export interface HarnessOwnedProductionCapabilityEvidence {
     readonly lockId: string;
   };
   readonly rendererId: string;
+  readonly captureJournal: {
+    readonly journalId: string;
+    readonly rootReference: string;
+  };
 }
 
 export interface HarnessOwnedProductionCapabilities {
@@ -213,9 +217,11 @@ export function createHarnessOwnedProductionCapabilities(input: {
     secondary,
     egressAuthorization: input.egressAuthorization,
     egressAudit: input.egressAudit,
-    captureJournal: new InMemoryArtifactCaptureJournal(
-      `production-capability-journal:${randomUUID()}`,
-    ),
+    captureJournal: new FileSystemArtifactCaptureJournal({
+      journalId:
+        `production-capability-journal:${input.artifactPrimary.storeId}`,
+      rootPath: join(input.checkpoint.rootPath, "artifact-capture-journal"),
+    }),
     payloadInventory: input.payloadInventory,
   });
   const runSpecificationVault = createRunSpecificationVault({
@@ -370,6 +376,12 @@ export function createHarnessOwnedProductionCapabilities(input: {
         lockId: input.profileLock.lockId,
       }),
       rendererId: input.renderer.rendererId,
+      captureJournal: Object.freeze({
+        journalId:
+          `production-capability-journal:${input.artifactPrimary.storeId}`,
+        rootReference:
+          `${input.checkpoint.rootReference}:artifact-capture-journal`,
+      }),
     }),
   });
 }

@@ -6,7 +6,10 @@ import type {
   ArtifactScorecard,
   BakeoffProtocolSnapshot,
   BakeoffJobOutcome,
+  BakeoffJobSummary,
+  CaptureOnlyBakeoffJobOutcome,
   BlockReason,
+  FeishuReport,
   JudgeFailureLineage,
   ObservableAttemptEvent,
   RenderManifest,
@@ -53,6 +56,14 @@ import type {
 } from "./feishu.ts";
 import { InMemoryFeishuProjection } from "./feishu.ts";
 import {
+  assertHarnessOwnedLarkBaseProjection,
+  preflightHarnessOwnedLarkBaseProjection,
+} from "./lark-base-projection.ts";
+import {
+  assertHarnessOwnedDurableEgressAuthorizationAudit,
+  assertHarnessOwnedDurableReferencePackStore,
+} from "./file-system-operational-durability.ts";
+import {
   PRODUCTION_VOLCANO_EVALUATION_CASE,
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
@@ -68,6 +79,10 @@ import {
   OpenAiJudgeEvaluationError,
   type OpenAiJudgePort,
 } from "./openai-judge.ts";
+import {
+  assertHarnessOwnedProductionJudge,
+  preflightHarnessOwnedProductionJudge,
+} from "./codex-cli-judge.ts";
 import {
   InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
@@ -170,10 +185,14 @@ interface BakeoffExecutionContext {
 function executionContext(
   environment: "test" | "production",
   fixedTime: string,
+  executionMode: "evaluate" | "capture_only" = "evaluate",
 ): BakeoffExecutionContext {
   return environment === "production"
     ? Object.freeze({
-        jobId: "production-job-volcano-wps-v1",
+        jobId:
+          executionMode === "capture_only"
+            ? "production-capture-volcano-v1"
+            : "production-job-volcano-wps-v1",
         evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
         provenance: "PRODUCTION",
         environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
@@ -298,6 +317,11 @@ const WALL_CLOCK_ATTEMPT_DEADLINE: AttemptDeadlinePort = {
 };
 
 export interface BakeoffHarness {
+  startBakeoffJob(
+    command: StartBakeoffJobCommand & {
+      readonly executionMode: "capture_only";
+    },
+  ): Promise<CaptureOnlyBakeoffJobOutcome>;
   startBakeoffJob(command: StartBakeoffJobCommand): Promise<BakeoffJobOutcome>;
 }
 
@@ -327,7 +351,9 @@ export interface BakeoffHarnessDependencies {
 
 interface InFlightBakeoffJob {
   readonly jobIdentity: string;
-  readonly outcome: Promise<BakeoffJobOutcome>;
+  readonly outcome: Promise<
+    BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome
+  >;
 }
 
 const IN_FLIGHT_BAKEOFF_JOBS = new WeakMap<
@@ -494,6 +520,7 @@ function snapshotBakeoffCommand(
     environment: command.environment,
     caseId: command.caseId,
     referencePackMode: command.referencePackMode ?? "automatic",
+    executionMode: command.executionMode ?? "evaluate",
   });
 }
 
@@ -530,6 +557,7 @@ function bakeoffJobIdentity(
     environment: command.environment,
     caseId: command.caseId,
     referencePackMode: command.referencePackMode ?? "automatic",
+    executionMode: command.executionMode ?? "evaluate",
     protocol: bakeoffProtocolSnapshot(
       command.referencePackMode ?? "automatic",
       command.environment,
@@ -609,8 +637,10 @@ function coalesceBakeoffJob(
   feishu: FeishuProjectionPort,
   jobId: string,
   jobIdentity: string,
-  operation: () => Promise<BakeoffJobOutcome>,
-): Promise<BakeoffJobOutcome> {
+  operation: () => Promise<
+    BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome
+  >,
+): Promise<BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome> {
   let jobs = IN_FLIGHT_BAKEOFF_JOBS.get(feishu);
   if (jobs === undefined) {
     jobs = new Map();
@@ -626,7 +656,9 @@ function coalesceBakeoffJob(
     return existing.outcome;
   }
 
-  let outcome!: Promise<BakeoffJobOutcome>;
+  let outcome!: Promise<
+    BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome
+  >;
   outcome = operation().finally(() => {
     const current = jobs?.get(jobId);
     if (current?.outcome === outcome) {
@@ -1272,6 +1304,7 @@ async function executeVendor(
   selection: SelectedProductAdapter,
   caseId: string,
   targetEnvironment: "test" | "production",
+  executionMode: "evaluate" | "capture_only",
   attemptDeadline: AttemptDeadlinePort,
   jobDeadlineAtEpochMs: number,
   referencePack: ReferencePack | null,
@@ -1708,6 +1741,26 @@ async function executeVendor(
   const scorecardId =
     scenario?.scorecardId ??
     runId.replace(/-run-/, "-scorecard-");
+  if (executionMode === "capture_only") {
+    return {
+      productPackage,
+      runId,
+      status,
+      terminalReason,
+      blockReason: null,
+      artifact,
+      renderManifest,
+      scorecard: null,
+      judgeFailure: null,
+      artifactPackageManifest,
+      egressAuthorizations,
+      attemptRecords: attempts.map((attempt, index) =>
+        index === attempts.length - 1
+          ? { ...attempt, artifactId: artifact.artifactId }
+          : attempt,
+      ),
+    };
+  }
   const visualScoringAllowed = renderManifest.renderOutcome === "faithful";
   const evaluationAttemptKind =
     judge === undefined || !visualScoringAllowed
@@ -1719,7 +1772,12 @@ async function executeVendor(
   }
   let scorecard: ArtifactScorecard | null;
   let judgeFailure: JudgeFailureLineage | null = null;
-  if (judge === undefined || !visualScoringAllowed) {
+  if (
+    targetEnvironment === "production" &&
+    !visualScoringAllowed
+  ) {
+    scorecard = null;
+  } else if (judge === undefined || !visualScoringAllowed) {
     scorecard = scoreRenderedArtifact(artifact, renderManifest, {
       jobId: context.jobId,
       runId,
@@ -1801,10 +1859,12 @@ async function executeVendor(
       (judge !== undefined &&
         visualScoringAllowed &&
         (scorecard.judgeLineage === null ||
-          scorecard.judgeLineage.provider !== "openai")))
+          !["openai", "codex_cli"].includes(
+            scorecard.judgeLineage.provider,
+          ))))
   ) {
     const lineageError = new Error(
-      "Judge returned an inconsistent or non-OpenAI Scorecard lineage",
+      "Judge returned an inconsistent or non-OpenAI Scorecard lineage; only registered OpenAI or Codex CLI Judge lineage is accepted",
     );
     if (judge === undefined || !visualScoringAllowed) {
       throw lineageError;
@@ -1968,8 +2028,12 @@ export function createBakeoffHarness({
     async startBakeoffJob(
       command: StartBakeoffJobCommand,
       selections: readonly SelectedProductAdapter[],
-    ): Promise<BakeoffJobOutcome> {
-      const context = executionContext(command.environment, clock.now());
+    ): Promise<BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome> {
+      const context = executionContext(
+        command.environment,
+        clock.now(),
+        command.executionMode ?? "evaluate",
+      );
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
       }
@@ -2023,6 +2087,15 @@ export function createBakeoffHarness({
         throw new Error(
           "Production Bakeoff requires the isolated offline PNG renderer destination",
         );
+      }
+      if (command.environment === "production") {
+        if (command.executionMode !== "capture_only") {
+          await preflightHarnessOwnedProductionJudge(judge!);
+        }
+        await preflightHarnessOwnedLarkBaseProjection(feishu, {
+          requireReportDocument:
+            command.executionMode !== "capture_only",
+        });
       }
 
       const protocolSnapshot = bakeoffProtocolSnapshot(
@@ -2083,13 +2156,16 @@ export function createBakeoffHarness({
         ),
       );
 
-      const referencePackSelection = resolveReferencePackForCase({
-        evaluationCase: context.evaluationCase,
-        ...(command.referencePackMode === undefined
-          ? {}
-          : { mode: command.referencePackMode }),
-        generator: referencePackGenerator,
-      });
+      const referencePackSelection =
+        command.executionMode === "capture_only"
+          ? { mode: "off" as const, pack: null }
+          : resolveReferencePackForCase({
+              evaluationCase: context.evaluationCase,
+              ...(command.referencePackMode === undefined
+                ? {}
+                : { mode: command.referencePackMode }),
+              generator: referencePackGenerator,
+            });
       const stagedReferencePack =
         referencePackSelection.pack === null
           ? null
@@ -2102,25 +2178,26 @@ export function createBakeoffHarness({
         selections.map((selection) => {
           const operation = () =>
             executeVendor(
-            context,
-            selection,
-            command.caseId,
-            command.environment,
-            attemptDeadline,
-            jobDeadlineAtEpochMs,
-            referencePackSelection.pack,
-            judge,
-            egressAuthorization,
-            artifactVault,
-            clock,
-            rendererDestination,
-            safeRasterRenderer,
-            judgeDestination,
-            attemptCheckpointStore,
-            (evaluationAttemptId) => {
-              evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
-            },
-          );
+              context,
+              selection,
+              command.caseId,
+              command.environment,
+              command.executionMode ?? "evaluate",
+              attemptDeadline,
+              jobDeadlineAtEpochMs,
+              referencePackSelection.pack,
+              judge,
+              egressAuthorization,
+              artifactVault,
+              clock,
+              rendererDestination,
+              safeRasterRenderer,
+              judgeDestination,
+              attemptCheckpointStore,
+              (evaluationAttemptId) => {
+                evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
+              },
+            );
           const evidence = selection.browserDriverEvidence;
           return evidence === null
             ? operation()
@@ -2190,13 +2267,17 @@ export function createBakeoffHarness({
           readonly renderManifest: RenderManifest;
         } => result.artifact !== null && result.renderManifest !== null,
       );
-      const jobStatus = results.some(
+      const completedForMode =
+        command.executionMode === "capture_only"
+          ? captured.length
+          : successful.length;
+      const jobStatus: BakeoffJobSummary["status"] = results.some(
         ({ status }) => status === "waiting_for_human",
       )
         ? "active"
-        : successful.length === results.length
+        : completedForMode === results.length
           ? "completed"
-          : successful.length === 0
+          : completedForMode === 0
             ? "failed"
             : "partial";
       const writeProjection = async (
@@ -2340,7 +2421,9 @@ export function createBakeoffHarness({
             renderManifest.renderOutcome === "faithful",
         );
       let report;
-      if (hasDefaultComparison) {
+      if (command.executionMode === "capture_only") {
+        report = null;
+      } else if (hasDefaultComparison) {
         report = (
           await createComparisonReportService({
             feishu: projection,
@@ -2426,8 +2509,41 @@ export function createBakeoffHarness({
           projectionAuthorization,
         ),
       );
+      let materializedReport: FeishuReport | null = null;
+      if (command.executionMode !== "capture_only") {
+        if (report === null) {
+          throw new Error("Evaluation mode requires a staged report");
+        }
+        const readback = await feishu.loadComparisonReportSource(
+          context.jobId,
+        );
+        materializedReport = readback.primaryReport;
+        if (
+          materializedReport === null ||
+          readback.job.reportUrl !== materializedReport.url ||
+          materializedReport.reportId !== report.reportId ||
+          materializedReport.jobId !== report.jobId ||
+          materializedReport.title !== report.title ||
+          materializedReport.markdown !== report.markdown ||
+          materializedReport.claimLevel !== report.claimLevel ||
+          !isDeepStrictEqual(
+            materializedReport.runIds,
+            report.runIds,
+          ) ||
+          !isDeepStrictEqual(
+            materializedReport.artifactIds,
+            report.artifactIds,
+          ) ||
+          (command.environment === "production" &&
+            !/^https:\/\/[^/\s]+\/.+/.test(materializedReport.url))
+        ) {
+          throw new Error(
+            "Evaluation report post-commit readback is missing, non-HTTPS, or not bound to the staged report",
+          );
+        }
+      }
 
-      return {
+      const outcomeBase = {
         job: {
           jobId: context.jobId,
           caseId: command.caseId,
@@ -2441,13 +2557,30 @@ export function createBakeoffHarness({
         scorecard: captured[0]?.scorecard ?? null,
         artifacts: captured.map(({ artifact }) => artifact),
         renderManifests: captured.map(({ renderManifest }) => renderManifest),
+      };
+      if (command.executionMode === "capture_only") {
+        return {
+          ...outcomeBase,
+          scorecard: null,
+          scorecards: [] as const,
+          report: null,
+        };
+      }
+      if (materializedReport === null) {
+        throw new Error(
+          "Evaluation mode requires a materialized report readback",
+        );
+      }
+      return {
+        ...outcomeBase,
         scorecards: successful.map(({ scorecard }) => scorecard),
-        report,
+        report: materializedReport,
       };
     },
   };
-  return {
-    startBakeoffJob(command) {
+  const startBakeoffJob = (
+    command: StartBakeoffJobCommand,
+  ): Promise<BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome> => {
       const commandSnapshot = snapshotBakeoffCommand(command);
       if (commandSnapshot.environment !== feishu.targetEnvironment) {
         return Promise.reject(
@@ -2590,10 +2723,33 @@ export function createBakeoffHarness({
           browserProfileLock,
           safeRasterRenderer,
         });
+        if (commandSnapshot.executionMode !== "capture_only") {
+          assertHarnessOwnedProductionJudge(judge);
+        }
+        assertHarnessOwnedLarkBaseProjection(feishu);
+        assertHarnessOwnedDurableEgressAuthorizationAudit(
+          egressAudit,
+        );
+        if (
+          artifactVault.storageProfile?.captureJournalDurability !==
+          "durable"
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires a durable Artifact capture journal",
+            ),
+          );
+        }
+        if (commandSnapshot.executionMode !== "capture_only") {
+          assertHarnessOwnedDurableReferencePackStore(
+            referencePackStore,
+          );
+        }
       }
       const context = executionContext(
         commandSnapshot.environment,
         clock.now(),
+        commandSnapshot.executionMode ?? "evaluate",
       );
       const specCommitSha = BUILD_SPEC_COMMIT_SHA;
       const jobIdentity = bakeoffJobIdentity(
@@ -2627,6 +2783,9 @@ export function createBakeoffHarness({
         jobIdentity,
         () => executor.startBakeoffJob(commandSnapshot, selections),
       );
-    },
+    };
+  return {
+    startBakeoffJob:
+      startBakeoffJob as BakeoffHarness["startBakeoffJob"],
   };
 }
