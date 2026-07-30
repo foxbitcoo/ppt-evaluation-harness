@@ -1139,6 +1139,96 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
   );
 });
 
+test("replaying a partial three-vendor Job keeps singular Artifact, Render, and Scorecard on one vendor lineage", async () => {
+  const feishu = new InMemoryFeishuProjection();
+  const judge = createTestJudge({
+    rasterizer: {
+      version: "test-rasterizer@1",
+      async rasterize(slide) {
+        return {
+          mimeType: "image/png",
+          content: testPng(slide.pageNumber),
+        };
+      },
+    },
+    transport: {
+      async create(request) {
+        const input = request.input as Array<{
+          content: Array<{ type: string; text?: string }>;
+        }>;
+        const contextText = input[0]?.content.find(
+          ({ type }) => type === "input_text",
+        )?.text;
+        assert.notEqual(contextText, undefined);
+        const context = JSON.parse(contextText!) as {
+          evaluationIdentity: { runId: string };
+        };
+        if (context.evaluationIdentity.runId.includes("-wps-")) {
+          throw new Error("simulated WPS Judge failure");
+        }
+        return {
+          id: "resp_partial_replay_doubao",
+          model: "gpt-5.6-sol",
+          status: "completed",
+          incomplete_details: null,
+          output: [
+            {
+              type: "message",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: JSON.stringify(validJudgePayload()),
+                },
+              ],
+            },
+          ],
+        };
+      },
+    },
+  });
+  const harness = createBakeoffHarness({
+    feishu,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter({ scenario: "timeout" }),
+      new MockDoubaoProductAdapter(),
+    ],
+    judge,
+  });
+  const command = {
+    environment: "test" as const,
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+  };
+
+  const fresh = await harness.startBakeoffJob(command);
+  const replay = await harness.startBakeoffJob(command);
+
+  assert.equal(fresh.job.status, "partial");
+  assert.equal(fresh.artifact?.runId, "MOCK-run-wps-volcano-v1");
+  assert.equal(
+    fresh.renderManifest?.artifactId,
+    fresh.artifact?.artifactId,
+  );
+  assert.equal(fresh.scorecard, null);
+  assert.deepEqual(
+    fresh.scorecards.map(({ runId }) => runId),
+    ["MOCK-run-doubao-volcano-v1"],
+  );
+
+  assert.equal(replay.artifact?.artifactId, fresh.artifact?.artifactId);
+  assert.equal(
+    replay.renderManifest?.renderManifestId,
+    fresh.renderManifest?.renderManifestId,
+  );
+  assert.equal(replay.renderManifest?.artifactId, replay.artifact?.artifactId);
+  assert.equal(replay.scorecard, fresh.scorecard);
+  assert.deepEqual(
+    replay.scorecards.map(({ runId }) => runId),
+    ["MOCK-run-doubao-volcano-v1"],
+  );
+});
+
 test("Bakeoff fails closed without persisting scores and discards a pack that never participated in factual scoring", async () => {
   const feishu = new InMemoryFeishuProjection();
   const referencePackStore = new InMemoryReferencePackStore();

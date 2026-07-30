@@ -1059,6 +1059,15 @@ function replayedBakeoffOutcome(
       scorecards.push(score.scorecard);
     }
   }
+  const primaryCapture = captures[0];
+  const primaryScorecard =
+    primaryCapture === undefined
+      ? null
+      : (scorecards.find(
+          (scorecard) =>
+            scorecard.runId === primaryCapture.runId &&
+            scorecard.artifactId === primaryCapture.artifactId,
+        ) ?? null);
   const outcomeBase = {
     job: {
       jobId: source.job.jobId,
@@ -1068,8 +1077,8 @@ function replayedBakeoffOutcome(
       provenance: context.provenance,
       environmentOrigin: context.environmentOrigin,
     },
-    artifact: captures[0]?.artifact ?? null,
-    renderManifest: captures[0]?.renderManifest ?? null,
+    artifact: primaryCapture?.artifact ?? null,
+    renderManifest: primaryCapture?.renderManifest ?? null,
     artifacts: captures.map(({ artifact }) => artifact),
     renderManifests: captures.map(({ renderManifest }) => renderManifest),
   };
@@ -1088,7 +1097,7 @@ function replayedBakeoffOutcome(
   }
   return {
     ...outcomeBase,
-    scorecard: scorecards[0] ?? null,
+    scorecard: primaryScorecard,
     scorecards,
     report: source.primaryReport!,
   };

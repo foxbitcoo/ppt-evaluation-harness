@@ -205,6 +205,7 @@ export {
   parseLarkDocumentReadback,
   parseLarkRecordShareLinkEnvelope,
   parseLarkRecordSearchEnvelope,
+  parseLarkRecordUpsertEnvelope,
   persistHarnessOwnedLarkProjectionSnapshot,
   preflightHarnessOwnedLarkBaseProjection,
   readHarnessOwnedLarkProductionJobState,

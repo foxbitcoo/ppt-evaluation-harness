@@ -35,31 +35,43 @@ simultaneously and proves replay does not add duplicates.
 This proves schema availability only. No real evaluation record, page
 evidence record, or commit marker has yet been accepted as a production run.
 
-## Report Docx — setup complete, final delivery pending
+## Report Docx — per-Job provisioning required, final delivery pending
 
-The pre-provisioned report document is:
+The previously pre-provisioned report document is:
 
 - token: `LgCddKprAo7uauxbUdoczeDinxe`
 - URL: `https://my.feishu.cn/docx/LgCddKprAo7uauxbUdoczeDinxe`
-- latest setup/readback revision observed: `5`
+- last setup/readback revision observed: `5`
 
-Production writes the document once per projection revision as a complete
-report collection: one Chinese H1, then the primary report and every current
-auxiliary A/B report as independently identified sections. It does not
-overwrite the same Docx once per report. The commit marker stores the complete
-collection hash and maps every included report ID to this one Docx.
+The current configuration exposes one Docx token, so the transport treats that
+token as a single-Job slot. The first production claim atomically binds an
+empty document to one Job with an exact remote revision compare-and-swap.
+After that binding, production writes the document once per projection
+revision as a complete report collection: one Chinese H1, then the primary
+report and every current auxiliary A/B report as independently identified
+sections. A different Job is rejected and cannot overwrite the document.
+This is deliberately fail-closed: each production Job needs its own newly
+provisioned empty Docx token (or a future configuration that supplies a token
+per Job). The revision-5 setup document predates the owner-binding format and
+must not be reused for a new Job without explicit external reprovisioning.
 
-Delivery uses `docs +update --command overwrite --doc-format markdown`, then a
-full Markdown `docs +fetch`. Success requires:
+Both the owner claim and report delivery use
+`docs +update --command overwrite --revision-id <exact-read-revision>
+--doc-format markdown`, then a full Markdown `docs +fetch`. Success requires:
 
 - update success with no warnings and the exact configured origin/token;
-- a non-regressing revision;
+- a revision that advances the exact compared revision;
+- a fetched revision exactly equal to the update response revision;
+- the same owner Job in the document, report write, and commit marker;
 - exact normalized collection content, every report ID, every per-report
   payload hash, and the collection hash;
-- replay readback of the full collection before a matching marker is trusted.
+- the commit marker’s exact report-document revision; and
+- replay readback of that exact revision and full collection before a matching
+  marker is trusted.
 
-The setup probe succeeded, but the final real three-provider report has not
-been written. That remains an external acceptance gate.
+The old setup probe proved only that the document was readable. A fresh empty
+per-Job document, owner-CAS claim, and final real three-provider report
+readback remain external acceptance gates.
 
 ## Page evidence — Feishu-native implementation ready
 
@@ -147,8 +159,12 @@ Before any provider adapter runs, production:
 - writes and reads back a stable remote Job claim.
 
 A matching completed marker is never accepted on self-reported marker payload
-alone: page records and the complete Doc collection are revalidated against
-their remote objects.
+alone: every Case, Run, Artifact, Score, Comparison, Gap, and workflow row is
+searched by its namespaced stable ID and must match the exact payload and
+payload hash; page records and the exact-revision Doc collection are also
+revalidated against their remote objects. Every `record-upsert` result is
+strictly bound to create/update mode and record ID, then immediately searched
+and read back before the projection continues.
 
 Production acceptance still requires one real 16-page volcano run for WPS AI
 PPT, Qwen, and Doubao, followed by the Feishu projection and report readback.

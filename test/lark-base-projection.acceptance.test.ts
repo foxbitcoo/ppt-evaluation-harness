@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import test from "node:test";
 
@@ -29,6 +30,7 @@ import {
   parseLarkDocumentReadback,
   parseLarkRecordShareLinkEnvelope,
   parseLarkRecordSearchEnvelope,
+  parseLarkRecordUpsertEnvelope,
   requireEgressAuthorization,
   sha256Bytes,
   canonicalJsonBytes,
@@ -141,6 +143,16 @@ function fakeTransport(): FakeLarkTransport {
           `https://example.feishu.cn/base/ppt-evaluation?record=${encodeURIComponent(command.stableId)}`,
       };
     },
+    async verifyRecord(command) {
+      assert.equal(
+        records.get(physicalKey(command.tableKey, command.stableId)),
+        command.payloadHash,
+      );
+      assert.equal(
+        payloads.get(physicalKey(command.tableKey, command.stableId)),
+        command.payload,
+      );
+    },
     async uploadAttachment(command) {
       attachmentRoles.push(command.attachmentRole);
       return {
@@ -183,6 +195,7 @@ function fakeTransport(): FakeLarkTransport {
           `sha256:${createHash("sha256")
             .update(content)
             .digest("hex")}` as const,
+        revisionId: reportCollectionMarkdowns.length,
       };
     },
     async verifyReportCollection(command) {
@@ -198,6 +211,10 @@ function fakeTransport(): FakeLarkTransport {
       assert.equal(
         command.collectionHash,
         sha256Bytes(canonicalJsonBytes(command.reports)),
+      );
+      assert.equal(
+        command.expectedRevisionId,
+        reportCollectionMarkdowns.length,
       );
     },
     async readCommitMarker(command) {
@@ -541,13 +558,14 @@ test("a Qwen–Doubao comparison advances the Lark marker and rewrites one compl
     ],
   });
   const snapshot = projection.snapshot();
+  const finalAuthorization = await authorizationForSnapshot(
+    projection,
+    snapshot,
+    bakeoff.job.jobId,
+  );
   await projection.commitAuthorizedSnapshot(
     snapshot,
-    await authorizationForSnapshot(
-      projection,
-      snapshot,
-      bakeoff.job.jobId,
-    ),
+    finalAuthorization,
   );
 
   assert.equal(
@@ -579,9 +597,85 @@ test("a Qwen–Doubao comparison advances the Lark marker and rewrites one compl
       (payload) =>
         !payload.includes(
           "/base/ppt-evaluation/artifacts/",
-        ),
+      ),
     ),
   );
+  for (const prefix of [
+    ":case:",
+    ":job:",
+    ":run:",
+    ":artifact:",
+    ":score:",
+    ":comparison:",
+    ":gap:",
+  ]) {
+    const key = [...transport.payloads.keys()].find((candidate) =>
+      candidate.includes(prefix),
+    );
+    assert.ok(key, `missing committed core row ${prefix}`);
+    const original = transport.payloads.get(key);
+    transport.payloads.set(key, "{}");
+    await assert.rejects(
+      projection.commitAuthorizedSnapshot(snapshot, finalAuthorization),
+    );
+    transport.payloads.set(key, original!);
+  }
+});
+
+test("three-vendor reports and Gap Cards contain no mock-feishu URI after Lark materialization", async () => {
+  const source = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: source,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  await createComparisonReportService({
+    feishu: source,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        rightRunId: "MOCK-run-doubao-volcano-v1",
+      },
+    ],
+  });
+  const staged = source.snapshot();
+  assert.match(
+    JSON.stringify({
+      runs: staged.runRecordTable,
+      reports: staged.reports,
+      gaps: staged.productGapCardTable,
+    }),
+    /mock-feishu:/,
+  );
+  const transport = fakeTransport();
+  const projection = createLarkBaseProjectionForTest({ transport });
+  const authorization = await authorizationForSnapshot(
+    projection,
+    staged,
+    bakeoff.job.jobId,
+  );
+
+  await projection.commitAuthorizedSnapshot(staged, authorization);
+
+  const materialized = projection.snapshot();
+  assert.doesNotMatch(
+    JSON.stringify({
+      runs: materialized.runRecordTable,
+      reports: materialized.reports,
+      gaps: materialized.productGapCardTable,
+    }),
+    /mock-feishu:/,
+  );
+  assert.equal(materialized.reports.length, 2);
+  assert.ok(materialized.productGapCardTable.length > 0);
 });
 
 test("Lark replay rejects a swapped page record share URL even when the marker batch hash still matches", async () => {
@@ -755,6 +849,166 @@ test("lark-cli 1.0.72 record-search columnar envelope is reconstructed exactly a
         data: { ...envelope.data, data: [["stable-job-001"]] },
       }),
     /row length/i,
+  );
+});
+
+test("lark-cli record-upsert binds the exact create or update result", () => {
+  assert.equal(
+    parseLarkRecordUpsertEnvelope(
+      {
+        ok: true,
+        data: {
+          created: true,
+          ignored_fields: [],
+          record: { record_id: "recCreated" },
+        },
+      },
+      null,
+    ),
+    "recCreated",
+  );
+  assert.equal(
+    parseLarkRecordUpsertEnvelope(
+      {
+        ok: true,
+        data: {
+          updated: true,
+          record: { record_id: "recExisting" },
+        },
+      },
+      "recExisting",
+    ),
+    "recExisting",
+  );
+  assert.throws(
+    () =>
+      parseLarkRecordUpsertEnvelope(
+        {
+          ok: true,
+          data: { record: { record_id: "recCreated" } },
+        },
+        null,
+      ),
+    /record-upsert/i,
+  );
+  assert.throws(
+    () =>
+      parseLarkRecordUpsertEnvelope(
+        {
+          ok: true,
+          data: {
+            created: true,
+            ignored_fields: ["载荷哈希"],
+            record: { record_id: "recCreated" },
+          },
+        },
+        null,
+      ),
+    /record-upsert/i,
+  );
+  assert.throws(
+    () =>
+      parseLarkRecordUpsertEnvelope(
+        {
+          ok: true,
+          data: {
+            updated: true,
+            record: { record_id: "recWrong" },
+          },
+        },
+        "recExisting",
+      ),
+    /record-upsert/i,
+  );
+});
+
+test("production record upsert fails closed on a conflicting post-write readback", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_UPSERT_READBACK_BASE_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basReadbackToken";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+  });
+  const clock = { clockId: "upsert-readback-clock", now: () => FIXED_TIME };
+  const audit = new InMemoryEgressAuthorizationAudit();
+  const payload = '{"x":1}';
+  const payloadHash =
+    `sha256:${createHash("sha256").update(payload).digest("hex")}` as const;
+  let searchCount = 0;
+  const transport = createLarkCliTransportForMutationBoundaryTest({
+    configuration: {
+      ...LARK_TEST_CONFIGURATION,
+      baseTokenEnvironmentVariable: baseTokenVariable,
+    },
+    egressAuthorization: allowLarkMutation,
+    egressAudit: audit,
+    clock,
+    async run(args) {
+      if (args[1] === "+record-search") {
+        searchCount += 1;
+        return {
+          ok: true,
+          data: {
+            data:
+              searchCount === 1
+                ? []
+                : [["job:readback", "{}", payloadHash]],
+            field_id_list: ["fldStable", "fldPayload", "fldHash"],
+            fields: ["稳定ID", "载荷", "载荷哈希"],
+            has_more: false,
+            record_id_list:
+              searchCount === 1 ? [] : ["recReadback"],
+          },
+        };
+      }
+      if (args[1] === "+record-upsert") {
+        return {
+          ok: true,
+          data: {
+            created: true,
+            record: { record_id: "recReadback" },
+          },
+        };
+      }
+      throw new Error(`Unexpected command ${args.join(" ")}`);
+    },
+  });
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "upsert-readback-parent",
+      jobId: "job-readback",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["run_record_table"],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+
+  await assert.rejects(
+    transport.upsertRecord({
+      tableKey: "runs",
+      stableId: "job:readback",
+      payload,
+      payloadHash,
+      idempotencyKey: "upsert-readback",
+      authorization,
+    }),
+    /readback.*conflicting/i,
   );
 });
 
@@ -975,4 +1229,239 @@ test("a delayed Lark record search that expires authorization makes zero mutatio
   );
   assert.deepEqual(commands, ["+record-search"]);
   assert.equal(mutationCalls, 0);
+});
+
+test("concurrent production Job claims have exactly one winner", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_CLAIM_RACE_BASE_TOKEN";
+  const reportTokenVariable = "PPT_EVAL_CLAIM_RACE_REPORT_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  const previousReportToken = process.env[reportTokenVariable];
+  process.env[baseTokenVariable] = "basClaimRaceToken";
+  process.env[reportTokenVariable] = "DocTokenClaimRace";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    if (previousReportToken === undefined) {
+      delete process.env[reportTokenVariable];
+    } else {
+      process.env[reportTokenVariable] = previousReportToken;
+    }
+  });
+  const clock = { clockId: "claim-race-clock", now: () => FIXED_TIME };
+  const audit = new InMemoryEgressAuthorizationAudit();
+  let searchCount = 0;
+  let createCount = 0;
+  let updateCount = 0;
+  let documentUpdateCount = 0;
+  let storedFields: Record<string, unknown> | null = null;
+  let reportRevision = 0;
+  let reportContent = "";
+  let releaseOuterSearches!: () => void;
+  let releaseCreatedRecord!: () => void;
+  const outerSearches = new Promise<void>((resolve) => {
+    releaseOuterSearches = resolve;
+  });
+  const createdRecord = new Promise<void>((resolve) => {
+    releaseCreatedRecord = resolve;
+  });
+  const emptySearch = () => ({
+    ok: true,
+    data: {
+      data: [],
+      field_id_list: ["fldStable", "fldPayload", "fldHash"],
+      fields: ["稳定ID", "载荷", "载荷哈希"],
+      has_more: false,
+      record_id_list: [],
+    },
+  });
+  const populatedSearch = () => {
+    assert.ok(storedFields);
+    return {
+      ok: true,
+      data: {
+        data: [[
+          storedFields["稳定ID"],
+          storedFields["载荷"],
+          storedFields["载荷哈希"],
+        ]],
+        field_id_list: ["fldStable", "fldPayload", "fldHash"],
+        fields: ["稳定ID", "载荷", "载荷哈希"],
+        has_more: false,
+        record_id_list: ["recClaimRace"],
+      },
+    };
+  };
+  const transport = createLarkCliTransportForMutationBoundaryTest({
+    configuration: {
+      ...LARK_TEST_CONFIGURATION,
+      baseTokenEnvironmentVariable: baseTokenVariable,
+      reportDocumentTokenEnvironmentVariable: reportTokenVariable,
+    },
+    egressAuthorization: allowLarkMutation,
+    egressAudit: audit,
+    clock,
+    async run(args, options) {
+      const service = args[0] ?? "";
+      const command = args[1] ?? "";
+      if (service === "docs" && command === "+fetch") {
+        return {
+          ok: true,
+          data: {
+            document: {
+              document_id: "DocTokenClaimRace",
+              revision_id: reportRevision,
+              content: reportContent,
+              url: "https://example.feishu.cn/docx/DocTokenClaimRace",
+            },
+          },
+        };
+      }
+      if (service === "docs" && command === "+update") {
+        const revisionIndex = args.indexOf("--revision-id");
+        assert.notEqual(revisionIndex, -1);
+        const expectedRevision = Number(args[revisionIndex + 1]);
+        if (expectedRevision !== reportRevision) {
+          throw new Error("document revision conflict");
+        }
+        documentUpdateCount += 1;
+        reportRevision += 1;
+        const claimedRevision = reportRevision;
+        const contentReference = args[args.indexOf("--content") + 1]!;
+        assert.ok(contentReference.startsWith("@"));
+        const claimedContent = readFileSync(
+          `${options?.cwd}/${contentReference.slice(1)}`,
+          "utf8",
+        );
+        if (reportRevision === claimedRevision) {
+          reportContent = claimedContent;
+        }
+        return {
+          ok: true,
+          data: {
+            result: "success",
+            warnings: [],
+            document: {
+              revision_id: claimedRevision,
+              url: "https://example.feishu.cn/docx/DocTokenClaimRace",
+            },
+          },
+        };
+      }
+      if (service === "base" && command === "+record-search") {
+        searchCount += 1;
+        if (searchCount <= 2) {
+          if (searchCount === 2) releaseOuterSearches();
+          await outerSearches;
+          return emptySearch();
+        }
+        if (searchCount === 3) return emptySearch();
+        await createdRecord;
+        return populatedSearch();
+      }
+      if (service === "base" && command === "+record-upsert") {
+        storedFields = JSON.parse(
+          args[args.indexOf("--json") + 1]!,
+        ) as Record<string, unknown>;
+        const isUpdate = args.includes("--record-id");
+        if (isUpdate) {
+          updateCount += 1;
+        } else {
+          createCount += 1;
+          releaseCreatedRecord();
+        }
+        return {
+          ok: true,
+          data: {
+            record: { record_id: "recClaimRace" },
+            ...(isUpdate ? { updated: true } : { created: true }),
+          },
+        };
+      }
+      throw new Error(`Unexpected lark-cli command: ${service} ${command}`);
+    },
+  });
+  const parentAuthorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "claim-race-parent",
+      jobId: "job-claim-race",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["production_job_claim"],
+      payloadHash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  const claim = {
+    jobId: "job-claim-race",
+    runIds: ["run-claim-race"],
+    claimHash:
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const,
+    authorization: parentAuthorization,
+    claimedAt: FIXED_TIME,
+  };
+
+  const results = await Promise.all([
+    transport.claimProductionJob!(claim),
+    transport.claimProductionJob!(claim),
+  ]);
+
+  assert.deepEqual(results.sort(), ["already_claimed", "claimed"]);
+  assert.equal(createCount, 1);
+  assert.equal(updateCount, 0);
+  assert.equal(documentUpdateCount, 1);
+  assert.equal(
+    await transport.claimProductionJob!(claim),
+    "already_claimed",
+  );
+  await assert.rejects(
+    transport.claimProductionJob!({
+      ...claim,
+      jobId: "job-claim-other",
+      claimHash:
+        "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    }),
+    /owned by another Job/i,
+  );
+  assert.equal(documentUpdateCount, 1);
+  const reports = [
+    {
+      reportId: "report-claim-race",
+      title: "Claim Race Report",
+      markdown: "# Claim Race Report\n\nVerified.",
+      payloadHash:
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" as const,
+    },
+  ];
+  const collectionHash = sha256Bytes(canonicalJsonBytes(reports));
+  const collection = await transport.upsertReportCollection({
+    jobId: claim.jobId,
+    reports,
+    collectionHash,
+    idempotencyKey: `report:${collectionHash}`,
+    authorization: parentAuthorization,
+  });
+  assert.equal(collection.revisionId, 2);
+  assert.equal(documentUpdateCount, 2);
+  await transport.verifyReportCollection({
+    jobId: claim.jobId,
+    reports,
+    collectionHash,
+    expectedUrl:
+      "https://example.feishu.cn/docx/DocTokenClaimRace",
+    expectedRevisionId: 2,
+  });
 });
