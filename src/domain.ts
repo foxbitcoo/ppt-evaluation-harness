@@ -336,6 +336,10 @@ export interface CodexCliJudgeExecutionEvidence {
   readonly binaryPath: string;
   readonly binaryHash: `sha256:${string}`;
   readonly fixedArgumentsHash: `sha256:${string}`;
+  readonly sandboxBinaryPath: string;
+  readonly sandboxBinaryHash: `sha256:${string}`;
+  readonly sandboxProfileHash: `sha256:${string}`;
+  readonly isolationAttestationHash: `sha256:${string}`;
   readonly invocationHash: `sha256:${string}`;
   readonly transcriptHash: `sha256:${string}`;
   readonly resultHash: `sha256:${string}`;

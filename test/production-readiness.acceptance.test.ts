@@ -17,6 +17,7 @@ import {
   createHarnessOwnedCodexCliJudge,
   preflightHarnessOwnedProductionJudge,
 } from "../src/index.ts";
+import { createMockReportDraft } from "../src/mock-report.ts";
 
 test("production preflight fails closed on a missing real Judge before any adapter or browser execution", () => {
   assert.throws(
@@ -42,9 +43,8 @@ test("production preflight rejects an in-memory Feishu projection even when a re
       }),
     });
     assert.doesNotThrow(() => assertHarnessOwnedProductionJudge(judge));
-    await assert.rejects(
+    await assert.doesNotReject(
       preflightHarnessOwnedProductionJudge(judge),
-      /OS-level file-read isolation is not yet attested/i,
     );
     assert.throws(
       () =>
@@ -129,8 +129,18 @@ test("capture_only persists captured Artifacts without producing scores, compari
     caseId: VOLCANO_CASE_ID,
     executionMode: "capture_only",
   });
+  const replay = await harness.startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+    executionMode: "capture_only",
+  });
 
   assert.equal(outcome.report, null);
+  assert.equal(replay.report, null);
+  assert.deepEqual(
+    replay.artifacts.map(({ artifactId }) => artifactId),
+    outcome.artifacts.map(({ artifactId }) => artifactId),
+  );
   assert.equal(outcome.scorecard, null);
   assert.deepEqual(outcome.scorecards, []);
   assert.equal(outcome.artifacts.length, 1);
@@ -139,4 +149,35 @@ test("capture_only persists captured Artifacts without producing scores, compari
   assert.deepEqual(projection.snapshot().artifactScoreTable, []);
   assert.deepEqual(projection.snapshot().productGapCardTable, []);
   assert.deepEqual(projection.snapshot().reports, []);
+
+  const retainedArtifact = outcome.artifacts[0]!;
+  const retainedRender = outcome.renderManifests[0]!;
+  const degradedReport = createMockReportDraft(
+    "degraded-production-report-test",
+    "partial",
+    [
+      {
+        product: "WPS AI PPT",
+        runId: retainedArtifact.runId,
+        status: "completed",
+        stateReason: "success",
+        artifact: retainedArtifact,
+        scorecard: null,
+        judgeFailure: null,
+        renderManifest: {
+          ...retainedRender,
+          renderOutcome: "degraded",
+          fidelity: {
+            status: "degraded",
+            notes: ["static render fidelity gate"],
+          },
+        },
+      },
+    ],
+  );
+  assert.match(
+    degradedReport.markdown,
+    /静态渲染：`degraded`[\s\S]*视觉评估：`NOT_ASSESSABLE`[\s\S]*Judge 未调用/,
+  );
+  assert.doesNotMatch(degradedReport.markdown, /Judge：失败/);
 });

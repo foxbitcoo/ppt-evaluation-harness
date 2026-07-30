@@ -1117,21 +1117,79 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         );
       const stableMaterializationView = (
         candidate: FeishuProjectionSnapshot,
-      ) => ({
-        ...candidate,
-        runRecordTable: candidate.runRecordTable.map((record) => ({
-          ...record,
-          reportUrl: record.reportUrl === null ? null : "<report-url>",
-          auxiliaryReportUrls:
-            record.auxiliaryReportUrls === null
-              ? null
-              : record.auxiliaryReportUrls.map(() => "<report-url>"),
-        })),
-        reports: candidate.reports.map((report) => ({
-          ...report,
-          url: "<report-url>",
-        })),
-      });
+      ) => {
+        const normalizePageEvidenceInMarkdown = (markdown: string) =>
+          markdown.replace(
+            /(\]\()([^) \n]+)(\))/g,
+            "$1<page-evidence-url>$3",
+          );
+        return {
+          ...candidate,
+          runRecordTable: candidate.runRecordTable.map((record) => ({
+            ...record,
+            reportUrl:
+              record.reportUrl === null ? null : "<report-url>",
+            auxiliaryReportUrls:
+              record.auxiliaryReportUrls === null
+                ? null
+                : record.auxiliaryReportUrls.map(() => "<report-url>"),
+          })),
+          productGapCardTable: candidate.productGapCardTable.map(
+            (record) =>
+              record.recordType === "comparison"
+                ? record
+                : {
+                    ...record,
+                    leftEvidence: {
+                      ...record.leftEvidence,
+                      links: record.leftEvidence.links.map((link) => ({
+                        ...link,
+                        url: "<page-evidence-url>",
+                      })),
+                    },
+                    rightEvidence: {
+                      ...record.rightEvidence,
+                      links: record.rightEvidence.links.map((link) => ({
+                        ...link,
+                        url: "<page-evidence-url>",
+                      })),
+                    },
+                  },
+          ),
+          reports: candidate.reports.map((report) => ({
+            ...report,
+            url: "<report-url>",
+            markdown: normalizePageEvidenceInMarkdown(report.markdown),
+          })),
+        };
+      };
+      const materializedPageEvidenceUrls =
+        materializedSnapshot.productGapCardTable.flatMap((record) =>
+          record.recordType === "gap_card"
+            ? [
+                ...record.leftEvidence.links.map(({ url }) => url),
+                ...record.rightEvidence.links.map(({ url }) => url),
+              ]
+            : [],
+        );
+      const originalPageEvidenceUrls =
+        snapshot.productGapCardTable.flatMap((record) =>
+          record.recordType === "gap_card"
+            ? [
+                ...record.leftEvidence.links.map(({ url }) => url),
+                ...record.rightEvidence.links.map(({ url }) => url),
+              ]
+            : [],
+        );
+      const markdownLinks = (candidate: FeishuProjectionSnapshot) =>
+        candidate.reports.flatMap(({ markdown }) =>
+          [...markdown.matchAll(/\]\(([^) \n]+)\)/g)].map(
+            (match) => match[1]!,
+          ),
+        );
+      const originalMarkdownLinks = markdownLinks(snapshot);
+      const materializedMarkdownLinks =
+        markdownLinks(materializedSnapshot);
       if (
         !isDeepStrictEqual(
           stableMaterializationView(snapshot),
@@ -1143,10 +1201,20 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
               (candidate) => candidate.reportId === reportId,
             )?.url !== url &&
             !/^https:\/\/[^/\s]+\/.+/.test(url),
+        ) ||
+        materializedPageEvidenceUrls.some(
+          (url, index) =>
+            url !== originalPageEvidenceUrls[index] &&
+            !/^https:\/\/[^/\s]+\/.+/.test(url),
+        ) ||
+        materializedMarkdownLinks.some(
+          (url, index) =>
+            url !== originalMarkdownLinks[index] &&
+            !/^https:\/\/[^/\s]+\/.+/.test(url),
         )
       ) {
         throw new Error(
-          "Operational ledger materialization may change only report URLs to HTTPS evidence",
+          "Operational ledger materialization may change only report and page-evidence URLs to HTTPS evidence",
         );
       }
       while (true) {
@@ -1156,6 +1224,77 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
           egressDestination: this.egressDestination,
         });
         working.#replaceSnapshot(this.snapshot());
+        const productGapIdentity = (
+          record: FeishuProjectionSnapshot["productGapCardTable"][number],
+        ) =>
+          record.recordType === "comparison"
+            ? record.comparisonId
+            : record.gapCardId;
+        const materializedProductGapIds = new Set(
+          materializedSnapshot.productGapCardTable.map(
+            productGapIdentity,
+          ),
+        );
+        const materializedReportIds = new Set(
+          materializedSnapshot.reports.map(({ reportId }) => reportId),
+        );
+        const currentBeforeMaterialization = working.snapshot();
+        for (const current of currentBeforeMaterialization.productGapCardTable) {
+          if (!materializedProductGapIds.has(productGapIdentity(current))) {
+            continue;
+          }
+          const staged = snapshot.productGapCardTable.find(
+            (candidate) =>
+              productGapIdentity(candidate) ===
+              productGapIdentity(current),
+          );
+          const rematerialized =
+            materializedSnapshot.productGapCardTable.find(
+              (candidate) =>
+                productGapIdentity(candidate) ===
+                productGapIdentity(current),
+            );
+          if (
+            staged === undefined ||
+            (!isDeepStrictEqual(current, staged) &&
+              !isDeepStrictEqual(current, rematerialized))
+          ) {
+            throw new Error(
+              "Operational ledger materialization detected a concurrent Product Gap mutation",
+            );
+          }
+        }
+        for (const current of currentBeforeMaterialization.reports) {
+          if (!materializedReportIds.has(current.reportId)) continue;
+          const staged = snapshot.reports.find(
+            ({ reportId }) => reportId === current.reportId,
+          );
+          const rematerialized = materializedSnapshot.reports.find(
+            ({ reportId }) => reportId === current.reportId,
+          );
+          if (
+            staged === undefined ||
+            (!isDeepStrictEqual(current, staged) &&
+              !isDeepStrictEqual(current, rematerialized))
+          ) {
+            throw new Error(
+              "Operational ledger materialization detected a concurrent report mutation",
+            );
+          }
+        }
+        working.#replaceSnapshot({
+          ...currentBeforeMaterialization,
+          productGapCardTable:
+            currentBeforeMaterialization.productGapCardTable.filter(
+              (record) =>
+                !materializedProductGapIds.has(
+                  productGapIdentity(record),
+                ),
+            ),
+          reports: currentBeforeMaterialization.reports.filter(
+            ({ reportId }) => !materializedReportIds.has(reportId),
+          ),
+        });
         for (const record of materializedSnapshot.caseTable) {
           await working.upsertCase(record);
         }

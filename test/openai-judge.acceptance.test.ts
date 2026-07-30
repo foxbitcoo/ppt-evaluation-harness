@@ -979,7 +979,7 @@ test("Bakeoff injects one OpenAI Judge call per captured Artifact and shares the
   );
 });
 
-test("Bakeoff rejects an invalid injected Judge score while retaining its captured output", async () => {
+test("Bakeoff rejects an invalid injected Judge score, retains its capture, and discards the unused pack", async () => {
   const feishu = new InMemoryFeishuProjection();
   const referencePackStore = new InMemoryReferencePackStore();
   const outcome = await createBakeoffHarness({
@@ -1006,7 +1006,7 @@ test("Bakeoff rejects an invalid injected Judge score while retaining its captur
   assert.equal(outcome.scorecards.length, 0);
   assert.equal(feishu.snapshot().capturedArtifactTable.length, 1);
   assert.equal(feishu.snapshot().artifactScoreTable.length, 0);
-  assert.equal(referencePackStore.snapshot().used.length, 1);
+  assert.equal(referencePackStore.snapshot().used.length, 0);
   const vendorRun = feishu
     .snapshot()
     .runRecordTable.find((record) => record.recordType === "vendor_run");
@@ -1135,11 +1135,11 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
   assert.equal(referencePackStore.snapshot().used[0]?.scorecardIds.length, 2);
   assert.equal(
     referencePackStore.snapshot().used[0]?.evaluationAttemptIds.length,
-    3,
+    2,
   );
 });
 
-test("Bakeoff fails closed without persisting scores and retains the pack involved in a failed Judge attempt", async () => {
+test("Bakeoff fails closed without persisting scores and discards a pack that never participated in factual scoring", async () => {
   const feishu = new InMemoryFeishuProjection();
   const referencePackStore = new InMemoryReferencePackStore();
   const harness = createBakeoffHarness({
@@ -1164,10 +1164,5 @@ test("Bakeoff fails closed without persisting scores and retains the pack involv
   assert.equal(feishu.snapshot().capturedArtifactTable.length, 1);
   assert.deepEqual(feishu.snapshot().artifactScoreTable, []);
   assert.equal(referencePackStore.snapshot().temporary.length, 0);
-  assert.equal(referencePackStore.snapshot().used.length, 1);
-  assert.equal(referencePackStore.snapshot().used[0]?.scorecardIds.length, 0);
-  assert.equal(
-    referencePackStore.snapshot().used[0]?.evaluationAttemptIds.length,
-    1,
-  );
+  assert.equal(referencePackStore.snapshot().used.length, 0);
 });

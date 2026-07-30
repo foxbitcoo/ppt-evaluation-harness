@@ -57,7 +57,9 @@ import type {
 import { InMemoryFeishuProjection } from "./feishu.ts";
 import {
   assertHarnessOwnedLarkBaseProjection,
+  claimHarnessOwnedLarkProductionJob,
   preflightHarnessOwnedLarkBaseProjection,
+  readHarnessOwnedLarkProductionJobState,
 } from "./lark-base-projection.ts";
 import {
   assertHarnessOwnedDurableEgressAuthorizationAudit,
@@ -869,7 +871,7 @@ function replayedBakeoffOutcome(
   rendererDestination: EgressDestinationMetadata,
   judgeDestination: EgressDestinationMetadata,
   securityContextHash: `sha256:${string}`,
-): BakeoffJobOutcome {
+): BakeoffJobOutcome | CaptureOnlyBakeoffJobOutcome {
   const expectedRunIds = selections.map(({ runId }) => runId);
   const selectedRunIds = source.job.selectedRunIds;
   if (
@@ -909,7 +911,8 @@ function replayedBakeoffOutcome(
       `Bakeoff Job has invalid parent status: ${source.job.status}`,
     );
   }
-  if (source.primaryReport === null) {
+  const captureOnly = command.executionMode === "capture_only";
+  if (!captureOnly && source.primaryReport === null) {
     throw new Error(
       `Bakeoff Job replay is incomplete: ${source.job.recordId}`,
     );
@@ -1029,7 +1032,7 @@ function replayedBakeoffOutcome(
       scorecards.push(score.scorecard);
     }
   }
-  return {
+  const outcomeBase = {
     job: {
       jobId: source.job.jobId,
       caseId: source.job.caseId,
@@ -1040,11 +1043,27 @@ function replayedBakeoffOutcome(
     },
     artifact: captures[0]?.artifact ?? null,
     renderManifest: captures[0]?.renderManifest ?? null,
-    scorecard: scorecards[0] ?? null,
     artifacts: captures.map(({ artifact }) => artifact),
     renderManifests: captures.map(({ renderManifest }) => renderManifest),
+  };
+  if (captureOnly) {
+    if (source.primaryReport !== null || scorecards.length > 0) {
+      throw new Error(
+        `Capture-only Bakeoff replay contains evaluation output: ${source.job.recordId}`,
+      );
+    }
+    return {
+      ...outcomeBase,
+      scorecard: null,
+      scorecards: [],
+      report: null,
+    };
+  }
+  return {
+    ...outcomeBase,
+    scorecard: scorecards[0] ?? null,
     scorecards,
-    report: source.primaryReport,
+    report: source.primaryReport!,
   };
 }
 
@@ -1767,9 +1786,6 @@ async function executeVendor(
       ? "local-gated-score-attempt"
       : "judge-attempt";
   const evaluationAttemptId = `${evaluationAttemptKind}:${context.jobId}:${runId}:${artifact.artifactId}`;
-  if (referencePack !== null) {
-    onReferencePackUse(evaluationAttemptId);
-  }
   let scorecard: ArtifactScorecard | null;
   let judgeFailure: JudgeFailureLineage | null = null;
   if (
@@ -1876,6 +1892,19 @@ async function executeVendor(
       message: lineageError.message,
       egressAttempt: null,
     });
+  }
+  if (
+    referencePack !== null &&
+    scorecard !== null &&
+    scorecard.evaluationInputManifest.referencePackHash ===
+      referencePack.contentHash &&
+    scorecard.dimensions.some(
+      ({ dimension, assessmentStatus }) =>
+        dimension === "factual_accuracy_and_content_quality" &&
+        assessmentStatus === "ASSESSED",
+    )
+  ) {
+    onReferencePackUse(evaluationAttemptId);
   }
   return {
     productPackage,
@@ -2121,6 +2150,98 @@ export function createBakeoffHarness({
           judgeDestination,
           securityContextHash,
         );
+      }
+      if (command.environment === "production") {
+        const remoteState =
+          await readHarnessOwnedLarkProductionJobState(feishu, {
+            jobId: context.jobId,
+            runIds: selectedRunIds,
+          });
+        if (remoteState.state !== "absent") {
+          throw new Error(
+            `Production Bakeoff remote recovery required before provider execution: ${remoteState.state}`,
+          );
+        }
+        for (const runId of selectedRunIds) {
+          const attemptId = `${runId}-attempt-1`;
+          let checkpoints: readonly ObservableAttemptEvent[];
+          try {
+            if (attemptCheckpointStore.readAttempt === undefined) {
+              throw new Error("durable checkpoint read is unavailable");
+            }
+            checkpoints =
+              await attemptCheckpointStore.readAttempt(attemptId);
+          } catch (error) {
+            throw new UnresolvedAttemptShutdownError(
+              attemptId,
+              "production restart checkpoint recovery is unavailable",
+              error,
+            );
+          }
+          if (
+            checkpoints.length > 0 &&
+            !checkpoints.every(
+              ({ submissionEvidenceAtCheckpoint }) =>
+                submissionEvidenceAtCheckpoint === "not_submitted",
+            )
+          ) {
+            throw new UnresolvedAttemptShutdownError(
+              attemptId,
+              "production restart found submitted or unknown attempt state; provider retry suppressed",
+            );
+          }
+        }
+        const claimHash = sha256Json({
+          schemaVersion: "production-job-claim-v1",
+          jobId: context.jobId,
+          caseId: command.caseId,
+          runIds: selectedRunIds,
+          protocolSnapshot: bakeoffProtocolSnapshot(
+            command.referencePackMode ?? "automatic",
+            command.environment,
+          ),
+          securityContextHash,
+        });
+        const claimAuthorization = await requireEgressAuthorization(
+          egressAuthorization,
+          {
+            requestId:
+              `operational-ledger-production-claim:${context.jobId}:${claimHash}`,
+            jobId: context.jobId,
+            runId: null,
+            attemptId: null,
+            dataClassification:
+              context.evaluationCase.dataClassification,
+            sourceOwner: context.evaluationCase.sourceOwner,
+            processingPurpose:
+              "operational_ledger_projection_storage",
+            targetKind: "storage",
+            targetService: feishu.egressDestination.targetService,
+            targetAccount: feishu.egressDestination.targetAccount,
+            targetRegion: feishu.egressDestination.targetRegion,
+            subprocessors: feishu.egressDestination.subprocessors,
+            contentFields: ["production_job_claim"],
+            payloadHash: claimHash,
+            requiredRedactions: [],
+          },
+          clock,
+        );
+        await egressAudit.append(claimAuthorization);
+        const claimed = await claimHarnessOwnedLarkProductionJob(
+          feishu,
+          {
+            jobId: context.jobId,
+            runIds: selectedRunIds,
+            claimHash,
+            authorization: claimAuthorization,
+            clock,
+          },
+        );
+        if (claimed !== "claimed") {
+          throw new Error(
+            "Production Bakeoff remote claim already exists; provider execution suppressed",
+          );
+        }
       }
 
       const runSpecificationReferences = new Map<
@@ -2442,6 +2563,7 @@ export function createBakeoffHarness({
               status: result.status,
               stateReason: result.terminalReason,
               artifact: result.artifact,
+              renderManifest: result.renderManifest,
               scorecard: result.scorecard,
               judgeFailure: result.judgeFailure ?? null,
             })),

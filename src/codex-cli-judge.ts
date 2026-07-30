@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -33,6 +34,36 @@ export const FROZEN_CODEX_CLI_BINARY =
   "/Applications/ChatGPT.app/Contents/Resources/codex";
 export const FROZEN_CODEX_CLI_SHA256 =
   "sha256:fb2b6b35789e59c885cf4d2aee12475809dd67b2c10df580e638122fd6b3438e" as const;
+export const FROZEN_SANDBOX_EXEC_BINARY = "/usr/bin/sandbox-exec";
+export const FROZEN_SANDBOX_EXEC_SHA256 =
+  "sha256:8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16" as const;
+
+const SANDBOX_PROFILE_TEMPLATE = Object.freeze({
+  schemaVersion: "codex-cli-seatbelt-profile-v1",
+  defaultPolicy: "allow-system-runtime-deny-user-data",
+  deniedUserDataRoots: [
+    "/Users",
+    "/Volumes",
+    "/private/var/folders",
+    "/private/tmp",
+    "/tmp",
+  ],
+  allowedInvocationRoot: "<realpath-invocation-temp-root-only>",
+  allowedBootstrapFiles: [
+    "<home>/.codex/config.toml",
+    "<home>/.codex/auth.json",
+  ],
+  disabledAgentToolFeatures: [
+    "shell_tool",
+    "unified_exec",
+    "code_mode_host",
+    "apps",
+    "plugins",
+  ],
+});
+export const CODEX_CLI_SANDBOX_PROFILE_HASH = sha256(
+  JSON.stringify(SANDBOX_PROFILE_TEMPLATE),
+);
 
 const FIXED_ARGUMENT_TEMPLATE = Object.freeze([
   "exec",
@@ -45,6 +76,16 @@ const FIXED_ARGUMENT_TEMPLATE = Object.freeze([
   "--ephemeral",
   "--ignore-user-config",
   "--ignore-rules",
+  "--disable",
+  "shell_tool",
+  "--disable",
+  "unified_exec",
+  "--disable",
+  "code_mode_host",
+  "--disable",
+  "apps",
+  "--disable",
+  "plugins",
   "--skip-git-repo-check",
   "--output-schema",
   "<schema.json>",
@@ -68,6 +109,24 @@ export const CODEX_CLI_FIXED_ARGUMENTS_HASH = sha256(
   JSON.stringify(FIXED_ARGUMENT_TEMPLATE),
 );
 
+function seatbeltProfile(allowedRoot: string): string {
+  const root = JSON.stringify(allowedRoot);
+  const home = process.env.HOME;
+  if (home === undefined || home.trim().length === 0) {
+    throw new Error("Codex CLI Judge requires an explicit HOME");
+  }
+  const config = JSON.stringify(resolve(home, ".codex/config.toml"));
+  const auth = JSON.stringify(resolve(home, ".codex/auth.json"));
+  return [
+    "(version 1)",
+    "(allow default)",
+    '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/var/folders") (subpath "/private/tmp") (subpath "/tmp"))',
+    `(allow file-read* (subpath ${root}) (literal ${config}) (literal ${auth}))`,
+    '(deny file-write* (subpath "/Users") (subpath "/Volumes") (subpath "/private/var/folders") (subpath "/private/tmp") (subpath "/tmp"))',
+    `(allow file-write* (subpath ${root}))`,
+  ].join(" ");
+}
+
 export interface CodexCliJudgeTransportCommand {
   readonly prompt: string;
   readonly outputSchema: Readonly<Record<string, unknown>>;
@@ -84,6 +143,7 @@ export interface CodexCliJudgeTransportResult {
   readonly transcriptHash: `sha256:${string}`;
   readonly resultHash: `sha256:${string}`;
   readonly invocationHash: `sha256:${string}`;
+  readonly isolationAttestationHash: `sha256:${string}`;
 }
 
 export interface CodexCliJudgeTransportPort {
@@ -91,6 +151,9 @@ export interface CodexCliJudgeTransportPort {
   readonly binaryPath: string;
   readonly binaryHash: `sha256:${string}`;
   readonly fixedArgumentsHash: `sha256:${string}`;
+  readonly sandboxBinaryPath: string;
+  readonly sandboxBinaryHash: `sha256:${string}`;
+  readonly sandboxProfileHash: `sha256:${string}`;
   preflight(): Promise<void>;
   execute(
     command: CodexCliJudgeTransportCommand,
@@ -311,6 +374,9 @@ class CodexResponsesTransport implements OpenAiResponsesTransport {
         binaryPath: this.#transport.binaryPath,
         binaryHash: this.#transport.binaryHash,
         fixedArgumentsHash: this.#transport.fixedArgumentsHash,
+        sandboxBinaryPath: this.#transport.sandboxBinaryPath,
+        sandboxBinaryHash: this.#transport.sandboxBinaryHash,
+        sandboxProfileHash: this.#transport.sandboxProfileHash,
       }),
     );
     const result = await this.#transport.execute({
@@ -321,6 +387,9 @@ class CodexResponsesTransport implements OpenAiResponsesTransport {
     });
     if (
       result.invocationHash !== invocationHash ||
+      !/^sha256:[a-f0-9]{64}$/.test(
+        result.isolationAttestationHash,
+      ) ||
       !/^sha256:[a-f0-9]{64}$/.test(result.transcriptHash) ||
       !/^sha256:[a-f0-9]{64}$/.test(result.resultHash) ||
       sha256(result.outputText) !== result.resultHash
@@ -336,6 +405,11 @@ class CodexResponsesTransport implements OpenAiResponsesTransport {
         binaryPath: this.#transport.binaryPath,
         binaryHash: this.#transport.binaryHash,
         fixedArgumentsHash: this.#transport.fixedArgumentsHash,
+        sandboxBinaryPath: this.#transport.sandboxBinaryPath,
+        sandboxBinaryHash: this.#transport.sandboxBinaryHash,
+        sandboxProfileHash: this.#transport.sandboxProfileHash,
+        isolationAttestationHash:
+          result.isolationAttestationHash,
         invocationHash: result.invocationHash,
         transcriptHash: result.transcriptHash,
         resultHash: result.resultHash,
@@ -433,26 +507,45 @@ class VerifiedCodexCliJudgeTransport
   readonly binaryPath = FROZEN_CODEX_CLI_BINARY;
   readonly binaryHash = FROZEN_CODEX_CLI_SHA256;
   readonly fixedArgumentsHash = CODEX_CLI_FIXED_ARGUMENTS_HASH;
+  readonly sandboxBinaryPath = FROZEN_SANDBOX_EXEC_BINARY;
+  readonly sandboxBinaryHash = FROZEN_SANDBOX_EXEC_SHA256;
+  readonly sandboxProfileHash = CODEX_CLI_SANDBOX_PROFILE_HASH;
+  #isolationAttestationHash: `sha256:${string}` | null = null;
 
-  async #run(
+  async #spawn(
     args: readonly string[],
     stdin: string | null,
     options: {
-      readonly cwd?: string;
-    } = {},
-  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
+      readonly cwd: string;
+      readonly sandboxRoot: string;
+      readonly executable?: string;
+    },
+  ): Promise<{
+    readonly code: number;
+    readonly stdout: string;
+    readonly stderr: string;
+  }> {
+    const sandboxRoot = await realpath(options.sandboxRoot);
     return await new Promise((resolveOutput, rejectOutput) => {
-      const child = spawn(this.binaryPath, [...args], {
-        stdio: [stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
-        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        env: {
-          HOME: process.env.HOME,
-          CODEX_HOME: process.env.CODEX_HOME,
-          HTTPS_PROXY: process.env.HTTPS_PROXY,
-          HTTP_PROXY: process.env.HTTP_PROXY,
-          NO_PROXY: process.env.NO_PROXY,
+      const executable = options.executable ?? this.binaryPath;
+      const child = spawn(
+        this.sandboxBinaryPath,
+        [
+          "-p",
+          seatbeltProfile(sandboxRoot),
+          executable,
+          ...args,
+        ],
+        {
+          stdio: [stdin === null ? "ignore" : "pipe", "pipe", "pipe"],
+          cwd: options.cwd,
+          env: {
+            HOME: process.env.HOME,
+            TMPDIR: sandboxRoot,
+            PATH: "/usr/bin:/bin",
+          },
         },
-      });
+      );
       let stdout = "";
       let stderr = "";
       child.stdout!.setEncoding("utf8").on("data", (chunk) => {
@@ -463,30 +556,98 @@ class VerifiedCodexCliJudgeTransport
       });
       child.once("error", rejectOutput);
       child.once("close", (code) => {
-        if (code !== 0) {
-          rejectOutput(
-            new Error(
-              `Fixed Codex CLI command failed with code ${code}: ${stderr.slice(0, 500)}`,
-            ),
-          );
-          return;
-        }
-        resolveOutput({ stdout, stderr });
+        resolveOutput({ code: code ?? -1, stdout, stderr });
       });
       if (stdin !== null) child.stdin!.end(stdin);
     });
   }
 
+  async #run(
+    args: readonly string[],
+    stdin: string | null,
+    options: {
+      readonly cwd: string;
+      readonly sandboxRoot: string;
+    },
+  ): Promise<{ readonly stdout: string; readonly stderr: string }> {
+    const result = await this.#spawn(args, stdin, options);
+    if (result.code !== 0) {
+      throw new Error(
+        `Fixed sandboxed Codex CLI command failed with code ${result.code}; stderr withheld`,
+      );
+    }
+    return result;
+  }
+
   async preflight(): Promise<void> {
-    await this.#run(["login", "status"], null);
-    throw new Error(
-      "Codex CLI Judge OS-level file-read isolation is not yet attested; production evaluation remains blocked",
+    const directory = await mkdtemp(
+      join(tmpdir(), "ppt-codex-attestation-"),
     );
+    try {
+      const allowed = join(directory, "allowed");
+      await mkdir(allowed, { mode: 0o700 });
+      const allowedProbe = join(allowed, "allowed.txt");
+      const forbiddenProbe = join(directory, "forbidden.txt");
+      await writeFile(allowedProbe, "allowed-probe-v1", { mode: 0o600 });
+      await writeFile(forbiddenProbe, "forbidden-probe-v1", {
+        mode: 0o600,
+      });
+      const allowedRead = await this.#spawn(
+        [allowedProbe],
+        null,
+        {
+          cwd: allowed,
+          sandboxRoot: allowed,
+          executable: "/bin/cat",
+        },
+      );
+      const forbiddenRead = await this.#spawn(
+        [forbiddenProbe],
+        null,
+        {
+          cwd: allowed,
+          sandboxRoot: allowed,
+          executable: "/bin/cat",
+        },
+      );
+      if (
+        allowedRead.code !== 0 ||
+        allowedRead.stdout !== "allowed-probe-v1" ||
+        forbiddenRead.code === 0 ||
+        forbiddenRead.stdout.length > 0
+      ) {
+        throw new Error(
+          "Codex CLI Judge Seatbelt file-read isolation attestation failed",
+        );
+      }
+      const login = await this.#run(
+        ["login", "status"],
+        null,
+        { cwd: allowed, sandboxRoot: allowed },
+      );
+      this.#isolationAttestationHash = sha256(
+        JSON.stringify({
+          schemaVersion: "codex-cli-isolation-attestation-v1",
+          sandboxBinaryHash: this.sandboxBinaryHash,
+          sandboxProfileHash: this.sandboxProfileHash,
+          allowedProbeHash: sha256(allowedRead.stdout),
+          forbiddenProbeExitCode: forbiddenRead.code,
+          loginStdoutHash: sha256(login.stdout),
+        }),
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 
   async execute(
     command: CodexCliJudgeTransportCommand,
   ): Promise<CodexCliJudgeTransportResult> {
+    if (this.#isolationAttestationHash === null) {
+      throw new Error(
+        "Codex CLI Judge execute requires a current isolation attestation",
+      );
+    }
     const directory = await mkdtemp(join(tmpdir(), "ppt-codex-judge-"));
     try {
       const isolatedCwd = join(directory, "isolated-cwd");
@@ -521,6 +682,16 @@ class VerifiedCodexCliJudgeTransport
         "--ephemeral",
         "--ignore-user-config",
         "--ignore-rules",
+        "--disable",
+        "shell_tool",
+        "--disable",
+        "unified_exec",
+        "--disable",
+        "code_mode_host",
+        "--disable",
+        "apps",
+        "--disable",
+        "plugins",
         "--skip-git-repo-check",
         "--output-schema",
         schemaPath,
@@ -535,7 +706,7 @@ class VerifiedCodexCliJudgeTransport
       const { stdout } = await this.#run(
         args,
         command.prompt,
-        { cwd: isolatedCwd },
+        { cwd: isolatedCwd, sandboxRoot: directory },
       );
       const outputText = await readFile(resultPath, "utf8");
       assertCodexCliTranscriptIsDataOnly(stdout, outputText);
@@ -544,6 +715,8 @@ class VerifiedCodexCliJudgeTransport
         transcriptHash: sha256(stdout),
         resultHash: sha256(outputText),
         invocationHash: command.invocationHash,
+        isolationAttestationHash:
+          this.#isolationAttestationHash,
       };
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -561,10 +734,23 @@ export async function createHarnessOwnedCodexCliJudge(options: {
 }): Promise<OpenAiJudgePort> {
   assertHarnessOwnedDurableJudgeEgressAudit(options.egressAudit);
   const binaryPath = resolve(FROZEN_CODEX_CLI_BINARY);
-  const binaryHash = sha256(Uint8Array.from(await readFile(binaryPath)));
+  const sandboxBinaryPath = resolve(FROZEN_SANDBOX_EXEC_BINARY);
+  const [binaryHash, sandboxBinaryHash] = await Promise.all([
+    readFile(binaryPath).then((value) =>
+      sha256(Uint8Array.from(value)),
+    ),
+    readFile(sandboxBinaryPath).then((value) =>
+      sha256(Uint8Array.from(value)),
+    ),
+  ]);
   if (binaryHash !== FROZEN_CODEX_CLI_SHA256) {
     throw new Error(
       "Fixed Codex CLI binary hash does not match the reviewed executable",
+    );
+  }
+  if (sandboxBinaryHash !== FROZEN_SANDBOX_EXEC_SHA256) {
+    throw new Error(
+      "Fixed sandbox-exec binary hash does not match the reviewed executable",
     );
   }
   const transport = new VerifiedCodexCliJudgeTransport();

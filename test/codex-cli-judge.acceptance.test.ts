@@ -6,6 +6,8 @@ import test from "node:test";
 import {
   FROZEN_CODEX_CLI_BINARY,
   FROZEN_CODEX_CLI_SHA256,
+  FROZEN_SANDBOX_EXEC_BINARY,
+  FROZEN_SANDBOX_EXEC_SHA256,
   InMemoryFeishuProjection,
   MockWpsProductAdapter,
   VOLCANO_CASE_ID,
@@ -25,10 +27,17 @@ const DIMENSIONS = [
 ] as const;
 
 test("the production Codex CLI Judge binary remains byte-for-byte pinned to the reviewed executable", async () => {
-  const content = await readFile(FROZEN_CODEX_CLI_BINARY);
+  const [content, sandbox] = await Promise.all([
+    readFile(FROZEN_CODEX_CLI_BINARY),
+    readFile(FROZEN_SANDBOX_EXEC_BINARY),
+  ]);
   assert.equal(
     `sha256:${createHash("sha256").update(content).digest("hex")}`,
     FROZEN_CODEX_CLI_SHA256,
+  );
+  assert.equal(
+    `sha256:${createHash("sha256").update(sandbox).digest("hex")}`,
+    FROZEN_SANDBOX_EXEC_SHA256,
   );
 });
 
@@ -128,6 +137,11 @@ test("Codex CLI Judge preserves fixed execution hashes and returns non-Mock scor
       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     fixedArgumentsHash:
       "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    sandboxBinaryPath: "/usr/bin/sandbox-exec",
+    sandboxBinaryHash:
+      "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    sandboxProfileHash:
+      "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
     async preflight() {},
     async execute(command) {
       const outputText = JSON.stringify({
@@ -162,6 +176,8 @@ test("Codex CLI Judge preserves fixed execution hashes and returns non-Mock scor
           .update(outputText)
           .digest("hex")}` as const,
         invocationHash: command.invocationHash,
+        isolationAttestationHash:
+          "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       };
     },
   };
@@ -247,6 +263,11 @@ test("Codex CLI Judge rejects a transport result that is not bound to the frozen
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       fixedArgumentsHash:
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      sandboxBinaryPath: "/usr/bin/sandbox-exec",
+      sandboxBinaryHash:
+        "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      sandboxProfileHash:
+        "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
       async preflight() {},
       async execute() {
         transportCalls += 1;
@@ -258,6 +279,8 @@ test("Codex CLI Judge rejects a transport result that is not bound to the frozen
             "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
           invocationHash:
             "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          isolationAttestationHash:
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         };
       },
     },

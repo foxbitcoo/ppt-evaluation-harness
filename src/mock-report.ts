@@ -4,6 +4,7 @@ import type {
   RunStatus,
   FeishuReportDraft,
   JudgeFailureLineage,
+  RenderManifest,
   ScoreDimension,
   TerminalReason,
 } from "./domain.ts";
@@ -19,6 +20,7 @@ export interface MockReportVendorResult {
   readonly artifact: Artifact | null;
   readonly scorecard: ArtifactScorecard | null;
   readonly judgeFailure: JudgeFailureLineage | null;
+  readonly renderManifest?: RenderManifest | null;
 }
 
 const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
@@ -58,6 +60,7 @@ export function createMockReportDraft(
         artifact,
         scorecard,
         judgeFailure,
+        renderManifest,
       }) => {
         if (artifact === null) {
           return `## ${product}
@@ -68,6 +71,10 @@ export function createMockReportDraft(
 - Artifact：无`;
         }
         if (scorecard === null) {
+          const degradedRender =
+            renderManifest !== null &&
+            renderManifest !== undefined &&
+            renderManifest.renderOutcome !== "faithful";
           return `## ${product}
 
 - Run：\`${runId}\`
@@ -76,7 +83,12 @@ export function createMockReportDraft(
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
-- Judge：失败（\`${judgeFailure?.submissionStatus ?? "unknown"}\`），Artifact 与静态渲染已独立留存`;
+${
+  degradedRender && judgeFailure === null
+    ? `- 静态渲染：\`${renderManifest.renderOutcome}\`（Artifact 已留存）
+- 视觉评估：\`NOT_ASSESSABLE\`（渲染保真门禁未通过，Judge 未调用）`
+    : `- Judge：失败（\`${judgeFailure?.submissionStatus ?? "unknown"}\`），Artifact 与静态渲染已独立留存`
+}`;
         }
         const scoreRows = scorecard.dimensions
           .map(

@@ -20,6 +20,15 @@ import type {
   VendorFinding,
 } from "./domain.ts";
 import type { FeishuProjectionPort } from "./feishu.ts";
+import type {
+  ClockPort,
+  EgressAuthorizationAuditPort,
+  EgressAuthorizationPort,
+} from "./egress-authorization.ts";
+import {
+  isHarnessOwnedLarkBaseProjection,
+  persistHarnessOwnedLarkProjectionSnapshot,
+} from "./lark-base-projection.ts";
 import { createScoreAdjudicationService } from "./score-adjudication.ts";
 
 export interface CreateComparisonReportCommand {
@@ -35,6 +44,9 @@ export interface ComparisonReportService {
 
 export interface ComparisonReportServiceDependencies {
   readonly feishu: FeishuProjectionPort;
+  readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly egressAudit?: EgressAuthorizationAuditPort;
+  readonly clock?: ClockPort;
 }
 
 interface ScoredRun {
@@ -808,6 +820,9 @@ function defaultViewPairs(
 
 export function createComparisonReportService({
   feishu,
+  egressAuthorization,
+  egressAudit,
+  clock,
 }: ComparisonReportServiceDependencies): ComparisonReportService {
   return {
     async createReport(command) {
@@ -885,11 +900,44 @@ export function createComparisonReportService({
         report.url,
         command.pairs === undefined ? "primary" : "auxiliary",
       );
+      let materializedReport = report;
+      if (isHarnessOwnedLarkBaseProjection(feishu)) {
+        if (
+          egressAuthorization === undefined ||
+          egressAudit === undefined
+        ) {
+          throw new Error(
+            "Production dynamic comparison requires authorized Lark persistence",
+          );
+        }
+        const snapshot =
+          await persistHarnessOwnedLarkProjectionSnapshot({
+            projection: feishu,
+            jobId: command.jobId,
+            egressAuthorization,
+            egressAudit,
+            ...(clock === undefined ? {} : { clock }),
+          });
+        const readback = snapshot.reports.find(
+          ({ reportId }) => reportId === report.reportId,
+        );
+        if (
+          readback === undefined ||
+          !/^https:\/\/[^/\s]+\/docx\/[a-zA-Z0-9_-]+$/.test(
+            readback.url,
+          )
+        ) {
+          throw new Error(
+            "Production dynamic comparison report was not materialized",
+          );
+        }
+        materializedReport = readback;
+      }
       return {
         comparisons,
         gapCards,
         vendorSummaries,
-        report,
+        report: materializedReport,
       };
     },
   };
