@@ -1120,6 +1120,10 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
     outcome.report.markdown,
     /MOCK-artifact-wps-volcano-v1[\s\S]*Judge：失败/,
   );
+  assert.match(
+    outcome.report.markdown,
+    /\| Mock WPS AI PPT \| `MOCK-run-wps-volcano-v1` \| `completed` \| `success` \| MOCK-artifact-wps-volcano-v1 \| Judge：失败（`unknown`）；`NOT_ASSESSABLE` \|/,
+  );
   const failedJudgeRun = feishu
     .snapshot()
     .runRecordTable.find(

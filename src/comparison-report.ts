@@ -399,11 +399,22 @@ ${comparison.dimensions
       const artifact = capturedArtifacts.find(
         (record) => record.runId === run.recordId,
       );
+      const judgeStatus =
+        run.scorecardId !== null
+          ? "已完成"
+          : run.judgeFailure !== null &&
+              run.judgeFailure !== undefined
+            ? `Judge：失败（\`${run.judgeFailure.submissionStatus}\`）；\`NOT_ASSESSABLE\``
+            : artifact === undefined
+              ? "Judge 未调用；`NOT_ASSESSABLE`"
+              : artifact.renderManifest.renderOutcome !== "faithful"
+                ? "Judge 未调用（渲染保真门禁未通过）；`NOT_ASSESSABLE`"
+                : "`NOT_ASSESSABLE`";
       return `| ${run.product ?? "—"} | \`${run.recordId}\` | \`${
         run.status
       }\` | \`${
         run.terminalReason ?? run.waitingReason ?? "—"
-      }\` | ${artifact?.artifactId ?? "无"} |`;
+      }\` | ${artifact?.artifactId ?? "无"} | ${judgeStatus} |`;
     })
     .join("\n");
   const gapCardSections =
@@ -461,8 +472,8 @@ ${comparison.dimensions
 
 - Bakeoff Job 状态：\`${job.status}\`
 
-| 产品 | Run | 状态 | 状态原因 | Artifact |
-|---|---|---|---|---|
+| 产品 | Run | 状态 | 状态原因 | Artifact | Judge / 视觉评估 |
+|---|---|---|---|---|---|
 ${deliveryRows}
 
 ${comparisonSections}

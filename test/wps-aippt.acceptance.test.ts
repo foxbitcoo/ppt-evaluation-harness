@@ -46,7 +46,10 @@ import {
   type WpsAiPptBrowserResult,
   type WpsAiPptCapturedBrowserResult,
 } from "../src/index.ts";
-import { resolveHarnessProductAdapterExecutor } from "../src/mock-wps.ts";
+import {
+  resolveHarnessProductAdapterExecutor as resolvePublicHarnessProductAdapterExecutor,
+  resolveHarnessProductAdapterExecutorForTest as resolveHarnessProductAdapterExecutor,
+} from "../src/mock-wps.ts";
 import {
   reconcileHarnessOwnedWpsAiPptTask,
   runHarnessOwnedWpsAiPptBrowser,
@@ -466,7 +469,7 @@ test("the public WPS production resolver rejects TEST_FAKE before any command pr
 
   assert.throws(
     () =>
-      resolveHarnessProductAdapterExecutor(
+      resolvePublicHarnessProductAdapterExecutor(
         adapter.implementationPackage,
         adapter.executionConfiguration,
         { wpsAiPptBrowserDriver: driver },
@@ -668,7 +671,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:41063f5f6488ecd88d7e737d70096bb34c136d6ccc505b279d6c59619c37a8a7",
+        "sha256:c0ed100620389ce6833bef9242d183506832882343a3a6382659fbdfd341b063",
       sourceArchiveEntryCount: 48,
     },
   );

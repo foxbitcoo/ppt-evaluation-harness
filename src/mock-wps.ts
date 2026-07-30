@@ -41,6 +41,7 @@ import {
 } from "./qwen-production-adapter.ts";
 import {
   resolveWpsAiPptProductAdapterExecutor,
+  resolveWpsAiPptProductAdapterExecutorForTest,
 } from "./wps-aippt.ts";
 import type { WpsAiPptBrowserDriverPort } from "./wps-aippt-driver.ts";
 
@@ -958,6 +959,37 @@ export function resolveHarnessProductAdapterExecutor(
     );
   };
   return Object.freeze(executor);
+}
+
+export function resolveHarnessProductAdapterExecutorForTest(
+  implementationPackage: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  dependencies: {
+    readonly qwenBrowserDriver?:
+      | QwenBrowserDriverPort
+      | undefined;
+    readonly wpsAiPptBrowserDriver?:
+      | WpsAiPptBrowserDriverPort
+      | undefined;
+    readonly attemptCheckpointStore?:
+      | AttemptCheckpointPort
+      | undefined;
+    readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort | undefined;
+  } = {},
+): ProductAdapterExecutor {
+  if (executionConfiguration.adapterKind === "wps-aippt-browser") {
+    return resolveWpsAiPptProductAdapterExecutorForTest(
+      implementationPackage,
+      executionConfiguration,
+      dependencies.wpsAiPptBrowserDriver,
+      dependencies.attemptCheckpointStore,
+    );
+  }
+  return resolveHarnessProductAdapterExecutor(
+    implementationPackage,
+    executionConfiguration,
+    dependencies,
+  );
 }
 
 export class MockWpsProductAdapter implements ProductAdapterPort {

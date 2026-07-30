@@ -74,6 +74,7 @@ import {
 import {
   renderStaticArtifact,
   resolveHarnessProductAdapterExecutor,
+  resolveHarnessProductAdapterExecutorForTest,
 } from "./mock-wps.ts";
 import {
   DOUBAO_PRODUCTION_REPLAY_SCENARIO,
@@ -792,6 +793,7 @@ class UnresolvedAttemptShutdownError extends Error {
 
 function snapshotProductSelections(
   adapters: readonly ProductAdapterPort[],
+  environment: "test" | "production",
   dependencies: {
     readonly wpsAiPptBrowserDriver:
       | WpsAiPptBrowserDriverPort
@@ -859,7 +861,9 @@ function snapshotProductSelections(
               )
           : null;
       const selectedExecute =
-        resolveHarnessProductAdapterExecutor(
+        (environment === "test"
+          ? resolveHarnessProductAdapterExecutorForTest
+          : resolveHarnessProductAdapterExecutor)(
           implementationPackage,
           executionConfiguration,
           dependencies,
@@ -2980,8 +2984,25 @@ export function createBakeoffHarness({
           ),
         );
       }
+      if (
+        commandSnapshot.environment === "production" &&
+        wpsAiPptBrowserDriver?.provenance === "TEST_FAKE" &&
+        selectedProductAdapters.some(
+          ({ executionConfigurationPackage }) =>
+            parseAdapterExecutionConfiguration(
+              executionConfigurationPackage,
+            ).adapterKind === "wps-aippt-browser",
+        )
+      ) {
+        return Promise.reject(
+          new Error(
+            "Production Bakeoff rejects caller-supplied WPS browser sessions",
+          ),
+        );
+      }
       const selections = snapshotProductSelections(
         selectedProductAdapters,
+        commandSnapshot.environment,
         {
           wpsAiPptBrowserDriver,
           qwenBrowserDriver,

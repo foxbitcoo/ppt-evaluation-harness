@@ -1565,6 +1565,26 @@ export function resolveWpsAiPptProductAdapterExecutor(
   );
 }
 
+export function resolveWpsAiPptProductAdapterExecutorForTest(
+  implementation: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  browserDriver: WpsAiPptBrowserDriverPort | undefined,
+  checkpointStore?: AttemptCheckpointPort,
+): ProductAdapterExecutor {
+  if (browserDriver?.provenance !== "TEST_FAKE") {
+    throw new Error(
+      "WPS TEST resolver requires a TEST_FAKE browser driver",
+    );
+  }
+  return createWpsAiPptProductAdapterExecutor(
+    implementation,
+    executionConfiguration,
+    browserDriver,
+    checkpointStore,
+    true,
+  );
+}
+
 export function createWpsAiPptReplayBehaviorExecutorForTest(input: {
   readonly sessions: readonly WpsAiPptBrowserResult[];
   readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
