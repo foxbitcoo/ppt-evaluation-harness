@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, readlink } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -15,12 +15,17 @@ import {
   createLarkReportCollectionMarkdown,
   createLarkBaseProjectionForTest,
   createComparisonReportService,
+  createLarkCliTransportForMutationBoundaryTest,
   createVerifiedLarkCliTransport,
+  assertFrozenLarkCliInstallation,
   FROZEN_LARK_CLI_BINARY,
   FROZEN_LARK_CLI_SHA256,
   FROZEN_LARK_CLI_SCRIPT,
-  FROZEN_LARK_NODE_BINARY,
-  FROZEN_LARK_NODE_SHA256,
+  FROZEN_LARK_CLI_SCRIPT_SHA256,
+  FROZEN_LARK_CLI_VERSION,
+  FROZEN_LARK_CLI_WRAPPER,
+  FROZEN_LARK_CLI_WRAPPER_TARGET,
+  InMemoryEgressAuthorizationAudit,
   parseLarkDocumentReadback,
   parseLarkRecordShareLinkEnvelope,
   parseLarkRecordSearchEnvelope,
@@ -29,9 +34,48 @@ import {
   canonicalJsonBytes,
   type LarkBaseProjectionTransportPort,
   type LarkCommitMarker,
+  type EgressAuthorizationPort,
 } from "../src/index.ts";
 
 const FIXED_TIME = "2020-01-01T00:00:00.000Z";
+const LARK_TEST_CONFIGURATION = {
+  baseTokenEnvironmentVariable: "PPT_EVAL_TEST_BASE_TOKEN",
+  reportDocumentTokenEnvironmentVariable:
+    "PPT_EVAL_TEST_REPORT_DOC_TOKEN",
+  tables: {
+    cases: "tblCases0001",
+    runs: "tblRuns00001",
+    artifacts: "tblRuns00001",
+    scores: "tblScores0001",
+    workflow_events: "tblGaps00001",
+    comparisons: "tblGaps00001",
+    commit_markers: "tblRuns00001",
+  },
+  stableIdField: "稳定ID",
+  payloadField: "载荷",
+  payloadHashField: "载荷哈希",
+  artifactAttachmentField: "产物附件",
+  baseWebUrl: "https://example.feishu.cn/base/ppt-evaluation",
+  pageEvidenceBaseUrl:
+    "https://evidence.example.test/ppt-evaluation",
+  reportDocumentExpectedOrigin: "https://example.feishu.cn",
+  targetAccount: "test-account",
+  targetRegion: "cn",
+} as const;
+
+const allowLarkMutation = {
+  async authorize(request) {
+    return {
+      status: "approved" as const,
+      decisionId: `lark-mutation:${request.requestId}`,
+      policyVersion: "test-policy-v1",
+      request,
+      legalSecurityBasis: "test",
+      approvedAt: request.requestedAt,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    };
+  },
+} satisfies EgressAuthorizationPort;
 
 interface FakeLarkTransport extends LarkBaseProjectionTransportPort {
   readonly records: Map<string, string>;
@@ -57,6 +101,19 @@ function fakeTransport(): FakeLarkTransport {
   >();
   const attachmentRoles: string[] = [];
   const reportCollectionMarkdowns: string[] = [];
+  const physicalTables = {
+    cases: "tblCases",
+    runs: "tblShared",
+    artifacts: "tblShared",
+    scores: "tblScores",
+    workflow_events: "tblGaps",
+    comparisons: "tblGaps",
+    commit_markers: "tblShared",
+  } as const;
+  const physicalKey = (
+    tableKey: keyof typeof physicalTables,
+    stableId: string,
+  ) => `${physicalTables[tableKey]}:${stableId}`;
   return {
     transportId: "test-lark-transport",
     pageEvidenceBaseUrl: "https://example.feishu.cn/base/ppt-evaluation",
@@ -71,11 +128,11 @@ function fakeTransport(): FakeLarkTransport {
     async preflight() {},
     async upsertRecord(command) {
       records.set(
-        `${command.tableKey}:${command.stableId}`,
+        physicalKey(command.tableKey, command.stableId),
         command.payloadHash,
       );
       payloads.set(
-        `${command.tableKey}:${command.stableId}`,
+        physicalKey(command.tableKey, command.stableId),
         command.payload,
       );
       return {
@@ -110,7 +167,7 @@ function fakeTransport(): FakeLarkTransport {
           `share_rec_${command.stableId}`,
         )}`;
       assert.equal(command.expectedUrl, expected);
-      assert.ok(records.has(`artifacts:${command.stableId}`));
+      assert.ok(records.has(physicalKey("artifacts", command.stableId)));
     },
     async upsertReportCollection(command) {
       const url =
@@ -147,7 +204,17 @@ function fakeTransport(): FakeLarkTransport {
       return markers.get(command.jobId) ?? null;
     },
     async commitBatch(command) {
-      markers.set(command.jobId, structuredClone(command));
+      const { authorization: _authorization, ...marker } = command;
+      const payload = JSON.stringify(marker);
+      records.set(
+        physicalKey("commit_markers", `commit:${command.jobId}`),
+        `sha256:${createHash("sha256").update(payload).digest("hex")}`,
+      );
+      payloads.set(
+        physicalKey("commit_markers", `commit:${command.jobId}`),
+        payload,
+      );
+      markers.set(command.jobId, structuredClone(marker));
     },
   };
 }
@@ -320,7 +387,7 @@ test("Bakeoff outcome returns the post-commit Docx readback instead of the stage
   );
   assert.ok(
     [...transport.payloads.entries()]
-      .filter(([key]) => key.startsWith("runs:"))
+      .filter(([, payload]) => payload.includes('"recordType"'))
       .every(([, payload]) => !payload.includes("mock-feishu:")),
   );
 });
@@ -421,9 +488,30 @@ test("Lark Base projection uploads the original plus every static derivative and
   assert.equal(marker?.pageEvidenceUrls.length, 16);
   assert.equal(
     [...transport.records.keys()].filter((key) =>
-      /^artifacts:.*:page:\d+$/.test(key),
+      /^tblShared:page:.*:\d+$/.test(key),
     ).length,
     16,
+  );
+  const sharedStableIds = [...transport.records.keys()]
+    .filter((key) => key.startsWith("tblShared:"))
+    .map((key) => key.slice("tblShared:".length));
+  assert.ok(sharedStableIds.some((id) => id.startsWith("job:")));
+  assert.ok(sharedStableIds.some((id) => id.startsWith("run:")));
+  assert.ok(sharedStableIds.some((id) => id.startsWith("attempt:")));
+  assert.ok(sharedStableIds.some((id) => id.startsWith("artifact:")));
+  assert.ok(sharedStableIds.some((id) => id.startsWith("page:")));
+  assert.ok(sharedStableIds.some((id) => id.startsWith("commit:")));
+  assert.equal(
+    new Set(sharedStableIds).size,
+    sharedStableIds.length,
+    "one real shared table must retain every physical entity without collisions",
+  );
+  const physicalRecordCount = transport.records.size;
+  await projection.commitAuthorizedSnapshot(snapshot, authorization);
+  assert.equal(
+    transport.records.size,
+    physicalRecordCount,
+    "replay must not duplicate physical records",
   );
 });
 
@@ -468,7 +556,7 @@ test("a Qwen–Doubao comparison advances the Lark marker and rewrites one compl
   );
   assert.ok(
     transport.records.has(
-      `comparisons:${comparison.comparisons[0]?.comparisonId}`,
+      `tblGaps:comparison:${comparison.comparisons[0]?.comparisonId}`,
     ),
   );
   assert.equal(transport.reports.size, 2);
@@ -748,46 +836,59 @@ test("lark-cli 1.0.72 Docx fetch without a URL binds full content to the configu
   );
 });
 
-test("the lark-cli script and its absolute Node runtime remain byte-for-byte frozen", async () => {
-  const [entrypoint, script, node] = await Promise.all([
+test("the installed native lark-cli 1.0.72 and its prohibited wrapper remain byte-for-byte frozen", async () => {
+  const [native, script, wrapperMetadata, wrapperTarget] = await Promise.all([
     readFile(FROZEN_LARK_CLI_BINARY),
     readFile(FROZEN_LARK_CLI_SCRIPT),
-    readFile(FROZEN_LARK_NODE_BINARY),
+    lstat(FROZEN_LARK_CLI_WRAPPER),
+    readlink(FROZEN_LARK_CLI_WRAPPER),
   ]);
   const digest = (value: Uint8Array) =>
-    `sha256:${createHash("sha256").update(value).digest("hex")}`;
-  assert.equal(digest(entrypoint), FROZEN_LARK_CLI_SHA256);
-  assert.equal(digest(script), FROZEN_LARK_CLI_SHA256);
-  assert.equal(digest(node), FROZEN_LARK_NODE_SHA256);
+    `sha256:${createHash("sha256").update(value).digest("hex")}` as const;
+  assert.equal(digest(native), FROZEN_LARK_CLI_SHA256);
+  assert.equal(digest(script), FROZEN_LARK_CLI_SCRIPT_SHA256);
+  assert.equal(wrapperMetadata.isSymbolicLink(), true);
+  assert.equal(wrapperTarget, FROZEN_LARK_CLI_WRAPPER_TARGET);
+  assert.doesNotThrow(() =>
+    assertFrozenLarkCliInstallation({
+      nativeHash: digest(native),
+      nativeVersionOutput: `lark-cli version ${FROZEN_LARK_CLI_VERSION}`,
+      wrapperIsSymbolicLink: wrapperMetadata.isSymbolicLink(),
+      wrapperTarget,
+      wrapperScriptHash: digest(script),
+    }),
+  );
+  assert.throws(
+    () =>
+      assertFrozenLarkCliInstallation({
+        nativeHash: digest(native),
+        nativeVersionOutput: `lark-cli version ${FROZEN_LARK_CLI_VERSION}`,
+        wrapperIsSymbolicLink: true,
+        wrapperTarget: "../scripts/download-latest.js",
+        wrapperScriptHash: digest(script),
+      }),
+    /wrapper.*prohibited/i,
+  );
+  assert.throws(
+    () =>
+      assertFrozenLarkCliInstallation({
+        nativeHash:
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        nativeVersionOutput: `lark-cli version ${FROZEN_LARK_CLI_VERSION}`,
+        wrapperIsSymbolicLink: true,
+        wrapperTarget: FROZEN_LARK_CLI_WRAPPER_TARGET,
+        wrapperScriptHash: digest(script),
+      }),
+    /native lark-cli/i,
+  );
 });
 
 test("verified Lark configuration maps seven logical record kinds onto four physical Base tables and a separate Docx report", async () => {
+  const egressAudit = new InMemoryEgressAuthorizationAudit();
   const transport = await createVerifiedLarkCliTransport({
-    configuration: {
-      baseTokenEnvironmentVariable: "PPT_EVAL_TEST_BASE_TOKEN",
-      reportDocumentTokenEnvironmentVariable:
-        "PPT_EVAL_TEST_REPORT_DOC_TOKEN",
-      tables: {
-        cases: "tblCases0001",
-        runs: "tblRuns00001",
-        artifacts: "tblRuns00001",
-        scores: "tblScores0001",
-        workflow_events: "tblGaps00001",
-        comparisons: "tblGaps00001",
-        commit_markers: "tblRuns00001",
-      },
-      stableIdField: "稳定ID",
-      payloadField: "载荷",
-      payloadHashField: "载荷哈希",
-      artifactAttachmentField: "产物附件",
-      baseWebUrl:
-        "https://example.feishu.cn/base/ppt-evaluation",
-      pageEvidenceBaseUrl:
-        "https://evidence.example.test/ppt-evaluation",
-      reportDocumentExpectedOrigin: "https://example.feishu.cn",
-      targetAccount: "test-account",
-      targetRegion: "cn",
-    },
+    configuration: LARK_TEST_CONFIGURATION,
+    egressAuthorization: allowLarkMutation,
+    egressAudit,
   });
 
   assert.doesNotThrow(() =>
@@ -797,4 +898,81 @@ test("verified Lark configuration maps seven logical record kinds onto four phys
       targetRegion: "cn",
     }),
   );
+});
+
+test("a delayed Lark record search that expires authorization makes zero mutation command calls", async () => {
+  let now = FIXED_TIME;
+  let mutationCalls = 0;
+  const clock = { clockId: "search-delay-clock", now: () => now };
+  const audit = new InMemoryEgressAuthorizationAudit();
+  const parentAuthorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "parent-projection",
+      jobId: "job-search-delay",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["run_record_table"],
+      payloadHash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  const expiringParent = {
+    ...parentAuthorization,
+    expiresAt: "2020-01-01T00:00:01.000Z",
+  };
+  const commands: string[] = [];
+  const transport = createLarkCliTransportForMutationBoundaryTest({
+    configuration: {
+      ...LARK_TEST_CONFIGURATION,
+      baseTokenEnvironmentVariable: "PATH",
+    },
+    egressAuthorization: allowLarkMutation,
+    egressAudit: audit,
+    clock,
+    async run(args) {
+      const command = args[1] ?? args[0] ?? "";
+      commands.push(command);
+      if (command === "+record-search") {
+        now = "2020-01-01T00:00:02.000Z";
+        return {
+          ok: true,
+          data: {
+            data: [],
+            field_id_list: ["fldStable", "fldPayload", "fldHash"],
+            fields: ["稳定ID", "载荷", "载荷哈希"],
+            has_more: false,
+            record_id_list: [],
+          },
+        };
+      }
+      mutationCalls += 1;
+      return { ok: true, data: {} };
+    },
+  });
+
+  await assert.rejects(
+    transport.upsertRecord({
+      tableKey: "runs",
+      stableId: "job:job-search-delay",
+      payload: "{}",
+      payloadHash:
+        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      idempotencyKey: "record-search-delay",
+      authorization: expiringParent,
+    }),
+    /authorization.*expired/i,
+  );
+  assert.deepEqual(commands, ["+record-search"]);
+  assert.equal(mutationCalls, 0);
 });

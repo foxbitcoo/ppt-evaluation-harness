@@ -24,6 +24,14 @@ and `产物附件`. `VerifiedLarkCliTransport.preflight()` reads every mapped ta
 with the frozen CLI and fails before provider execution if any table or field
 drifts.
 
+Because multiple logical entities share a physical table, `稳定ID` is a
+namespaced physical identity: `job:<id>`, `run:<id>`, `attempt:<id>`,
+`artifact:<id>`, `page:<artifactId>:<n>`, `claim:<jobId>`, and
+`commit:<jobId>`. The unprefixed domain identity remains in the canonical
+payload. Recovery, attachment readback, replay, and marker lookup use the same
+physical identity. A single-table acceptance fake retains all entity kinds
+simultaneously and proves replay does not add duplicates.
+
 This proves schema availability only. No real evaluation record, page
 evidence record, or commit marker has yet been accepted as a production run.
 
@@ -57,7 +65,8 @@ been written. That remains an external acceptance gate.
 
 There is no public resolver dependency. Each static page is persisted as:
 
-1. one stable Base record, `artifactId:page:<n>`, in `运行记录`;
+1. one stable Base record, `page:<artifactId>:<n>`, in `运行记录`, whose
+   payload retains logical record ID `artifactId:page:<n>`;
 2. exactly one PNG attachment on that record; and
 3. one native Feishu record share URL returned by the frozen
    `base +record-share-link-create` command.
@@ -88,14 +97,20 @@ report, but retained captures still require hash-verified Artifact storage.
   `/usr/bin/sandbox-exec`
   - SHA-256:
     `8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16`
-- Lark Node runtime:
-  `/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/bin/node`
+- Native Lark CLI `1.0.72`:
+  `/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/lib/node_modules/@larksuite/cli/bin/lark-cli`
   - SHA-256:
-    `1ee75375e33b94fc34b3b19aede049e11dae90efb63b374dc96d6bdace70c4b8`
-- Lark CLI script:
+    `4b38c877ec833fe72c370dad3768d0564ff678fde1a488910be3e38b0a1e1238`
+- Prohibited wrapper target, attested for drift detection only:
   `/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/lib/node_modules/@larksuite/cli/scripts/run.js`
   - SHA-256:
     `b6b575a31d62ea45f55155f1090a49d31e79a1b0e5c70af15f9431ab850ca577`
+
+Production spawns the 43 MB native binary directly. It never executes the
+`bin/lark-cli` symlink or its download-capable JavaScript wrapper and never
+runs `lark-cli update`. Native hash, exact `--version` output, symlink target,
+and wrapper-script hash must all match the reviewed installation; any drift
+fails closed.
 
 The Judge runs in a fresh temporary root under a pinned Seatbelt profile.
 Reads and writes under `/Users`, `/Volumes`, and shared temporary roots are
@@ -108,6 +123,19 @@ profile and attestation hashes. Any executable or profile drift fails closed.
 The local attestation is implementation evidence. A successful real Judge call
 and persisted non-Mock score lineage are still required for production
 acceptance.
+
+## Lark mutation authorization boundary — implementation ready
+
+Every real Lark mutation is authorized inside the production transport after
+any preceding read/search and immediately before the native process is
+spawned. This includes Base record upsert, attachment upload, record-share-link
+creation, Docx overwrite, Job claim, and commit marker. Each fresh decision is
+bound to the exact target account/region, mutation kind, and canonical mutation
+payload hash, is audited, and is checked for currentness again with no await
+between the final check and runner invocation.
+
+Acceptance coverage advances the clock during `record-search` until the parent
+authorization expires and proves that no `record-upsert` command is invoked.
 
 ## Recovery and real-provider acceptance — pending
 

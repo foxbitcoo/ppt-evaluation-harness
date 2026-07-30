@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdtemp,
+  readFile,
+  readlink,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -52,6 +59,7 @@ export interface LarkBaseProjectionTransportPort {
     readonly payload: string;
     readonly payloadHash: `sha256:${string}`;
     readonly idempotencyKey: string;
+    readonly authorization: ApprovedEgressAuthorization;
   }): Promise<{
     readonly remoteRecordId: string;
     readonly recordUrl: string;
@@ -65,6 +73,7 @@ export interface LarkBaseProjectionTransportPort {
     readonly content: Uint8Array;
     readonly contentHash: `sha256:${string}`;
     readonly idempotencyKey: string;
+    readonly authorization: ApprovedEgressAuthorization;
   }): Promise<{
     readonly fileToken: string;
     readonly remoteHash: `sha256:${string}`;
@@ -83,6 +92,7 @@ export interface LarkBaseProjectionTransportPort {
   createRecordShareLink(command: {
     readonly tableKey: "artifacts";
     readonly remoteRecordId: string;
+    readonly authorization: ApprovedEgressAuthorization;
   }): Promise<string>;
   verifyPageEvidence(command: {
     readonly stableId: string;
@@ -96,6 +106,7 @@ export interface LarkBaseProjectionTransportPort {
     readonly content: Uint8Array;
     readonly contentHash: `sha256:${string}`;
     readonly expectedUrl: string;
+    readonly authorization: ApprovedEgressAuthorization;
   }): Promise<void>;
   upsertReportCollection(command: {
     readonly reports: readonly {
@@ -106,6 +117,7 @@ export interface LarkBaseProjectionTransportPort {
     }[];
     readonly collectionHash: `sha256:${string}`;
     readonly idempotencyKey: string;
+    readonly authorization: ApprovedEgressAuthorization;
   }): Promise<{
     readonly url: string;
     readonly remoteContentHash: `sha256:${string}`;
@@ -131,7 +143,7 @@ export interface LarkBaseProjectionTransportPort {
     readonly jobId: string;
     readonly runIds: readonly string[];
     readonly claimHash: `sha256:${string}`;
-    readonly authorizationDecisionId: string;
+    readonly authorization: ApprovedEgressAuthorization;
     readonly claimedAt: string;
   }): Promise<"claimed" | "already_claimed">;
   commitBatch(command: {
@@ -154,6 +166,7 @@ export interface LarkBaseProjectionTransportPort {
     readonly committedAt: string;
     readonly previousBatchHash: `sha256:${string}` | null;
     readonly revision: number;
+    readonly authorization: ApprovedEgressAuthorization;
   }): Promise<void>;
 }
 
@@ -195,15 +208,18 @@ const HARNESS_OWNED_LARK_PROJECTIONS =
   new WeakMap<object, LarkBaseProjectionTransportPort>();
 
 export const FROZEN_LARK_CLI_BINARY =
-  "/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/bin/lark-cli";
+  "/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/lib/node_modules/@larksuite/cli/bin/lark-cli";
 export const FROZEN_LARK_CLI_SHA256 =
-  "sha256:b6b575a31d62ea45f55155f1090a49d31e79a1b0e5c70af15f9431ab850ca577" as const;
-export const FROZEN_LARK_NODE_BINARY =
-  "/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/bin/node";
-export const FROZEN_LARK_NODE_SHA256 =
-  "sha256:1ee75375e33b94fc34b3b19aede049e11dae90efb63b374dc96d6bdace70c4b8" as const;
+  "sha256:4b38c877ec833fe72c370dad3768d0564ff678fde1a488910be3e38b0a1e1238" as const;
+export const FROZEN_LARK_CLI_VERSION = "1.0.72";
+export const FROZEN_LARK_CLI_WRAPPER =
+  "/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/bin/lark-cli";
+export const FROZEN_LARK_CLI_WRAPPER_TARGET =
+  "../lib/node_modules/@larksuite/cli/scripts/run.js";
 export const FROZEN_LARK_CLI_SCRIPT =
   "/Users/chenyifan/.local/node-v24.16.0-darwin-arm64/lib/node_modules/@larksuite/cli/scripts/run.js";
+export const FROZEN_LARK_CLI_SCRIPT_SHA256 =
+  "sha256:b6b575a31d62ea45f55155f1090a49d31e79a1b0e5c70af15f9431ab850ca577" as const;
 
 export interface LarkCliProjectionConfiguration {
   readonly baseTokenEnvironmentVariable: string;
@@ -605,6 +621,68 @@ function stableRecordId(
   );
 }
 
+function physicalStableRecordId(
+  tableKey: LarkProjectionTableKey,
+  record: Record<string, unknown>,
+): string {
+  const logicalId = stableRecordId(tableKey, record);
+  switch (tableKey) {
+    case "cases":
+      return `case:${logicalId}`;
+    case "runs": {
+      switch (record.recordType) {
+        case "bakeoff_job":
+          return `job:${logicalId}`;
+        case "vendor_run":
+          return `run:${logicalId}`;
+        case "evaluation_attempt":
+          return `attempt:${logicalId}`;
+        default:
+          throw new Error(
+            "Lark runs row has no recognized physical entity type",
+          );
+      }
+    }
+    case "artifacts":
+      return `artifact:${logicalId}`;
+    case "scores":
+      return `score:${logicalId}`;
+    case "workflow_events": {
+      const prefixByRecordType: Readonly<Record<string, string>> = {
+        adjudication_event: "adjudication",
+        review_event: "review",
+        gap_card_workflow_event: "gap-workflow",
+        github_issue_delivery_reservation: "github-reservation",
+        github_issue_link_event: "github-link",
+      };
+      const prefix =
+        typeof record.recordType === "string"
+          ? prefixByRecordType[record.recordType]
+          : undefined;
+      if (prefix === undefined) {
+        throw new Error(
+          "Lark workflow row has no recognized physical entity type",
+        );
+      }
+      return `${prefix}:${logicalId}`;
+    }
+    case "comparisons":
+      return record.recordType === "comparison"
+        ? `comparison:${logicalId}`
+        : record.recordType === "gap_card"
+          ? `gap:${logicalId}`
+          : (() => {
+              throw new Error(
+                "Lark comparison row has no recognized physical entity type",
+              );
+            })();
+    case "commit_markers":
+      throw new Error(
+        "Commit marker physical IDs are assigned at the marker boundary",
+      );
+  }
+}
+
 function tableRows(
   snapshot: FeishuProjectionSnapshot,
 ): readonly {
@@ -916,7 +994,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
               assertAuthorizationCurrent();
               await this.#transport.verifyPageEvidence({
                 stableId:
-                  `${capture.artifactId}:page:${slide.pageNumber}`,
+                  `page:${capture.artifactId}:${slide.pageNumber}`,
                 jobId: capture.jobId,
                 runId: capture.runId,
                 sourceCaptureRecordId: capture.recordId,
@@ -930,6 +1008,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
                     : slide.content,
                 contentHash: slide.contentHash,
                 expectedUrl,
+                authorization,
               });
               assertAuthorizationCurrent();
             }
@@ -985,13 +1064,14 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       const remoteRecords = new Map<string, string>();
       for (const { tableKey, value } of rows) {
         assertAuthorizationCurrent();
-        const stableId = stableRecordId(tableKey, value);
+        const stableId = physicalStableRecordId(tableKey, value);
         const { payload, payloadHash } = serializedRow(value);
         const remote = await this.#transport.upsertRecord({
           tableKey,
           stableId,
           payload,
           payloadHash,
+          authorization,
           idempotencyKey:
             `lark-record:${tableKey}:${stableId}:${payloadHash}`,
         });
@@ -1004,7 +1084,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       const pageEvidenceUrls = new Map<string, string>();
       for (const capture of snapshot.capturedArtifactTable) {
         const remoteRecordId = remoteRecords.get(
-          `artifacts:${capture.recordId}`,
+          `artifacts:artifact:${capture.recordId}`,
         );
         if (remoteRecordId === undefined) {
           throw new Error(
@@ -1035,13 +1115,14 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
           const upload = await this.#transport.uploadAttachment({
             tableKey: "artifacts",
             remoteRecordId,
-            stableId: capture.recordId,
+            stableId: `artifact:${capture.recordId}`,
             attachmentRole: derivative.role,
             filename: derivative.filename,
             content: derivative.content,
             contentHash: derivative.contentHash,
             idempotencyKey:
               `lark-attachment:${capture.recordId}:${derivative.role}:${derivative.contentHash}`,
+            authorization,
           });
           assertAuthorizationCurrent();
           assertHttps(upload.attachmentUrl, "Lark Base attachment");
@@ -1076,6 +1157,8 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
             );
           }
           const stableId =
+            `page:${capture.artifactId}:${slide.pageNumber}`;
+          const logicalPageRecordId =
             `${capture.artifactId}:page:${slide.pageNumber}`;
           const content =
             typeof slide.content === "string"
@@ -1084,7 +1167,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
           const pagePayload = canonicalPayload({
             schemaVersion: "lark-artifact-page-evidence-v1",
             recordType: "artifact_page_evidence",
-            recordId: stableId,
+            recordId: logicalPageRecordId,
             jobId: capture.jobId,
             runId: capture.runId,
             artifactId: capture.artifactId,
@@ -1103,6 +1186,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
             payloadHash: pagePayloadHash,
             idempotencyKey:
               `lark-record:artifacts:${stableId}:${pagePayloadHash}`,
+            authorization,
           });
           assertAuthorizationCurrent();
           assertHttps(pageRecord.recordUrl, "Lark page evidence record");
@@ -1116,6 +1200,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
             contentHash: slide.contentHash,
             idempotencyKey:
               `lark-attachment:${stableId}:${slide.contentHash}`,
+            authorization,
           });
           assertAuthorizationCurrent();
           assertHttps(upload.attachmentUrl, "Lark page evidence attachment");
@@ -1141,6 +1226,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
             await this.#transport.createRecordShareLink({
               tableKey: "artifacts",
               remoteRecordId: pageRecord.remoteRecordId,
+              authorization,
             });
           assertAuthorizationCurrent();
           assertHttps(shareUrl, "Lark page evidence share link");
@@ -1172,6 +1258,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
           collectionHash,
           idempotencyKey:
             `lark-report-collection:${jobId}:${collectionHash}`,
+          authorization,
         });
         assertAuthorizationCurrent();
         assertHttps(result.url, "Lark report");
@@ -1195,14 +1282,14 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       );
       const originalRows = new Map(
         rows.map(({ tableKey, value }) => [
-          `${tableKey}:${stableRecordId(tableKey, value)}`,
+          `${tableKey}:${physicalStableRecordId(tableKey, value)}`,
           serializedRow(value).payloadHash,
         ]),
       );
       for (const { tableKey, value } of tableRows(
         materializedSnapshot,
       )) {
-        const stableId = stableRecordId(tableKey, value);
+        const stableId = physicalStableRecordId(tableKey, value);
         const { payload, payloadHash } = serializedRow(value);
         if (
           originalRows.get(`${tableKey}:${stableId}`) !== payloadHash
@@ -1215,6 +1302,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
             payloadHash,
             idempotencyKey:
               `lark-record:${tableKey}:${stableId}:${payloadHash}`,
+            authorization,
           });
           assertAuthorizationCurrent();
         }
@@ -1247,6 +1335,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
           )?.createdAt ?? authorization.request.requestedAt,
         previousBatchHash: existingMarker?.batchHash ?? null,
         revision: (existingMarker?.revision ?? 0) + 1,
+        authorization,
       });
       assertAuthorizationCurrent();
       return materializedSnapshot;
@@ -1379,7 +1468,7 @@ export async function claimHarnessOwnedLarkProductionJob(
     jobId: command.jobId,
     runIds: command.runIds,
     claimHash: command.claimHash,
-    authorizationDecisionId: command.authorization.decisionId,
+    authorization: command.authorization,
     claimedAt: command.authorization.request.requestedAt,
   });
   assertApprovedEgressAuthorizationCurrent(command.authorization, clock);
@@ -1480,22 +1569,152 @@ function collectRecords(value: unknown): readonly Record<string, unknown>[] {
   return records;
 }
 
+interface LarkCliRunOptions {
+  readonly cwd?: string;
+}
+
+type LarkCliJsonRunner = (
+  args: readonly string[],
+  options?: LarkCliRunOptions,
+) => Promise<unknown>;
+
+async function spawnFrozenLarkCliJson(
+  binaryPath: string,
+  args: readonly string[],
+  options: LarkCliRunOptions = {},
+): Promise<unknown> {
+  const output = await new Promise<string>((resolveOutput, rejectOutput) => {
+    const child = spawn(binaryPath, [...args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      env: {
+        PATH: "/usr/bin:/bin",
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
+        LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
+      },
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.resume();
+    child.once("error", rejectOutput);
+    child.once("close", (code) => {
+      if (code !== 0) {
+        rejectOutput(
+          new Error(
+            `lark-cli fixed command failed with code ${code}; stderr withheld to avoid credential-bearing diagnostics`,
+          ),
+        );
+        return;
+      }
+      resolveOutput(stdout);
+    });
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output) as unknown;
+  } catch {
+    throw new Error("lark-cli returned non-JSON output");
+  }
+  if (
+    parsed !== null &&
+    typeof parsed === "object" &&
+    "ok" in parsed &&
+    (parsed as { readonly ok?: unknown }).ok !== true
+  ) {
+    throw new Error("lark-cli returned a non-success JSON envelope");
+  }
+  return parsed;
+}
+
+async function frozenLarkCliVersion(binaryPath: string): Promise<string> {
+  return await new Promise<string>((resolveVersion, rejectVersion) => {
+    const child = spawn(binaryPath, ["--version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        PATH: "/usr/bin:/bin",
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+        LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
+        LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
+      },
+    });
+    let stdout = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.resume();
+    child.once("error", rejectVersion);
+    child.once("close", (code) => {
+      if (code !== 0) {
+        rejectVersion(
+          new Error(`Frozen lark-cli version probe failed with code ${code}`),
+        );
+        return;
+      }
+      resolveVersion(stdout.trim());
+    });
+  });
+}
+
+export function assertFrozenLarkCliInstallation(input: {
+  readonly nativeHash: `sha256:${string}`;
+  readonly nativeVersionOutput: string;
+  readonly wrapperIsSymbolicLink: boolean;
+  readonly wrapperTarget: string;
+  readonly wrapperScriptHash: `sha256:${string}`;
+}): void {
+  if (
+    input.nativeHash !== FROZEN_LARK_CLI_SHA256 ||
+    input.nativeVersionOutput !==
+      `lark-cli version ${FROZEN_LARK_CLI_VERSION}`
+  ) {
+    throw new Error(
+      "Frozen native lark-cli executable or version does not match the reviewed installation",
+    );
+  }
+  if (
+    input.wrapperIsSymbolicLink !== true ||
+    input.wrapperTarget !== FROZEN_LARK_CLI_WRAPPER_TARGET ||
+    input.wrapperScriptHash !== FROZEN_LARK_CLI_SCRIPT_SHA256
+  ) {
+    throw new Error(
+      "lark-cli wrapper does not match the reviewed native installation; wrapper execution is prohibited",
+    );
+  }
+}
+
 class VerifiedLarkCliTransport
   implements LarkBaseProjectionTransportPort
 {
   readonly transportId: string;
   readonly pageEvidenceBaseUrl: string;
   readonly #configuration: LarkCliProjectionConfiguration;
-  readonly #nodePath: string;
-  readonly #scriptPath: string;
+  readonly #binaryPath: string;
+  readonly #egressAuthorization: EgressAuthorizationPort;
+  readonly #egressAudit: EgressAuthorizationAuditPort;
+  readonly #clock: ClockPort;
+  readonly #runner: LarkCliJsonRunner;
 
   constructor(
-    nodePath: string,
-    scriptPath: string,
+    binaryPath: string,
     configuration: LarkCliProjectionConfiguration,
+    egressAuthorization: EgressAuthorizationPort,
+    egressAudit: EgressAuthorizationAuditPort,
+    clock: ClockPort = SYSTEM_CLOCK,
+    runner?: LarkCliJsonRunner,
   ) {
-    this.#nodePath = nodePath;
-    this.#scriptPath = scriptPath;
+    this.#binaryPath = binaryPath;
+    this.#egressAuthorization = egressAuthorization;
+    this.#egressAudit = egressAudit;
+    this.#clock = clock;
+    this.#runner =
+      runner ??
+      ((args, options) =>
+        spawnFrozenLarkCliJson(this.#binaryPath, args, options));
     this.#configuration = Object.freeze({
       ...configuration,
       tables: Object.freeze({ ...configuration.tables }),
@@ -1510,55 +1729,52 @@ class VerifiedLarkCliTransport
 
   async #run(
     args: readonly string[],
-    options: {
-      readonly cwd?: string;
-    } = {},
+    options: LarkCliRunOptions = {},
   ): Promise<unknown> {
-    const output = await new Promise<string>((resolveOutput, rejectOutput) => {
-      const child = spawn(this.#nodePath, [this.#scriptPath, ...args], {
-        stdio: ["ignore", "pipe", "pipe"],
-        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        env: {
-          PATH: "/usr/bin:/bin",
-          HOME: process.env.HOME,
-          TMPDIR: process.env.TMPDIR,
-          LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
-          LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
-        },
-      });
-      let stdout = "";
-      child.stdout.setEncoding("utf8").on("data", (chunk) => {
-        stdout += chunk;
-      });
-      child.stderr.resume();
-      child.once("error", rejectOutput);
-      child.once("close", (code) => {
-        if (code !== 0) {
-          rejectOutput(
-            new Error(
-              `lark-cli fixed command failed with code ${code}; stderr withheld to avoid credential-bearing diagnostics`,
-            ),
-          );
-          return;
-        }
-        resolveOutput(stdout);
-      });
-    });
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(output) as unknown;
-    } catch {
-      throw new Error("lark-cli returned non-JSON output");
-    }
-    if (
-      parsed !== null &&
-      typeof parsed === "object" &&
-      "ok" in parsed &&
-      (parsed as { readonly ok?: unknown }).ok !== true
-    ) {
-      throw new Error("lark-cli returned a non-success JSON envelope");
-    }
-    return parsed;
+    return await this.#runner(args, options);
+  }
+
+  async #runMutation(
+    operation: string,
+    payloadHash: `sha256:${string}`,
+    parentAuthorization: ApprovedEgressAuthorization,
+    args: readonly string[],
+    options: LarkCliRunOptions = {},
+  ): Promise<unknown> {
+    assertApprovedEgressAuthorizationCurrent(
+      parentAuthorization,
+      this.#clock,
+    );
+    const authorization = await requireEgressAuthorization(
+      this.#egressAuthorization,
+      {
+        requestId:
+          `lark-mutation:${operation}:${parentAuthorization.request.jobId}:${payloadHash}`,
+        jobId: parentAuthorization.request.jobId,
+        runId: parentAuthorization.request.runId,
+        attemptId: parentAuthorization.request.attemptId,
+        dataClassification:
+          parentAuthorization.request.dataClassification,
+        sourceOwner: parentAuthorization.request.sourceOwner,
+        processingPurpose: "operational_ledger_projection_storage",
+        targetKind: "storage",
+        targetService: "lark-base-operational-ledger",
+        targetAccount: this.#configuration.targetAccount,
+        targetRegion: this.#configuration.targetRegion,
+        subprocessors: [],
+        contentFields: [`lark_mutation:${operation}`],
+        payloadHash,
+        requiredRedactions: [],
+      },
+      this.#clock,
+    );
+    await this.#egressAudit.append(authorization);
+    await this.#egressAudit.assertRecorded(authorization);
+    assertApprovedEgressAuthorizationCurrent(authorization, this.#clock);
+    // The runner is invoked synchronously after the final currentness check.
+    // The production runner synchronously spawns the frozen native binary.
+    const pending = this.#runner(args, options);
+    return await pending;
   }
 
   #baseToken(): string {
@@ -1771,7 +1987,18 @@ class VerifiedLarkCliTransport
       [this.#configuration.payloadField]: command.payload,
       [this.#configuration.payloadHashField]: command.payloadHash,
     });
-    const response = await this.#run([
+    const mutationHash = sha256(canonicalPayload({
+      operation: "record-upsert",
+      tableId: this.#configuration.tables[command.tableKey],
+      stableId: command.stableId,
+      payloadHash: command.payloadHash,
+      fields,
+    }));
+    const response = await this.#runMutation(
+      "record-upsert",
+      mutationHash,
+      command.authorization,
+      [
       "base",
       "+record-upsert",
       "--base-token",
@@ -1785,7 +2012,8 @@ class VerifiedLarkCliTransport
       "json",
       "--as",
       "user",
-    ]);
+      ],
+    );
     const resultRecord = collectRecords(response).find(
       (record) =>
         typeof record.record_id === "string" ||
@@ -1867,7 +2095,20 @@ class VerifiedLarkCliTransport
     const path = join(directory, filename);
     try {
       await writeFile(path, command.content, { mode: 0o600 });
-      const response = await this.#run([
+      const mutationHash = sha256(canonicalPayload({
+        operation: "record-upload-attachment",
+        tableId: this.#configuration.tables.artifacts,
+        remoteRecordId: command.remoteRecordId,
+        stableId: command.stableId,
+        attachmentRole: command.attachmentRole,
+        filename,
+        contentHash: command.contentHash,
+      }));
+      const response = await this.#runMutation(
+        "record-upload-attachment",
+        mutationHash,
+        command.authorization,
+        [
         "base",
         "+record-upload-attachment",
         "--base-token",
@@ -1884,7 +2125,9 @@ class VerifiedLarkCliTransport
         "json",
         "--as",
         "user",
-      ], { cwd: directory });
+        ],
+        { cwd: directory },
+      );
       const token = collectRecords(response)
         .map((record) => record.file_token ?? record.fileToken)
         .find((value): value is string => typeof value === "string");
@@ -1937,7 +2180,16 @@ class VerifiedLarkCliTransport
   async createRecordShareLink(
     command: Parameters<LarkBaseProjectionTransportPort["createRecordShareLink"]>[0],
   ): Promise<string> {
-    const response = await this.#run([
+    const mutationHash = sha256(canonicalPayload({
+      operation: "record-share-link-create",
+      tableId: this.#configuration.tables[command.tableKey],
+      remoteRecordId: command.remoteRecordId,
+    }));
+    const response = await this.#runMutation(
+      "record-share-link-create",
+      mutationHash,
+      command.authorization,
+      [
       "base",
       "+record-share-link-create",
       "--base-token",
@@ -1950,7 +2202,8 @@ class VerifiedLarkCliTransport
       "json",
       "--as",
       "user",
-    ]);
+      ],
+    );
     return parseLarkRecordShareLinkEnvelope(
       response,
       command.remoteRecordId,
@@ -1985,7 +2238,7 @@ class VerifiedLarkCliTransport
     const expectedPayload = canonicalPayload({
       schemaVersion: "lark-artifact-page-evidence-v1",
       recordType: "artifact_page_evidence",
-      recordId: command.stableId,
+      recordId: `${command.artifactId}:page:${command.pageNumber}`,
       jobId: command.jobId,
       runId: command.runId,
       artifactId: command.artifactId,
@@ -2058,6 +2311,7 @@ class VerifiedLarkCliTransport
     const shareUrl = await this.createRecordShareLink({
       tableKey: "artifacts",
       remoteRecordId,
+      authorization: command.authorization,
     });
     if (shareUrl !== command.expectedUrl) {
       throw new Error(
@@ -2096,7 +2350,17 @@ class VerifiedLarkCliTransport
         encoding: "utf8",
         mode: 0o600,
       });
-      const update = await this.#run([
+      const mutationHash = sha256(canonicalPayload({
+        operation: "document-update",
+        reportToken,
+        collectionHash: command.collectionHash,
+        contentHash: sha256(content),
+      }));
+      const update = await this.#runMutation(
+        "document-update",
+        mutationHash,
+        command.authorization,
+        [
         "docs",
         "+update",
         "--doc",
@@ -2111,7 +2375,9 @@ class VerifiedLarkCliTransport
         "json",
         "--as",
         "user",
-      ], { cwd: directory });
+        ],
+        { cwd: directory },
+      );
       const updateRevision = parseLarkDocumentUpdateRevision(
         update,
         reportToken,
@@ -2203,7 +2469,7 @@ class VerifiedLarkCliTransport
   ): Promise<LarkCommitMarker | null> {
     const record = await this.#findRecord(
       "commit_markers",
-      command.jobId,
+      `commit:${command.jobId}`,
     );
     if (record === null) return null;
     const fields =
@@ -2393,7 +2659,9 @@ class VerifiedLarkCliTransport
         observedStableIds: [command.jobId],
       };
     }
-    if ((await this.#findRecord("runs", command.jobId)) !== null) {
+    if (
+      (await this.#findRecord("runs", `job:${command.jobId}`)) !== null
+    ) {
       return {
         state: "job_record_present",
         marker: null,
@@ -2402,7 +2670,7 @@ class VerifiedLarkCliTransport
     }
     const observedStableIds: string[] = [];
     for (const runId of command.runIds) {
-      if ((await this.#findRecord("runs", runId)) !== null) {
+      if ((await this.#findRecord("runs", `run:${runId}`)) !== null) {
         observedStableIds.push(runId);
       }
     }
@@ -2420,15 +2688,19 @@ class VerifiedLarkCliTransport
     readonly jobId: string;
     readonly runIds: readonly string[];
     readonly claimHash: `sha256:${string}`;
-    readonly authorizationDecisionId: string;
+    readonly authorization: ApprovedEgressAuthorization;
     readonly claimedAt: string;
   }): Promise<"claimed" | "already_claimed"> {
-    const stableId = `job-claim:${command.jobId}`;
+    const stableId = `claim:${command.jobId}`;
     const existing = await this.#findRecord("commit_markers", stableId);
     if (existing !== null) return "already_claimed";
     const payload = canonicalPayload({
       schemaVersion: "lark-production-job-claim-v1",
-      ...command,
+      jobId: command.jobId,
+      runIds: command.runIds,
+      claimHash: command.claimHash,
+      authorizationDecisionId: command.authorization.decisionId,
+      claimedAt: command.claimedAt,
     });
     const payloadHash = sha256(payload);
     await this.upsertRecord({
@@ -2438,6 +2710,7 @@ class VerifiedLarkCliTransport
       payloadHash,
       idempotencyKey:
         `lark-job-claim:${command.jobId}:${command.claimHash}`,
+      authorization: command.authorization,
     });
     const readback = await this.#findRecord("commit_markers", stableId);
     const fields =
@@ -2459,43 +2732,60 @@ class VerifiedLarkCliTransport
   async commitBatch(
     command: Parameters<LarkBaseProjectionTransportPort["commitBatch"]>[0],
   ): Promise<void> {
-    const payload = canonicalPayload(command);
+    const { authorization, ...marker } = command;
+    const payload = canonicalPayload(marker);
     await this.upsertRecord({
       tableKey: "commit_markers",
-      stableId: command.jobId,
+      stableId: `commit:${command.jobId}`,
       payload,
       payloadHash: sha256(payload),
       idempotencyKey:
         `lark-commit:${command.jobId}:${command.batchHash}`,
+      authorization,
     });
   }
 }
 
 export async function createVerifiedLarkCliTransport(options: {
   readonly configuration: LarkCliProjectionConfiguration;
+  readonly egressAuthorization: EgressAuthorizationPort;
+  readonly egressAudit: EgressAuthorizationAuditPort;
+  readonly clock?: ClockPort;
 }): Promise<LarkBaseProjectionTransportPort> {
   const binaryPath = resolve(FROZEN_LARK_CLI_BINARY);
-  const nodePath = resolve(FROZEN_LARK_NODE_BINARY);
+  const wrapperPath = resolve(FROZEN_LARK_CLI_WRAPPER);
   const scriptPath = resolve(FROZEN_LARK_CLI_SCRIPT);
-  const [actualHash, actualNodeHash, actualScriptHash] =
+  const [nativeBytes, wrapperMetadata, wrapperTarget, scriptBytes] =
     await Promise.all([
-      readFile(binaryPath).then((value) => sha256(Uint8Array.from(value))),
-      readFile(nodePath).then((value) => sha256(Uint8Array.from(value))),
-      readFile(scriptPath).then((value) => sha256(Uint8Array.from(value))),
+      readFile(binaryPath),
+      lstat(wrapperPath),
+      readlink(wrapperPath),
+      readFile(scriptPath),
     ]);
+  const nativeHash = sha256(Uint8Array.from(nativeBytes));
+  const wrapperScriptHash = sha256(Uint8Array.from(scriptBytes));
+  if (nativeHash !== FROZEN_LARK_CLI_SHA256) {
+    throw new Error(
+      "Frozen native lark-cli executable does not match the reviewed installation",
+    );
+  }
   if (
-    actualHash !== FROZEN_LARK_CLI_SHA256 ||
-    actualScriptHash !== FROZEN_LARK_CLI_SHA256
+    wrapperMetadata.isSymbolicLink() !== true ||
+    wrapperTarget !== FROZEN_LARK_CLI_WRAPPER_TARGET ||
+    wrapperScriptHash !== FROZEN_LARK_CLI_SCRIPT_SHA256
   ) {
     throw new Error(
-      "Fixed lark-cli script hash does not match the reviewed executable",
+      "lark-cli wrapper does not match the reviewed native installation; wrapper execution is prohibited",
     );
   }
-  if (actualNodeHash !== FROZEN_LARK_NODE_SHA256) {
-    throw new Error(
-      "Fixed lark-cli Node runtime hash does not match the reviewed executable",
-    );
-  }
+  const nativeVersionOutput = await frozenLarkCliVersion(binaryPath);
+  assertFrozenLarkCliInstallation({
+    nativeHash,
+    nativeVersionOutput,
+    wrapperIsSymbolicLink: wrapperMetadata.isSymbolicLink(),
+    wrapperTarget,
+    wrapperScriptHash,
+  });
   for (const [label, value] of Object.entries({
     baseTokenEnvironmentVariable:
       options.configuration.baseTokenEnvironmentVariable,
@@ -2542,10 +2832,33 @@ export async function createVerifiedLarkCliTransport(options: {
     );
   }
   const transport = new VerifiedLarkCliTransport(
-    nodePath,
-    scriptPath,
+    binaryPath,
     options.configuration,
+    options.egressAuthorization,
+    options.egressAudit,
+    options.clock ?? SYSTEM_CLOCK,
   );
   VERIFIED_LARK_TRANSPORTS.add(transport);
   return transport;
+}
+
+/**
+ * Narrow, unregistered seam used only to prove the mutation authorization
+ * boundary. It cannot be installed as a harness-owned production projection.
+ */
+export function createLarkCliTransportForMutationBoundaryTest(options: {
+  readonly configuration: LarkCliProjectionConfiguration;
+  readonly egressAuthorization: EgressAuthorizationPort;
+  readonly egressAudit: EgressAuthorizationAuditPort;
+  readonly clock: ClockPort;
+  readonly run: LarkCliJsonRunner;
+}): LarkBaseProjectionTransportPort {
+  return new VerifiedLarkCliTransport(
+    FROZEN_LARK_CLI_BINARY,
+    options.configuration,
+    options.egressAuthorization,
+    options.egressAudit,
+    options.clock,
+    options.run,
+  );
 }
