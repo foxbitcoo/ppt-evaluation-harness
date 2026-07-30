@@ -1,4 +1,5 @@
 import { parseStrictJson } from "./strict-json.ts";
+import { sha256Bytes } from "./run-specification.ts";
 
 type Sha256 = `sha256:${string}`;
 
@@ -107,6 +108,8 @@ export interface DoubaoCurrentVerifierRecoveryEvidence {
   readonly recoveryCliEvidence: {
     readonly schemaVersion: "doubao-recovery-cli-evidence-v1";
     readonly rawResultReference: string;
+    readonly rawResultHashScope:
+      "exact_stdout_bytes_including_terminal_lf";
     readonly rawResultHash: Sha256;
     readonly rawResultVerifierBuildIdentity: VerifiedBuildIdentity;
     readonly attestedResultSchemaVersion:
@@ -338,6 +341,7 @@ export function parseDoubaoCurrentVerifierRecoveryEvidence(
     [
       "schemaVersion",
       "rawResultReference",
+      "rawResultHashScope",
       "rawResultHash",
       "rawResultVerifierBuildIdentity",
       "attestedResultSchemaVersion",
@@ -512,6 +516,12 @@ export function parseDoubaoCurrentVerifierRecoveryEvidence(
         "rawResultReference",
         `${rootLabel}.recoveryCliEvidence`,
       ),
+      rawResultHashScope: literalField(
+        recoveryCliEvidence,
+        "rawResultHashScope",
+        "exact_stdout_bytes_including_terminal_lf",
+        `${rootLabel}.recoveryCliEvidence`,
+      ),
       rawResultHash: sha256Field(
         recoveryCliEvidence,
         "rawResultHash",
@@ -604,6 +614,8 @@ export function currentVerifierRecoveryEvidenceAttestedView(
       schemaVersion: evidence.recoveryCliEvidence.schemaVersion,
       rawResultReference:
         evidence.recoveryCliEvidence.rawResultReference,
+      rawResultHashScope:
+        evidence.recoveryCliEvidence.rawResultHashScope,
       rawResultHash: evidence.recoveryCliEvidence.rawResultHash,
       rawResultVerifierBuildIdentity: Object.freeze({
         ...evidence.recoveryCliEvidence
@@ -619,6 +631,12 @@ export function currentVerifierRecoveryEvidenceAttestedView(
       }),
     }),
   });
+}
+
+export function doubaoRecoveryRawResultHash(
+  rawStdoutBytes: Uint8Array,
+): Sha256 {
+  return sha256Bytes(rawStdoutBytes);
 }
 
 export function parseDoubaoRecoveryCliResult(

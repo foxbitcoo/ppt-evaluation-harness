@@ -45,7 +45,8 @@
   "recoveryCliEvidence": {
     "schemaVersion": "doubao-recovery-cli-evidence-v1",
     "rawResultReference": "evidence/doubao-v30-final-recovery-cli-result.json",
-    "rawResultHash": "sha256:3cde8133a7ee999d470c5f7380274ab563c1c25f52c110e4c8304bc6381c3967",
+    "rawResultHashScope": "exact_stdout_bytes_including_terminal_lf",
+    "rawResultHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "rawResultVerifierBuildIdentity": {
       "schemaVersion": "ppt-evaluation-build-identity-v1",
       "specCommitSha": "bd520768f4f1fa0952d39ac96618ded081912cba",

@@ -7,6 +7,7 @@ export {
 export { parseStrictJson } from "./strict-json.ts";
 export {
   currentVerifierRecoveryEvidenceAttestedView,
+  doubaoRecoveryRawResultHash,
   doubaoRecoveryResultAttestedView,
   parseDoubaoCurrentVerifierRecoveryEvidence,
   parseDoubaoRecoveryCliResult,

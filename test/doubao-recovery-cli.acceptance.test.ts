@@ -27,6 +27,7 @@ import {
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
   currentVerifierRecoveryEvidenceAttestedView,
+  doubaoRecoveryRawResultHash,
   doubaoRecoveryResultAttestedView,
   parseAdapterExecutionConfiguration,
   parseDoubaoCurrentVerifierRecoveryEvidence,
@@ -1044,15 +1045,17 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
   );
   const evidence =
     parseDoubaoCurrentVerifierRecoveryEvidence(evidenceSource);
-  const rawRecoveryCliResultSource = (
+  const rawRecoveryCliResultBytes = Uint8Array.from(
     await readFile(
       new URL(
         "../evidence/doubao-v30-final-recovery-cli-result.json",
         import.meta.url,
       ),
-      "utf8",
-    )
-  ).trim();
+    ),
+  );
+  const rawRecoveryCliResultSource = new TextDecoder("utf-8", {
+    fatal: true,
+  }).decode(rawRecoveryCliResultBytes);
   const rawRecoveryCliResult = parseDoubaoRecoveryCliResult(
     rawRecoveryCliResultSource,
   );
@@ -1123,6 +1126,8 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       schemaVersion: "doubao-recovery-cli-evidence-v1",
       rawResultReference:
         "evidence/doubao-v30-final-recovery-cli-result.json",
+      rawResultHashScope:
+        "exact_stdout_bytes_including_terminal_lf",
       rawResultHash:
         "sha256:3cde8133a7ee999d470c5f7380274ab563c1c25f52c110e4c8304bc6381c3967",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
@@ -1150,7 +1155,7 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
   );
   assert.equal(
     evidence.recoveryCliEvidence.rawResultHash,
-    hash(encoder.encode(rawRecoveryCliResultSource)),
+    doubaoRecoveryRawResultHash(rawRecoveryCliResultBytes),
   );
   assert.equal(
     evidence.recoveryCliEvidence.attestedResultHash,
@@ -1167,6 +1172,54 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
         currentVerifierRecoveryEvidenceAttestedView(evidence),
       ),
     ),
+  );
+});
+
+test("raw recovery stdout attestation is whitespace-sensitive while its parsed attested view is canonical", async () => {
+  const checkedBytes = Uint8Array.from(
+    await readFile(
+      new URL(
+        "../evidence/doubao-v30-final-recovery-cli-result.json",
+        import.meta.url,
+      ),
+    ),
+  );
+  assert.equal(checkedBytes.at(-1), 0x0a);
+  assert.notEqual(checkedBytes.at(-2), 0x0a);
+
+  const withoutTerminalLf = checkedBytes.subarray(
+    0,
+    checkedBytes.length - 1,
+  );
+  const withAdditionalTerminalLf = Uint8Array.from([
+    ...checkedBytes,
+    0x0a,
+  ]);
+  const decode = (bytes: Uint8Array) =>
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const parsed = parseDoubaoRecoveryCliResult(decode(checkedBytes));
+  const withoutTerminalLfParsed = parseDoubaoRecoveryCliResult(
+    decode(withoutTerminalLf),
+  );
+  const withAdditionalTerminalLfParsed = parseDoubaoRecoveryCliResult(
+    decode(withAdditionalTerminalLf),
+  );
+
+  assert.notEqual(
+    doubaoRecoveryRawResultHash(checkedBytes),
+    doubaoRecoveryRawResultHash(withoutTerminalLf),
+  );
+  assert.notEqual(
+    doubaoRecoveryRawResultHash(checkedBytes),
+    doubaoRecoveryRawResultHash(withAdditionalTerminalLf),
+  );
+  assert.deepEqual(
+    doubaoRecoveryResultAttestedView(parsed),
+    doubaoRecoveryResultAttestedView(withoutTerminalLfParsed),
+  );
+  assert.deepEqual(
+    doubaoRecoveryResultAttestedView(parsed),
+    doubaoRecoveryResultAttestedView(withAdditionalTerminalLfParsed),
   );
 });
 

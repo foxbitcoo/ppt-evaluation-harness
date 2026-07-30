@@ -57,7 +57,11 @@ the evidence does not manufacture a midnight timestamp.
 
 The current-verifier evidence distinguishes the exact raw CLI stdout hash from
 the stable attested recovery-result hash. The raw hash is bound to the complete
-embedded verifier build identity that appears in that same CLI result. The
+embedded verifier build identity that appears in that same CLI result. “Raw”
+means the exact UTF-8 stdout bytes, including the CLI's single terminal LF;
+no trimming or whitespace normalization occurs before hashing. The JSON parser
+may accept surrounding JSON whitespace, but that does not alter the raw-byte
+attestation. The
 attested hash uses the versioned
 `doubao-recovery-result-attestation-v1` view: it includes every recovery,
 lineage, authorization, and binary-validation field, while excluding only the

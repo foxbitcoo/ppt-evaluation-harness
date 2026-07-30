@@ -20,6 +20,8 @@ import {
   createBakeoffHarness,
   createDoubaoRealProviderReplayPackage,
   createHarnessOwnedProductionCapabilities,
+  doubaoRecoveryRawResultHash,
+  parseDoubaoRecoveryCliResult,
   registerDurableRoots,
   resolveDurableRoot,
   retainedRehearsalRoot,
@@ -350,53 +352,16 @@ const recovery = await execFileAsync(
   ],
   { cwd: new URL("..", import.meta.url).pathname },
 );
-const recoveryResult = recovery.stdout.trim();
+const recoveryResultBytes = new TextEncoder().encode(recovery.stdout);
+const recoveryResult = new TextDecoder("utf-8", {
+  fatal: true,
+}).decode(recoveryResultBytes);
 const trustedRecoveryCheckpoint =
   trustedDoubaoRecoveryCheckpoint(
     DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   );
-const parsedRecoveryResult = JSON.parse(recoveryResult) as {
-  readonly registryId: string;
-  readonly manifestHash: `sha256:${string}`;
-  readonly originalHash: `sha256:${string}`;
-  readonly renderManifestHash: `sha256:${string}`;
-  readonly derivativeCount: number;
-  readonly recoveredDerivativeCount: number;
-  readonly derivativeSetHash: `sha256:${string}`;
-  readonly runSpecificationHash: `sha256:${string}`;
-  readonly checkpointCount: number;
-  readonly checkpointTraceHash: `sha256:${string}`;
-  readonly browserDriverId: string;
-  readonly trustedRecoveryCheckpoint: {
-    readonly checkpointId: string;
-    readonly purpose: string;
-    readonly schemaVersion: string;
-  };
-  readonly evaluatedRunIdentity: {
-    readonly specCommitSha: string;
-    readonly buildIdentitySource: string;
-    readonly runnerCodeDigest: string | undefined;
-    readonly runSpecificationCanonicalHash: string | undefined;
-  };
-  readonly verifierBuildIdentity: typeof BUILD_IDENTITY;
-  readonly rendererAuthorizationEvidence: {
-    readonly decisionId: string;
-    readonly authorizationAuditDigest: string;
-    readonly requestId: string;
-    readonly targetService: string;
-    readonly targetAccount: string;
-    readonly targetRegion: string;
-    readonly payloadHash: string;
-    readonly policyVersion: string;
-    readonly approvedAt: string;
-    readonly expiresAt: string;
-  };
-  readonly binaryValidation: {
-    readonly pptxSlideCount: number;
-    readonly staticPngCount: number;
-    readonly contactSheetPngCount: number;
-  };
-};
+const parsedRecoveryResult =
+  parseDoubaoRecoveryCliResult(recoveryResult);
 assertExactObjectKeys(
   parsedRecoveryResult,
   [
@@ -529,8 +494,8 @@ await writeFile(
     resolveDurableRoot(registry, roots.operational),
     "recovery-cli-result.json",
   ),
-  `${recoveryResult}\n`,
-  { encoding: "utf8", mode: 0o600 },
+  recoveryResultBytes,
+  { mode: 0o600 },
 );
 
 process.stdout.write(
@@ -616,7 +581,8 @@ process.stdout.write(
       recoveryCommand:
         `node --import tsx scripts/recover-doubao-production-run.ts ${recoveryArguments.join(" ")}`,
       recoveryCliExecuted: true,
-      recoveryCliResultHash: sha256(recoveryResult),
+      recoveryCliResultHash:
+        doubaoRecoveryRawResultHash(recoveryResultBytes),
       recoveryCliResultReference:
         `${roots.operational}:recovery-cli-result.json`,
     },
