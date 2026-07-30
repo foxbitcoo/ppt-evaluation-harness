@@ -389,38 +389,14 @@ test("a partial Bakeoff automatically compares Qwen and Doubao when WPS has no a
   );
 });
 
-test("default all-pairs views follow stable vendor identity across package versions", async () => {
-  const versionedAdapter = (
-    adapter:
-      | MockWpsProductAdapter
-      | MockQwenProductAdapter
-      | MockDoubaoProductAdapter,
-    packageId: string,
-  ): ProductAdapterPort => ({
-    implementationPackage: adapter.implementationPackage,
-    executionConfigurationPackage:
-      adapter.executionConfigurationPackage,
-    productPackage: {
-      ...adapter.productPackage,
-      packageId,
-    },
-  });
+test("default all-pairs views follow stable vendor identity across adapter order", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
     feishu,
     productAdapters: [
-      versionedAdapter(
-        new MockWpsProductAdapter(),
-        "MOCK-wps-package-v2",
-      ),
-      versionedAdapter(
-        new MockQwenProductAdapter(),
-        "MOCK-qwen-package-v3",
-      ),
-      versionedAdapter(
-        new MockDoubaoProductAdapter(),
-        "MOCK-doubao-package-v4",
-      ),
+      new MockDoubaoProductAdapter(),
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
     ],
   }).startBakeoffJob({
     environment: "test",

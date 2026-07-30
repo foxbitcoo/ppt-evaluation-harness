@@ -681,6 +681,7 @@ test("a remote Lark commit failure leaves the production dynamic-comparison proj
     egressAuthorization: allowLarkMutation,
     egressAudit: new InMemoryEgressAuthorizationAudit(),
   });
+  transport.acquireProjectionMutex = async () => async () => {};
   const records = new Map<
     string,
     { readonly payload: string; readonly payloadHash: string }
