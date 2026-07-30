@@ -971,40 +971,48 @@ async function persistedObservableEvents(
     await checkpointStore?.append(event);
     events.push(event);
   }
-  if (
-    execution.status === "terminal" &&
-    execution.submissionEvidence === "not_submitted"
-  ) {
-    const eventIndex = events.length + 1;
-    const evidenceId = opaqueEvidenceId({
-      attemptId: command.attemptId,
-      eventType: "query_not_submitted",
-      observedAt: execution.observedAt,
-      terminalReason: execution.terminalReason,
-    });
-    const terminalNotSubmitted = Object.freeze({
-      eventId: `${command.attemptId}-qwen-event-${eventIndex}`,
-      jobId: command.jobId,
-      caseId: command.evaluationCase.caseId,
-      runId: command.runId,
-      attemptId: command.attemptId,
-      attemptSeq: command.attemptSeq,
-      eventType: "query_not_submitted",
-      sourceAt: execution.observedAt,
-      observedAt: execution.observedAt,
-      writerId: QWEN_ADAPTER_VERSION,
-      evidenceRef: evidenceId,
-      sourceUrl: `urn:qwen-evidence:${evidenceId}`,
-      submissionEvidenceAtCheckpoint: "not_submitted" as const,
-      vendorTaskId: null,
-      taskStateVersion: `not_submitted@${eventIndex}`,
-      adapterVersion: QWEN_ADAPTER_VERSION,
-      artifactId: null,
-    });
-    await checkpointStore?.append(terminalNotSubmitted);
-    events.push(terminalNotSubmitted);
-  }
   return Object.freeze(events);
+}
+
+async function appendTerminalNotSubmittedEvent(
+  command: ProductRunCommand,
+  execution: QwenBrowserTerminalExecution,
+  checkpointStore: AttemptCheckpointPort | undefined,
+  events: readonly ObservableAttemptEvent[],
+): Promise<readonly ObservableAttemptEvent[]> {
+  if (
+    execution.submissionEvidence !== "not_submitted"
+  ) {
+    return events;
+  }
+  const eventIndex = events.length + 1;
+  const evidenceId = opaqueEvidenceId({
+    attemptId: command.attemptId,
+    eventType: "query_not_submitted",
+    observedAt: execution.observedAt,
+    terminalReason: execution.terminalReason,
+  });
+  const terminalNotSubmitted = Object.freeze({
+    eventId: `${command.attemptId}-qwen-event-${eventIndex}`,
+    jobId: command.jobId,
+    caseId: command.evaluationCase.caseId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    attemptSeq: command.attemptSeq,
+    eventType: "query_not_submitted",
+    sourceAt: execution.observedAt,
+    observedAt: execution.observedAt,
+    writerId: QWEN_ADAPTER_VERSION,
+    evidenceRef: evidenceId,
+    sourceUrl: `urn:qwen-evidence:${evidenceId}`,
+    submissionEvidenceAtCheckpoint: "not_submitted" as const,
+    vendorTaskId: null,
+    taskStateVersion: `not_submitted@${eventIndex}`,
+    adapterVersion: QWEN_ADAPTER_VERSION,
+    artifactId: null,
+  });
+  await checkpointStore?.append(terminalNotSubmitted);
+  return Object.freeze([...events, terminalNotSubmitted]);
 }
 
 function validateTerminalExecution(
@@ -1401,17 +1409,26 @@ function qwenExecutor(
       signal: command.signal,
     });
     assertSafeQwenReplayInput(execution);
-    if (execution.status === "terminal") {
-      validateTerminalExecution(execution);
-    } else {
-      assertSubmissionEvidenceMatchesMilestones(execution);
-    }
-    const observableEvents = await persistedObservableEvents(
+    const milestoneEvents = await persistedObservableEvents(
       command,
       execution,
       checkpointStore,
       productionValidation,
     );
+    if (execution.status === "terminal") {
+      validateTerminalExecution(execution);
+    } else {
+      assertSubmissionEvidenceMatchesMilestones(execution);
+    }
+    const observableEvents =
+      execution.status === "terminal"
+        ? await appendTerminalNotSubmittedEvent(
+            command,
+            execution,
+            checkpointStore,
+            milestoneEvents,
+          )
+        : milestoneEvents;
     const durableResultEvents =
       checkpointStore?.readAttempt === undefined
         ? observableEvents
