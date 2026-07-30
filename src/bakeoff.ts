@@ -2717,13 +2717,19 @@ export function createBakeoffHarness({
           context.jobId,
         );
         materializedReport = readback.primaryReport;
+        const committedReport = feishu
+          .snapshot()
+          .reports.find(
+            ({ reportId }) => reportId === report.reportId,
+          );
         if (
           materializedReport === null ||
+          committedReport === undefined ||
+          !isDeepStrictEqual(materializedReport, committedReport) ||
           readback.job.reportUrl !== materializedReport.url ||
           materializedReport.reportId !== report.reportId ||
           materializedReport.jobId !== report.jobId ||
           materializedReport.title !== report.title ||
-          materializedReport.markdown !== report.markdown ||
           materializedReport.claimLevel !== report.claimLevel ||
           !isDeepStrictEqual(
             materializedReport.runIds,
