@@ -1124,16 +1124,16 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       rawResultReference:
         "evidence/doubao-v30-final-recovery-cli-result.json",
       rawResultHash:
-        "sha256:REPLACE_AFTER_POST_FREEZE_REAL_CLI_RUN",
+        "sha256:3cde8133a7ee999d470c5f7380274ab563c1c25f52c110e4c8304bc6381c3967",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
       attestedResultSchemaVersion:
         "doubao-recovery-result-attestation-v1",
       attestedResultHash:
-        "sha256:REPLACE_AFTER_POST_FREEZE_REAL_CLI_RUN",
+        "sha256:2dd62b501ad029f1ef5def7c7e403957586789953dbe96b762a8890627ce825b",
       attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
     },
     resultHash:
-      "sha256:cb58b001e4eb7523e0bfe2b172e64bdf0b7cbd59943a543b57727a79f912358a",
+      "sha256:f29849ae9cbedbf46c057c4c2563c5abe888a16df0db4e68c0a80533fdfb69dd",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
