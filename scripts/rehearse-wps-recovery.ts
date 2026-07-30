@@ -253,6 +253,8 @@ const outcome = await createBakeoffHarness({
   productAdapter: new WpsAiPptReplayAdapter(),
   wpsAiPptBrowserDriver:
     createWpsAiPptRealProviderReplayPackage({
+      captureId:
+        "wps-real-provider-20260728-round5-resolution-final",
       sessions: [replayResult],
     }),
   egressAuthorization: authorization,

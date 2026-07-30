@@ -10,11 +10,14 @@ import {
   MockWpsProductAdapter,
   PRODUCTION_ENVIRONMENT_ORIGIN,
   VOLCANO_CASE_ID,
+  canonicalJsonBytes,
   createBakeoffHarness,
   createComparisonReportService,
   createHarnessOwnedLarkBaseProjection,
   createLarkReportCollectionMarkdown,
   createVerifiedLarkCliTransport,
+  requireEgressAuthorization,
+  sha256Bytes,
   type EgressAuthorizationAuditPort,
   type EgressAuthorizationPort,
   type FeishuProjectionPort,
@@ -28,7 +31,114 @@ function sha256(
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
+function materializeHttpsReportUrls(
+  snapshot: FeishuProjectionSnapshot,
+): FeishuProjectionSnapshot {
+  const reportUrls = new Map(
+    snapshot.reports.map((report) => [
+      report.url,
+      `https://example.test/docx/${report.reportId}`,
+    ]),
+  );
+  return {
+    ...snapshot,
+    runRecordTable: snapshot.runRecordTable.map((record) => ({
+      ...record,
+      reportUrl:
+        record.reportUrl === null
+          ? null
+          : (reportUrls.get(record.reportUrl) ?? record.reportUrl),
+      auxiliaryReportUrls:
+        record.auxiliaryReportUrls === null
+          ? null
+          : record.auxiliaryReportUrls.map(
+              (url) => reportUrls.get(url) ?? url,
+            ),
+    })),
+    reports: snapshot.reports.map((report) => ({
+      ...report,
+      url: reportUrls.get(report.url)!,
+    })),
+  };
+}
+
+class HttpsMaterializingProjection extends InMemoryFeishuProjection {
+  protected override async materializeAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+  ): Promise<FeishuProjectionSnapshot> {
+    return materializeHttpsReportUrls(snapshot);
+  }
+}
+
+class ResponseLossAfterMaterializationProjection extends
+  HttpsMaterializingProjection {
+  #loseNextResponse = false;
+
+  loseNextResponse(): void {
+    this.#loseNextResponse = true;
+  }
+
+  protected override async materializeAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+  ): Promise<FeishuProjectionSnapshot> {
+    const materialized =
+      await super.materializeAuthorizedSnapshot(snapshot);
+    if (this.#loseNextResponse) {
+      this.#loseNextResponse = false;
+      throw new Error("simulated response loss after remote commit");
+    }
+    return materialized;
+  }
+}
+
+async function authorizeSnapshot(
+  projection: FeishuProjectionPort,
+  snapshot: FeishuProjectionSnapshot,
+): Promise<Awaited<ReturnType<typeof requireEgressAuthorization>>> {
+  const job = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const evaluationCase = snapshot.caseTable[0];
+  assert.ok(job);
+  assert.ok(evaluationCase);
+  const payloadHash = sha256Bytes(canonicalJsonBytes(snapshot));
+  return requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId:
+        `operational-ledger-projection:${job.jobId}:${payloadHash}`,
+      jobId: job.jobId,
+      runId: null,
+      attemptId: null,
+      dataClassification: evaluationCase.dataClassification,
+      sourceOwner: evaluationCase.sourceOwner,
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: projection.egressDestination.targetService,
+      targetAccount: projection.egressDestination.targetAccount,
+      targetRegion: projection.egressDestination.targetRegion,
+      subprocessors: projection.egressDestination.subprocessors,
+      contentFields: [
+        "case_table",
+        "run_record_table",
+        "captured_artifact_table",
+        "artifact_score_table",
+        "adjudication_event_table",
+        "review_event_table",
+        "gap_card_workflow_event_table",
+        "github_issue_delivery_reservation_table",
+        "github_issue_link_event_table",
+        "comparison_and_product_gap_card_table",
+        "reports",
+      ],
+      payloadHash,
+      requiredRedactions: [],
+    },
+  );
+}
+
 const LARK_TEST_CONFIGURATION = {
+  concurrencyBoundary: "single_workstation_durable_mutex",
   baseTokenEnvironmentVariable: "PPT_EVAL_ATOMICITY_TEST_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_ATOMICITY_TEST_REPORT_DOC_TOKEN",
@@ -203,6 +313,148 @@ const dynamicPair = [
     rightRunId: "MOCK-run-doubao-volcano-v1",
   },
 ] as const;
+
+test("a successful materialized commit converges local Job report links and reports to the committed HTTPS snapshot", async () => {
+  const projection = new HttpsMaterializingProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const dynamic = await createComparisonReportService({
+    feishu: projection,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: dynamicPair,
+  });
+  const staged = projection.snapshot();
+
+  await projection.commitAuthorizedSnapshot(
+    staged,
+    await authorizeSnapshot(projection, staged),
+  );
+
+  const committed = projection.snapshot();
+  const expectedUrl =
+    `https://example.test/docx/${dynamic.report.reportId}`;
+  const job = committed.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  assert.deepEqual(job?.auxiliaryReportUrls, [expectedUrl]);
+  assert.equal(
+    committed.reports.find(
+      ({ reportId }) => reportId === dynamic.report.reportId,
+    )?.url,
+    expectedUrl,
+  );
+});
+
+test("the same dynamic pair is idempotent after its first report was materialized", async () => {
+  const projection = new HttpsMaterializingProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const service = createComparisonReportService({
+    feishu: projection,
+  });
+  const first = await service.createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: dynamicPair,
+  });
+  const staged = projection.snapshot();
+  await projection.commitAuthorizedSnapshot(
+    staged,
+    await authorizeSnapshot(projection, staged),
+  );
+
+  const replay = await service.createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: dynamicPair,
+  });
+
+  assert.equal(replay.report.reportId, first.report.reportId);
+  assert.equal(
+    replay.report.url,
+    `https://example.test/docx/${first.report.reportId}`,
+  );
+  assert.equal(
+    projection.snapshot().reports.filter(
+      ({ reportId }) => reportId === first.report.reportId,
+    ).length,
+    1,
+  );
+});
+
+test("a response-loss retry converges the local projection and preserves dynamic-pair idempotency", async () => {
+  const projection =
+    new ResponseLossAfterMaterializationProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const service = createComparisonReportService({
+    feishu: projection,
+  });
+  const first = await service.createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: dynamicPair,
+  });
+  const staged = projection.snapshot();
+  projection.loseNextResponse();
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      staged,
+      await authorizeSnapshot(projection, staged),
+    ),
+    /simulated response loss after remote commit/i,
+  );
+  await projection.commitAuthorizedSnapshot(
+    staged,
+    await authorizeSnapshot(projection, staged),
+  );
+  const replay = await service.createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: dynamicPair,
+  });
+
+  const expectedUrl =
+    `https://example.test/docx/${first.report.reportId}`;
+  assert.equal(replay.report.url, expectedUrl);
+  assert.deepEqual(
+    projection.snapshot().runRecordTable.find(
+      ({ recordType }) => recordType === "bakeoff_job",
+    )?.auxiliaryReportUrls,
+    [expectedUrl],
+  );
+  assert.equal(
+    projection.snapshot().reports.filter(
+      ({ reportId }) => reportId === first.report.reportId,
+    ).length,
+    1,
+  );
+});
 
 test("production dynamic comparison without persistence authorization leaves the local projection unchanged", async () => {
   const projection = await seededProductionProjection();

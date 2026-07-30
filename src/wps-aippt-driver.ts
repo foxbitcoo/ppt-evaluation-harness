@@ -83,8 +83,17 @@ export interface WpsAiPptBrowserDriverPort {
   readonly browserProfileDigest: typeof WPS_AIPPT_BROWSER_PROFILE_DIGEST;
   readonly implementationPackage: ProductAdapterImplementationPackage;
   readonly configurationPackage: ProductAdapterImplementationPackage;
+  readonly captureReceipt?: WpsAiPptReplayCaptureReceipt;
   readonly sessions: readonly WpsAiPptBrowserResult[];
   readonly reconciliations: readonly WpsAiPptTaskReconciliationEvidence[];
+}
+
+export interface WpsAiPptReplayCaptureReceipt {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly traceDigest: `sha256:${string}`;
+  readonly renderDigest: `sha256:${string}`;
+  readonly packageIdentityDigest: `sha256:${string}`;
 }
 
 export interface WpsAiPptTaskReconciliationQuery {
@@ -150,7 +159,42 @@ export function createWpsAiPptBrowserDriverPackage(input: {
   });
 }
 
+function wpsReplayPackageIdentityDigest(): `sha256:${string}` {
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify({
+        configurationDigest: configurationPackage().contentHash,
+        driverVersion: WPS_AIPPT_BROWSER_DRIVER_VERSION,
+        browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
+      }),
+    ),
+  );
+}
+
+const HARNESS_OWNED_WPS_CAPTURE_RECEIPTS = new Map<
+  string,
+  WpsAiPptReplayCaptureReceipt
+>([
+  [
+    "wps-real-provider-20260728-round5-resolution-final",
+    Object.freeze({
+      captureId:
+        "wps-real-provider-20260728-round5-resolution-final",
+      artifactContentHash:
+        "sha256:c87cf5bd16ee81ebd72bd2e1df9705e4336576d5f6976323de3925d886b54e86",
+      traceDigest:
+        "sha256:4476b77bca87f6487296fc091c524a20de6f5b021c9541572b1512d074771df0",
+      renderDigest:
+        "sha256:7585511f9d4f166a817e19c8d8b599888fef702a5b574b942a82d9b2cd6232e2",
+      packageIdentityDigest:
+        "sha256:3960d4ff788421be816b69925092236f659f8e3623190bab7772172ab65d5467",
+    }),
+  ],
+]);
+const harnessOwnedWpsReplayPackages = new WeakSet<object>();
+
 export function createWpsAiPptRealProviderReplayPackage(input: {
+  readonly captureId: string;
   readonly sessions: readonly WpsAiPptBrowserResult[];
   readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
 }): WpsAiPptBrowserDriverPort {
@@ -162,7 +206,47 @@ export function createWpsAiPptRealProviderReplayPackage(input: {
       "WPS replay ingest requires retained real-provider evidence",
     );
   }
-  return Object.freeze({
+  const receipt =
+    HARNESS_OWNED_WPS_CAPTURE_RECEIPTS.get(input.captureId);
+  if (receipt === undefined) {
+    throw new Error(
+      "WPS replay ingest requires a harness-owned capture receipt; the capture is unregistered",
+    );
+  }
+  if (
+    receipt.packageIdentityDigest !==
+    wpsReplayPackageIdentityDigest()
+  ) {
+    throw new Error(
+      "WPS harness-owned capture receipt package binding is invalid",
+    );
+  }
+  if (input.sessions.length !== 1) {
+    throw new Error(
+      "WPS harness-owned capture receipt requires exactly one retained session",
+    );
+  }
+  const retainedSession = input.sessions[0];
+  if (
+    retainedSession === undefined ||
+    retainedSession.outcome !== "captured" ||
+    sha256(retainedSession.artifact.content) !==
+      receipt.artifactContentHash
+  ) {
+    throw new Error(
+      "WPS Artifact does not match the harness-owned capture receipt",
+    );
+  }
+  if (
+    sha256(
+      textEncoder.encode(JSON.stringify(retainedSession.events)),
+    ) !== receipt.traceDigest
+  ) {
+    throw new Error(
+      "WPS trace does not match the harness-owned capture receipt",
+    );
+  }
+  const replayPackage = Object.freeze({
     driverId: "wps-aippt-real-provider-replay",
     provenance: "PRODUCTION_REPLAY",
     captureSource: "REAL_PROVIDER_CAPTURE",
@@ -170,6 +254,7 @@ export function createWpsAiPptRealProviderReplayPackage(input: {
     browserProfileDigest: WPS_AIPPT_BROWSER_PROFILE_DIGEST,
     implementationPackage: implementationPackage(),
     configurationPackage: configurationPackage(),
+    captureReceipt: receipt,
     sessions: Object.freeze(
       input.sessions.map((session) =>
         Object.freeze(cloneValue(session)),
@@ -181,6 +266,8 @@ export function createWpsAiPptRealProviderReplayPackage(input: {
       ),
     ),
   });
+  harnessOwnedWpsReplayPackages.add(replayPackage);
+  return replayPackage;
 }
 
 function assertPackage(
@@ -265,6 +352,18 @@ export function registeredWpsAiPptBrowserDriverEvidence(
       "Caller-supplied WPS browser driver identity is not an allowlisted TEST_FAKE fixture",
     );
   }
+  if (
+    driver.provenance === "PRODUCTION_REPLAY" &&
+    (!harnessOwnedWpsReplayPackages.has(driver) ||
+      driver.captureReceipt === undefined ||
+      HARNESS_OWNED_WPS_CAPTURE_RECEIPTS.get(
+        driver.captureReceipt.captureId,
+      ) !== driver.captureReceipt)
+  ) {
+    throw new Error(
+      "WPS production replay requires an immutable harness-owned capture receipt",
+    );
+  }
   return Object.freeze({
     driverId: driver.driverId,
     provenance: driver.provenance,
@@ -273,6 +372,9 @@ export function registeredWpsAiPptBrowserDriverEvidence(
     browserProfileDigest: driver.browserProfileDigest,
     implementationDigest: driver.implementationPackage.contentHash,
     configurationDigest: driver.configurationPackage.contentHash,
+    ...(driver.captureReceipt === undefined
+      ? {}
+      : { captureReceipt: driver.captureReceipt }),
   });
 }
 

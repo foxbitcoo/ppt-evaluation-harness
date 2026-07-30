@@ -41,6 +41,7 @@ import {
 
 const FIXED_TIME = "2020-01-01T00:00:00.000Z";
 const LARK_TEST_CONFIGURATION = {
+  concurrencyBoundary: "single_workstation_durable_mutex",
   baseTokenEnvironmentVariable: "PPT_EVAL_TEST_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_TEST_REPORT_DOC_TOKEN",
@@ -1152,17 +1153,8 @@ test("concurrent production creates converge one stable identity without leaving
   const payload = '{"caseId":"shared-case"}';
   const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
   const records = new Map<string, Record<string, unknown>>();
-  let initialSearchCount = 0;
   let createCount = 0;
   let deleteCount = 0;
-  let releaseInitialSearches!: () => void;
-  let releaseCreates!: () => void;
-  const initialSearches = new Promise<void>((resolve) => {
-    releaseInitialSearches = resolve;
-  });
-  const creates = new Promise<void>((resolve) => {
-    releaseCreates = resolve;
-  });
   const searchEnvelope = () => ({
     ok: true,
     data: {
@@ -1188,38 +1180,25 @@ test("concurrent production creates converge one stable identity without leaving
     async run(args) {
       const command = args[1] ?? "";
       if (command === "+record-search") {
-        initialSearchCount += 1;
-        if (initialSearchCount <= 2) {
-          if (initialSearchCount === 2) releaseInitialSearches();
-          await initialSearches;
-          return {
-            ok: true,
-            data: {
-              data: [],
-              field_id_list: ["fldStable", "fldPayload", "fldHash"],
-              fields: ["稳定ID", "载荷", "载荷哈希"],
-              has_more: false,
-              record_id_list: [],
-            },
-          };
-        }
         return searchEnvelope();
       }
       if (command === "+record-upsert") {
-        createCount += 1;
-        const recordId = `recRace${createCount}`;
+        const recordIdIndex = args.indexOf("--record-id");
+        const isUpdate = recordIdIndex !== -1;
+        if (!isUpdate) createCount += 1;
+        const recordId = isUpdate
+          ? args[recordIdIndex + 1]!
+          : `recRace${createCount}`;
         records.set(
           recordId,
           JSON.parse(
             args[args.indexOf("--json") + 1]!,
           ) as Record<string, unknown>,
         );
-        if (createCount === 2) releaseCreates();
-        await creates;
         return {
           ok: true,
           data: {
-            created: true,
+            ...(isUpdate ? { updated: true } : { created: true }),
             record: { record_id: recordId },
           },
         };
@@ -1271,12 +1250,178 @@ test("concurrent production creates converge one stable identity without leaving
     transport.upsertRecord(command),
   ]);
 
-  assert.equal(createCount, 2);
-  assert.ok(deleteCount >= 1);
+  assert.equal(createCount, 1);
+  assert.equal(deleteCount, 0);
   assert.deepEqual([...records.keys()], ["recRace1"]);
   assert.deepEqual(
     results.map(({ remoteRecordId }) => remoteRecordId),
     ["recRace1", "recRace1"],
+  );
+});
+
+test("a late concurrent stable-ID create cannot delete a record already returned to a caller", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_UPSERT_LATE_RACE_BASE_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basUpsertLateRaceToken";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+  });
+  const clock = {
+    clockId: "upsert-late-race-clock",
+    now: () => FIXED_TIME,
+  };
+  const audit = new InMemoryEgressAuthorizationAudit();
+  const payload = '{"caseId":"late-shared-case"}';
+  const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
+  let records: {
+    readonly recordId: string;
+    readonly fields: Record<string, unknown>;
+  }[] = [];
+  let releaseLateCreate!: () => void;
+  let markLateCreateEntered!: () => void;
+  const lateCreateRelease = new Promise<void>((resolve) => {
+    releaseLateCreate = resolve;
+  });
+  const lateCreateEntered = new Promise<void>((resolve) => {
+    markLateCreateEntered = resolve;
+  });
+  const searchEnvelope = () => ({
+    ok: true,
+    data: {
+      data: records.map(({ fields }) => [
+        fields["稳定ID"],
+        fields["载荷"],
+        fields["载荷哈希"],
+      ]),
+      field_id_list: ["fldStable", "fldPayload", "fldHash"],
+      fields: ["稳定ID", "载荷", "载荷哈希"],
+      has_more: false,
+      record_id_list: records.map(({ recordId }) => recordId),
+    },
+  });
+  const createTransport = (
+    caller: "early" | "late",
+    recordId: string,
+  ) =>
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: audit,
+      clock,
+      async run(args) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") return searchEnvelope();
+        if (command === "+record-upsert") {
+          const recordIdIndex = args.indexOf("--record-id");
+          if (caller === "late" && recordIdIndex === -1) {
+            markLateCreateEntered();
+            await lateCreateRelease;
+          }
+          const fields = JSON.parse(
+            args[args.indexOf("--json") + 1]!,
+          ) as Record<string, unknown>;
+          const updatedRecordId =
+            recordIdIndex === -1 ? recordId : args[recordIdIndex + 1]!;
+          const existingIndex = records.findIndex(
+            ({ recordId: candidate }) => candidate === updatedRecordId,
+          );
+          if (existingIndex === -1) {
+            records.push({ recordId: updatedRecordId, fields });
+          } else {
+            records[existingIndex] = {
+              recordId: updatedRecordId,
+              fields,
+            };
+          }
+          return {
+            ok: true,
+            data: {
+              ...(recordIdIndex === -1
+                ? { created: true }
+                : { updated: true }),
+              record: { record_id: updatedRecordId },
+            },
+          };
+        }
+        if (command === "+record-delete") {
+          const deleted = new Set<string>();
+          for (let index = 0; index < args.length; index += 1) {
+            if (args[index] === "--record-id") {
+              deleted.add(args[index + 1]!);
+            }
+          }
+          records = records.filter(
+            ({ recordId: candidate }) => !deleted.has(candidate),
+          );
+          return { ok: true, data: { deleted: true } };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "upsert-late-race-parent",
+      jobId: "job-upsert-late-race",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["case_table"],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  const command = {
+    tableKey: "cases" as const,
+    stableId: "case:late-shared-case",
+    payload,
+    payloadHash,
+    idempotencyKey: "case-late-shared-race",
+    authorization,
+  };
+  const late = createTransport("late", "recA");
+  const early = createTransport("early", "recZ");
+
+  const pendingLate = late.upsertRecord(command);
+  await lateCreateEntered;
+  let earlySettled = false;
+  const pendingEarly = early.upsertRecord(command).finally(() => {
+    earlySettled = true;
+  });
+  await new Promise<void>((resolveTurn) => {
+    setImmediate(resolveTurn);
+  });
+  assert.equal(
+    earlySettled,
+    false,
+    "the later caller must wait before it can return a transient record ID",
+  );
+  releaseLateCreate();
+  const [lateResult, earlyResult] = await Promise.all([
+    pendingLate,
+    pendingEarly,
+  ]);
+
+  assert.equal(earlyResult.remoteRecordId, "recA");
+  assert.equal(lateResult.remoteRecordId, "recA");
+  assert.deepEqual(
+    records.map(({ recordId }) => recordId),
+    ["recA"],
   );
 });
 
@@ -1836,21 +1981,12 @@ test("concurrent production Job claims have exactly one winner", async (context)
   });
   const clock = { clockId: "claim-race-clock", now: () => FIXED_TIME };
   const audit = new InMemoryEgressAuthorizationAudit();
-  let searchCount = 0;
   let createCount = 0;
   let updateCount = 0;
   let documentUpdateCount = 0;
   let storedFields: Record<string, unknown> | null = null;
   let reportRevision = 0;
   let reportContent = "";
-  let releaseOuterSearches!: () => void;
-  let releaseCreatedRecord!: () => void;
-  const outerSearches = new Promise<void>((resolve) => {
-    releaseOuterSearches = resolve;
-  });
-  const createdRecord = new Promise<void>((resolve) => {
-    releaseCreatedRecord = resolve;
-  });
   const emptySearch = () => ({
     ok: true,
     data: {
@@ -1935,15 +2071,7 @@ test("concurrent production Job claims have exactly one winner", async (context)
         };
       }
       if (service === "base" && command === "+record-search") {
-        searchCount += 1;
-        if (searchCount <= 2) {
-          if (searchCount === 2) releaseOuterSearches();
-          await outerSearches;
-          return emptySearch();
-        }
-        if (searchCount === 3) return emptySearch();
-        await createdRecord;
-        return populatedSearch();
+        return storedFields === null ? emptySearch() : populatedSearch();
       }
       if (service === "base" && command === "+record-upsert") {
         storedFields = JSON.parse(
@@ -1954,7 +2082,6 @@ test("concurrent production Job claims have exactly one winner", async (context)
           updateCount += 1;
         } else {
           createCount += 1;
-          releaseCreatedRecord();
         }
         return {
           ok: true,

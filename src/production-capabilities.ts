@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   lstatSync,
   mkdirSync,
@@ -18,7 +18,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { arch, platform, tmpdir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 
 import sharp from "sharp";
@@ -246,13 +246,135 @@ const FROZEN_RENDERER_BUNDLE_ROOTS = Object.freeze([
 ] as const);
 const FROZEN_RENDERER_BUNDLE_SHA256 =
   "sha256:4e5ea60511a1d9f11c5bbfd796f634c672d5ec6af23408a43e0a9b7a591d9fdc" as `sha256:${string}`;
-const FROZEN_RENDERER_EXECUTABLE_HASH = sha256(
-  JSON.stringify({
-    entrypointManifestHash:
-      FROZEN_RENDERER_ENTRYPOINT_MANIFEST_HASH,
-    bundleClosureHash: FROZEN_RENDERER_BUNDLE_SHA256,
-  }),
-);
+const SYSTEM_VERSION_MANIFEST =
+  "/System/Library/CoreServices/SystemVersion.plist";
+const SYSTEM_DYLD_EXECUTABLE = "/usr/lib/dyld";
+const SYSTEM_DYLD_CACHE_ROOT =
+  "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld";
+
+export interface RendererSystemRuntimeAttestation {
+  readonly platform: string;
+  readonly architecture: string;
+  readonly osBuildManifestHash: `sha256:${string}`;
+  readonly dyldExecutableCodeDirectoryHash: `sha256:${string}`;
+  readonly dyldSharedCacheCodeDirectoryHashes: readonly `sha256:${string}`[];
+  readonly systemRuntimeClosureHash: `sha256:${string}`;
+}
+
+function rendererSystemRuntimeAttestationDigest(
+  attestation: RendererSystemRuntimeAttestation,
+): `sha256:${string}` {
+  return sha256(
+    JSON.stringify({
+      schemaVersion: "renderer-system-runtime-attestation-v1",
+      platform: attestation.platform,
+      architecture: attestation.architecture,
+      osBuildManifestHash: attestation.osBuildManifestHash,
+      dyldExecutableCodeDirectoryHash:
+        attestation.dyldExecutableCodeDirectoryHash,
+      dyldSharedCacheCodeDirectoryHashes: [
+        ...attestation.dyldSharedCacheCodeDirectoryHashes,
+      ].sort(),
+      systemRuntimeClosureHash:
+        attestation.systemRuntimeClosureHash,
+    }),
+  );
+}
+
+export function rendererSystemRuntimeAttestationDigestForTest(
+  attestation: RendererSystemRuntimeAttestation,
+): `sha256:${string}` {
+  return rendererSystemRuntimeAttestationDigest(attestation);
+}
+
+function codeDirectoryHash(path: string): `sha256:${string}` {
+  const inspected = spawnSync(
+    "/usr/bin/codesign",
+    ["-dvvv", resolve(path)],
+    { encoding: "utf8" },
+  );
+  const output = `${inspected.stdout ?? ""}\n${inspected.stderr ?? ""}`;
+  const match =
+    /^CandidateCDHashFull sha256=([a-f0-9]{64})$/m.exec(output);
+  if (inspected.status !== 0 || match?.[1] === undefined) {
+    throw new Error(
+      `Frozen Artifact renderer cannot attest system code directory ${path}`,
+    );
+  }
+  return `sha256:${match[1]}`;
+}
+
+function currentRendererSystemRuntimeAttestation():
+  RendererSystemRuntimeAttestation {
+  if (platform() !== "darwin") {
+    throw new Error(
+      "Frozen Artifact renderer requires an attested macOS runtime",
+    );
+  }
+  const architecture = arch();
+  const cachePrefix =
+    architecture === "arm64"
+      ? "dyld_shared_cache_arm64e"
+      : `dyld_shared_cache_${architecture}`;
+  const cacheHashes = readdirSync(SYSTEM_DYLD_CACHE_ROOT)
+    .filter(
+      (name) =>
+        name === cachePrefix ||
+        (name.startsWith(`${cachePrefix}.`) &&
+          !name.endsWith(".map") &&
+          !name.endsWith(".atlas")),
+    )
+    .sort()
+    .map((name) =>
+      sha256(
+        JSON.stringify({
+          name,
+          byteSize: statSync(
+            join(SYSTEM_DYLD_CACHE_ROOT, name),
+          ).size,
+          codeDirectoryHash: codeDirectoryHash(
+            join(SYSTEM_DYLD_CACHE_ROOT, name),
+          ),
+        }),
+      ),
+    );
+  if (cacheHashes.length === 0) {
+    throw new Error(
+      "Frozen Artifact renderer cannot attest the dyld shared cache",
+    );
+  }
+  return Object.freeze({
+    platform: platform(),
+    architecture,
+    osBuildManifestHash: sha256(
+      Uint8Array.from(readFileSync(SYSTEM_VERSION_MANIFEST)),
+    ),
+    dyldExecutableCodeDirectoryHash:
+      codeDirectoryHash(SYSTEM_DYLD_EXECUTABLE),
+    dyldSharedCacheCodeDirectoryHashes:
+      Object.freeze(cacheHashes),
+    systemRuntimeClosureHash: sha256(
+      JSON.stringify({
+        dyldExecutableCodeDirectoryHash:
+          codeDirectoryHash(SYSTEM_DYLD_EXECUTABLE),
+        dyldSharedCacheCodeDirectoryHashes: cacheHashes,
+      }),
+    ),
+  });
+}
+
+function frozenRendererExecutableHash(
+  runtimeAttestationDigest: `sha256:${string}`,
+): `sha256:${string}` {
+  return sha256(
+    JSON.stringify({
+      entrypointManifestHash:
+        FROZEN_RENDERER_ENTRYPOINT_MANIFEST_HASH,
+      bundleClosureHash: FROZEN_RENDERER_BUNDLE_SHA256,
+      runtimeAttestationDigest,
+    }),
+  );
+}
 
 interface RendererBundleRoot {
   readonly label: string;
@@ -351,7 +473,27 @@ function frozenRendererSandboxProfile(input: {
     invocationRoot,
     FROZEN_LIBREOFFICE_ROOT,
     FROZEN_POPPLER_ROOT,
+    "/usr/lib",
+    "/System/Library/Frameworks",
+    "/System/Library/PrivateFrameworks",
+    "/System/Library/CoreServices",
+    "/System/Library/Fonts",
+    "/System/Library/ColorSync/Profiles",
+    "/Library/Fonts",
+    "/Library/ColorSync/Profiles",
+    SYSTEM_DYLD_CACHE_ROOT,
+    "/usr/share/locale",
     resolve(process.env.HOME ?? "/nonexistent-home", "Library/Fonts"),
+  ];
+  const runtimeDirectoryLiterals = [
+    "/",
+    "/System",
+    "/System/Volumes",
+    "/System/Volumes/Preboot",
+    "/System/Volumes/Preboot/Cryptexes",
+    "/System/Volumes/Preboot/Cryptexes/OS",
+    "/System/Volumes/Preboot/Cryptexes/OS/System",
+    "/System/Volumes/Preboot/Cryptexes/OS/System/Library",
   ];
   return [
     "(version 1)",
@@ -363,12 +505,12 @@ function frozenRendererSandboxProfile(input: {
     "(allow mach*)",
     "(allow ipc*)",
     `(allow process-exec ${processExecFilters.join(" ")})`,
-    "(allow file-read*)",
-    '(deny file-read* (subpath "/Users") (subpath "/Volumes") (subpath "/private/var/folders") (subpath "/private/tmp") (subpath "/tmp"))',
     "(allow file-read-metadata)",
     `(allow file-read* ${readableRoots
       .map((root) => `(subpath ${seatbeltLiteral(root)})`)
-      .join(" ")} (literal ${seatbeltLiteral(executablePath)}))`,
+      .join(" ")} ${runtimeDirectoryLiterals
+      .map((root) => `(literal ${seatbeltLiteral(root)})`)
+      .join(" ")} (literal ${seatbeltLiteral(executablePath)}) (literal "/dev/null") (literal "/dev/urandom") (literal "/dev/dtracehelper") (literal "/etc/localtime"))`,
     `(allow file-write* (subpath ${seatbeltLiteral(invocationRoot)}) (literal "/dev/null"))`,
   ].join(" ");
 }
@@ -415,6 +557,32 @@ async function readRegularFile(
   }
   return Uint8Array.from(await readFile(path));
 }
+
+interface NativeFrozenCaptureReceipt {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly nativeToolIdentity: string;
+  readonly pageContentHashes: readonly `sha256:${string}`[];
+  readonly surfaceContractDigest: `sha256:${string}`;
+}
+
+const HARNESS_OWNED_NATIVE_FROZEN_CAPTURE_RECEIPTS = new Map<
+  string,
+  NativeFrozenCaptureReceipt
+>();
+
+const NATIVE_FROZEN_SURFACE_CONTRACT = Object.freeze({
+  animationFramePolicy: "completion_state",
+  colorProfile: "sRGB",
+  cropPolicy: "native_completion_view",
+  resolution: "1920x1080",
+  schemaVersion: "native-frozen-render-evidence-v1",
+  surfaceClass: "native_frozen",
+  viewport: "1920x1080",
+});
+const NATIVE_FROZEN_SURFACE_CONTRACT_DIGEST = sha256(
+  JSON.stringify(NATIVE_FROZEN_SURFACE_CONTRACT),
+);
 
 async function verifyNativeFrozenEvidence(input: {
   readonly evidenceRoot: string | undefined;
@@ -494,8 +662,10 @@ async function verifyNativeFrozenEvidence(input: {
   const expectedKeys = [
     "animationFramePolicy",
     "artifactContentHash",
+    "captureId",
     "colorProfile",
     "cropPolicy",
+    "nativeToolIdentity",
     "resolution",
     "schemaVersion",
     "slides",
@@ -514,6 +684,12 @@ async function verifyNativeFrozenEvidence(input: {
     manifest.colorProfile !== "sRGB" ||
     manifest.cropPolicy !== "native_completion_view" ||
     manifest.animationFramePolicy !== "completion_state" ||
+    typeof manifest.captureId !== "string" ||
+    !/^[a-z0-9][a-z0-9._:-]{2,127}$/i.test(manifest.captureId) ||
+    typeof manifest.nativeToolIdentity !== "string" ||
+    !/^[a-z0-9][a-z0-9._:@/+-]{2,255}$/i.test(
+      manifest.nativeToolIdentity,
+    ) ||
     !Array.isArray(manifest.slides) ||
     manifest.slides.length !== input.slides.length
   ) {
@@ -521,6 +697,7 @@ async function verifyNativeFrozenEvidence(input: {
       "Native-frozen evidence manifest does not match the canonical render contract",
     );
   }
+  const pageContentHashes: `sha256:${string}`[] = [];
   for (const [index, canonical] of input.slides.entries()) {
     const candidate = manifest.slides[index];
     if (
@@ -569,6 +746,33 @@ async function verifyNativeFrozenEvidence(input: {
         "Native-frozen evidence content hash or visual surface does not match the canonical render",
       );
     }
+    pageContentHashes.push(contentHash);
+  }
+  const receipt =
+    HARNESS_OWNED_NATIVE_FROZEN_CAPTURE_RECEIPTS.get(
+      manifest.captureId,
+    );
+  if (receipt === undefined) {
+    return Object.freeze({
+      verified: false,
+      evidenceHash: null,
+    });
+  }
+  if (
+    receipt.artifactContentHash !== input.artifact.contentHash ||
+    receipt.nativeToolIdentity !== manifest.nativeToolIdentity ||
+    receipt.surfaceContractDigest !==
+      NATIVE_FROZEN_SURFACE_CONTRACT_DIGEST ||
+    receipt.pageContentHashes.length !==
+      pageContentHashes.length ||
+    receipt.pageContentHashes.some(
+      (contentHash, index) =>
+        contentHash !== pageContentHashes[index],
+    )
+  ) {
+    throw new Error(
+      "Native-frozen evidence does not match its harness-owned capture receipt",
+    );
   }
   return Object.freeze({
     verified: true,
@@ -858,10 +1062,21 @@ export function createHarnessOwnedProductionCapabilities(input: {
     lockId: input.profileLock.lockId,
     rootPath: input.profileLock.rootPath,
   });
-  const fixedRendererExecutable =
+  const fixedRendererRuntimeAttestation =
     input.renderer.fixedRenderer === undefined
       ? null
-      : (assertFrozenRendererTools(), FROZEN_RENDERER_EXECUTABLE_HASH);
+      : rendererSystemRuntimeAttestationDigest(
+          currentRendererSystemRuntimeAttestation(),
+        );
+  const fixedRendererExecutable =
+    fixedRendererRuntimeAttestation === null
+      ? null
+      : (
+          assertFrozenRendererTools(),
+          frozenRendererExecutableHash(
+            fixedRendererRuntimeAttestation,
+          )
+        );
   let nativeFrozenEvidenceRoot: string | undefined;
   if (input.renderer.nativeFrozenEvidenceDirectory !== undefined) {
     mkdirSync(
@@ -963,6 +1178,15 @@ export function createHarnessOwnedProductionCapabilities(input: {
       );
       try {
         assertFrozenRendererTools();
+        if (
+          rendererSystemRuntimeAttestationDigest(
+            currentRendererSystemRuntimeAttestation(),
+          ) !== fixedRendererRuntimeAttestation
+        ) {
+          throw new Error(
+            "Frozen Artifact renderer system runtime attestation drifted after capability creation",
+          );
+        }
         const inputPath = join(invocationRoot, "source.pptx");
         const outputPath = join(invocationRoot, "output");
         const profilePath = join(invocationRoot, "libreoffice-profile");

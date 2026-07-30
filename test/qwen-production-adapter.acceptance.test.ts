@@ -96,6 +96,7 @@ test("Qwen retained captures are declared as PRODUCTION_REPLAY rather than LIVE_
 
 test("Qwen replay driver identity is frozen for Run Specification lineage", () => {
   const replayDriver = createQwenRealProviderReplayPackage({
+    captureId: "unregistered-qwen-test-capture",
     sessions: [],
     reconciliations: [
       {
@@ -688,6 +689,7 @@ test("a restarted Qwen replay reuses its durable reconciliation result idempoten
     new TextEncoder().encode(JSON.stringify([checkpoint])),
   );
   const replayDriver = createQwenRealProviderReplayPackage({
+    captureId: "unregistered-qwen-test-capture",
     sessions: [],
     reconciliations: [
       {
@@ -761,6 +763,7 @@ test("Qwen replay rejects unknown final evidence after a durable submission chec
     ),
     {
       qwenBrowserDriver: createQwenRealProviderReplayPackage({
+        captureId: "unregistered-qwen-test-capture",
         sessions: [
           {
             status: "terminal",
@@ -819,6 +822,7 @@ test("Qwen replay treats generation-ready evidence as submitted and rejects an u
     ),
     {
       qwenBrowserDriver: createQwenRealProviderReplayPackage({
+        captureId: "unregistered-qwen-test-capture",
         sessions: [
           {
             status: "terminal",
@@ -948,6 +952,7 @@ test("Qwen replay rejects unsafe structured evidence before persisting any check
         ),
         {
           qwenBrowserDriver: createQwenRealProviderReplayPackage({
+            captureId: "unregistered-qwen-test-capture",
             sessions: [
               execution as unknown as QwenBrowserExecution,
             ],
@@ -994,6 +999,7 @@ test("Qwen configuration evidence cannot be borrowed from a submission milestone
       ),
       {
         qwenBrowserDriver: createQwenRealProviderReplayPackage({
+          captureId: "unregistered-qwen-test-capture",
           sessions: [replaySession],
         }),
         attemptCheckpointStore: new InMemoryAttemptCheckpointStore(
@@ -1031,6 +1037,7 @@ test("a retained Qwen capture produces PRODUCTION_REPLAY Artifact and bound opaq
     ),
     {
       qwenBrowserDriver: createQwenRealProviderReplayPackage({
+        captureId: "unregistered-qwen-test-capture",
         sessions: [replaySession],
       }),
       attemptCheckpointStore: checkpointStore,

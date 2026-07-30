@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
+  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +26,8 @@ import {
   type CodexCliJudgeTransportPort,
 } from "../src/index.ts";
 import {
+  createCodexCliJudgeExecutableVerifierForTest,
+  readBoundedCodexCliJudgeResultForTest,
   runCodexCliJudgeProcessForTest,
 } from "../src/codex-cli-judge.ts";
 
@@ -34,6 +39,10 @@ const DIMENSIONS = [
   "layout_hierarchy_and_readability",
   "imagery_chart_and_information_expression",
 ] as const;
+
+function sha256Text(value: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
 
 test("the production Codex CLI Judge binary remains byte-for-byte pinned to the reviewed executable", async () => {
   const [content, sandbox] = await Promise.all([
@@ -48,6 +57,72 @@ test("the production Codex CLI Judge binary remains byte-for-byte pinned to the 
     `sha256:${createHash("sha256").update(sandbox).digest("hex")}`,
     FROZEN_SANDBOX_EXEC_SHA256,
   );
+});
+
+test("Codex CLI Judge rejects binary drift after verifier construction before creating an executable snapshot", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-codex-executable-drift-test-"),
+  );
+  try {
+    const binaryPath = join(directory, "codex");
+    const sandboxBinaryPath = join(directory, "sandbox-exec");
+    const invocationRoot = join(directory, "invocation");
+    await Promise.all([
+      writeFile(binaryPath, "reviewed-codex", { mode: 0o700 }),
+      writeFile(sandboxBinaryPath, "reviewed-sandbox", {
+        mode: 0o700,
+      }),
+      mkdir(invocationRoot, { mode: 0o700 }),
+    ]);
+    const verifier = createCodexCliJudgeExecutableVerifierForTest({
+      binaryPath,
+      binaryHash: sha256Text("reviewed-codex"),
+      sandboxBinaryPath,
+      sandboxBinaryHash: sha256Text("reviewed-sandbox"),
+    });
+    await writeFile(binaryPath, "drifted-codex");
+
+    await assert.rejects(
+      verifier.snapshotInto(invocationRoot),
+      /Codex CLI executable identity drifted before spawn/i,
+    );
+    assert.deepEqual(await readdir(invocationRoot), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex CLI Judge rejects sandbox binary drift after verifier construction", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-sandbox-executable-drift-test-"),
+  );
+  try {
+    const binaryPath = join(directory, "codex");
+    const sandboxBinaryPath = join(directory, "sandbox-exec");
+    const invocationRoot = join(directory, "invocation");
+    await Promise.all([
+      writeFile(binaryPath, "reviewed-codex", { mode: 0o700 }),
+      writeFile(sandboxBinaryPath, "reviewed-sandbox", {
+        mode: 0o700,
+      }),
+      mkdir(invocationRoot, { mode: 0o700 }),
+    ]);
+    const verifier = createCodexCliJudgeExecutableVerifierForTest({
+      binaryPath,
+      binaryHash: sha256Text("reviewed-codex"),
+      sandboxBinaryPath,
+      sandboxBinaryHash: sha256Text("reviewed-sandbox"),
+    });
+    await writeFile(sandboxBinaryPath, "drifted-sandbox");
+
+    await assert.rejects(
+      verifier.snapshotInto(invocationRoot),
+      /Codex CLI executable identity drifted before spawn/i,
+    );
+    assert.deepEqual(await readdir(invocationRoot), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Codex CLI Judge transcript permits only one data-only agent message and rejects shell, MCP, or file-read items", () => {
@@ -355,6 +430,65 @@ const TEST_PROCESS_LIMITS = Object.freeze({
   terminationGraceMs: 50,
 });
 
+test("Codex CLI Judge executes a verified private Codex snapshot through the protected system sandbox binary", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-codex-executable-snapshot-test-"),
+  );
+  try {
+    const verifier = createCodexCliJudgeExecutableVerifierForTest({
+      binaryPath: FROZEN_CODEX_CLI_BINARY,
+      binaryHash: FROZEN_CODEX_CLI_SHA256,
+      sandboxBinaryPath: FROZEN_SANDBOX_EXEC_BINARY,
+      sandboxBinaryHash: FROZEN_SANDBOX_EXEC_SHA256,
+      requireProtectedSandboxPath: true,
+    });
+    const snapshot = await verifier.snapshotInto(directory);
+    assert.notEqual(snapshot.binaryPath, FROZEN_CODEX_CLI_BINARY);
+    assert.equal(
+      snapshot.sandboxBinaryPath,
+      FROZEN_SANDBOX_EXEC_BINARY,
+    );
+
+    const result = await runCodexCliJudgeProcessForTest({
+      executable: snapshot.sandboxBinaryPath,
+      args: [
+        "-p",
+        "(version 1) (allow default)",
+        snapshot.binaryPath,
+        "--version",
+      ],
+      stdin: null,
+      cwd: directory,
+      env: { PATH: "/usr/bin:/bin" },
+      deadlineMs: 5_000,
+      stdoutByteLimit: 4_096,
+      stderrByteLimit: 4_096,
+      terminationGraceMs: 250,
+    });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /^codex-cli /);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Codex CLI Judge rejects result.json by raw bytes without reading an unbounded result", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-codex-result-limit-test-"),
+  );
+  try {
+    const resultPath = join(directory, "result.json");
+    await writeFile(resultPath, Buffer.alloc(1_025, 0x61));
+
+    await assert.rejects(
+      readBoundedCodexCliJudgeResultForTest(resultPath, 1_024),
+      /result\.json exceeded byte limit/i,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Codex CLI Judge enforces a hard subprocess deadline and waits for termination", async () => {
   const startedAt = Date.now();
   await assert.rejects(
@@ -437,7 +571,7 @@ test("Codex CLI Judge preserves bounded UTF-8 JSONL output exactly", async () =>
   assert.equal(result.stderr, "diagnostic");
 });
 
-test("Codex CLI Judge terminates the entire process group before returning a limit error", async () => {
+test("Codex CLI Judge confirms a TERM-ignoring descendant is gone before returning a limit error", async () => {
   const directory = await mkdtemp(
     join(tmpdir(), "ppt-codex-process-group-test-"),
   );
@@ -449,8 +583,7 @@ test("Codex CLI Judge terminates the entire process group before returning a lim
       'const fs = require("node:fs");',
       `const stoppedPath = ${JSON.stringify(stoppedPath)};`,
       "process.on('SIGTERM', () => {",
-      "  fs.writeFileSync(stoppedPath, 'stopped');",
-      "  process.exit(0);",
+      "  fs.writeFileSync(stoppedPath, 'ignored-term');",
       "});",
       "setInterval(() => {}, 1000);",
     ].join("\n");
@@ -478,7 +611,7 @@ test("Codex CLI Judge terminates the entire process group before returning a lim
     );
 
     grandchildPid = Number(await readFile(pidPath, "utf8"));
-    assert.equal(await readFile(stoppedPath, "utf8"), "stopped");
+    assert.equal(await readFile(stoppedPath, "utf8"), "ignored-term");
     assert.throws(
       () => process.kill(grandchildPid!, 0),
       (error: unknown) =>

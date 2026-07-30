@@ -194,11 +194,20 @@ export interface QwenBrowserDriverPort {
   readonly browserProfileDigest?: typeof QWEN_BROWSER_PROFILE_DIGEST;
   readonly implementationPackage?: ProductAdapterImplementationPackage;
   readonly configurationPackage?: ProductAdapterImplementationPackage;
+  readonly captureReceipt?: QwenReplayCaptureReceipt;
   readonly sessions?: readonly QwenBrowserExecution[];
   readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
   execute(
     command: QwenBrowserExecutionCommand,
   ): Promise<QwenBrowserExecution>;
+}
+
+export interface QwenReplayCaptureReceipt {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}` | null;
+  readonly traceDigest: `sha256:${string}`;
+  readonly renderDigest: `sha256:${string}` | null;
+  readonly packageIdentityDigest: `sha256:${string}`;
 }
 
 export interface QwenTaskReconciliationQuery {
@@ -316,6 +325,68 @@ export interface QwenBrowserDriverEvidence
     | "REAL_PROVIDER_CAPTURE";
   readonly driverVersion: typeof QWEN_BROWSER_DRIVER_VERSION;
   readonly browserProfileDigest: typeof QWEN_BROWSER_PROFILE_DIGEST;
+  readonly captureReceipt?: QwenReplayCaptureReceipt;
+}
+
+const HARNESS_OWNED_QWEN_CAPTURE_RECEIPTS = new Map<
+  string,
+  QwenReplayCaptureReceipt
+>();
+const harnessOwnedQwenReplayPackages = new WeakSet<object>();
+
+function qwenReplayPackageIdentityDigest(): `sha256:${string}` {
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify({
+        configurationDigest:
+          qwenDriverConfigurationPackage().contentHash,
+        driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+        browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
+      }),
+    ),
+  );
+}
+
+function qwenReplayTraceDigest(input: {
+  readonly sessions: readonly QwenBrowserExecution[];
+  readonly reconciliations: readonly QwenTaskReconciliationEvidence[];
+}): `sha256:${string}` {
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify({
+        sessionTraces: input.sessions.map((session) =>
+          session.status === "completed"
+            ? session.milestones
+            : {
+                milestones: session.milestones,
+                observedAt: session.observedAt,
+                terminalReason: session.terminalReason,
+              },
+        ),
+        reconciliations: input.reconciliations,
+      }),
+    ),
+  );
+}
+
+function qwenReplayRenderDigest(
+  session: QwenBrowserExecution,
+): `sha256:${string}` | null {
+  if (session.status !== "completed") return null;
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify(
+        session.staticRenders.map(
+          ({ pageNumber, filename, mimeType, contentHash }) => ({
+            pageNumber,
+            filename,
+            mimeType,
+            contentHash,
+          }),
+        ),
+      ),
+    ),
+  );
 }
 
 const HARNESS_OWNED_QWEN_DRIVER_EVIDENCE:
@@ -360,6 +431,17 @@ export function registeredQwenBrowserDriverEvidence(
       "Production registry requires an allowlisted Qwen browser driver package",
     );
   }
+  if (
+    !harnessOwnedQwenReplayPackages.has(driver) ||
+    driver.captureReceipt === undefined ||
+    HARNESS_OWNED_QWEN_CAPTURE_RECEIPTS.get(
+      driver.captureReceipt.captureId,
+    ) !== driver.captureReceipt
+  ) {
+    throw new Error(
+      "Qwen production replay requires an immutable harness-owned capture receipt",
+    );
+  }
   return Object.freeze({
     driverId: driver.driverId,
     provenance: driver.runtimeProvenance,
@@ -370,6 +452,7 @@ export function registeredQwenBrowserDriverEvidence(
       qwenDriverImplementationPackage().contentHash,
     configurationDigest:
       qwenDriverConfigurationPackage().contentHash,
+    captureReceipt: driver.captureReceipt,
   });
 }
 
@@ -412,6 +495,7 @@ function registeredProductionQwenDriver(
 }
 
 export function createQwenRealProviderReplayPackage(input: {
+  readonly captureId: string;
   readonly sessions: readonly QwenBrowserExecution[];
   readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
 }): QwenBrowserDriverPort {
@@ -423,12 +507,58 @@ export function createQwenRealProviderReplayPackage(input: {
       "Qwen replay ingest requires retained real-provider evidence",
     );
   }
+  const receipt =
+    HARNESS_OWNED_QWEN_CAPTURE_RECEIPTS.get(input.captureId);
+  if (receipt === undefined) {
+    throw new Error(
+      "Qwen replay ingest requires a harness-owned capture receipt; the capture is unregistered",
+    );
+  }
+  const reconciliations = input.reconciliations ?? [];
+  if (
+    receipt.packageIdentityDigest !==
+    qwenReplayPackageIdentityDigest()
+  ) {
+    throw new Error(
+      "Qwen harness-owned capture receipt package binding is invalid",
+    );
+  }
+  if (
+    qwenReplayTraceDigest({
+      sessions: input.sessions,
+      reconciliations,
+    }) !== receipt.traceDigest
+  ) {
+    throw new Error(
+      "Qwen trace does not match the harness-owned capture receipt",
+    );
+  }
+  const completedSessions = input.sessions.filter(
+    (
+      session,
+    ): session is QwenBrowserCompletedExecution =>
+      session.status === "completed",
+  );
+  if (
+    completedSessions.length > 1 ||
+    (completedSessions[0] === undefined
+      ? receipt.artifactContentHash !== null ||
+        receipt.renderDigest !== null
+      : sha256(completedSessions[0].download.content) !==
+          receipt.artifactContentHash ||
+        qwenReplayRenderDigest(completedSessions[0]) !==
+          receipt.renderDigest)
+  ) {
+    throw new Error(
+      "Qwen Artifact or Render does not match the harness-owned capture receipt",
+    );
+  }
   const sessions = Object.freeze(
     input.sessions.map((session) =>
       Object.freeze(structuredClone(session)),
     ),
   );
-  return Object.freeze({
+  const replayPackage = Object.freeze({
     driverId: "qwen-real-provider-replay",
     runtimeProvenance: "PRODUCTION_REPLAY",
     captureSource: "REAL_PROVIDER_CAPTURE",
@@ -436,9 +566,10 @@ export function createQwenRealProviderReplayPackage(input: {
     browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
     implementationPackage: qwenDriverImplementationPackage(),
     configurationPackage: qwenDriverConfigurationPackage(),
+    captureReceipt: receipt,
     sessions,
     reconciliations: Object.freeze(
-      (input.reconciliations ?? []).map((entry) =>
+      reconciliations.map((entry) =>
         Object.freeze(structuredClone(entry)),
       ),
     ),
@@ -448,6 +579,8 @@ export function createQwenRealProviderReplayPackage(input: {
       );
     },
   });
+  harnessOwnedQwenReplayPackages.add(replayPackage);
+  return replayPackage;
 }
 
 function reconcileRegisteredQwenTask(

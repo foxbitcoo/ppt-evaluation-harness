@@ -32,6 +32,14 @@ payload. Recovery, attachment readback, replay, and marker lookup use the same
 physical identity. A single-table acceptance fake retains all entity kinds
 simultaneously and proves replay does not add duplicates.
 
+Production Base mutation is deliberately limited to one workstation. A
+durable cross-process mutex covers each stable-ID search, create, and readback;
+an already-corrupt duplicate set fails closed and is never “repaired” by
+deleting a record another process may already use. The same boundary covers a
+complete Job projection from marker read through Docx CAS, Base rows and
+attachments, and the final marker. This does not claim distributed multi-host
+transaction safety.
+
 This proves schema availability only. No real evaluation record, page
 evidence record, or commit marker has yet been accepted as a production run.
 
@@ -46,6 +54,10 @@ The previously pre-provisioned report document is:
 The current configuration exposes one Docx token, so the transport treats that
 token as a single-Job slot. The first production claim atomically binds an
 empty document to one Job with an exact remote revision compare-and-swap.
+The claim payload and document owner use a versioned claim-v3 state machine
+with an execution lease, process identity, and monotonic epoch. A live lease
+cannot yield a second winner; after a dead local owner is observed, one new
+lease can take over under the durable Job mutex and increments the epoch.
 After that binding, production writes the document once per projection
 revision as a complete report collection: one Chinese H1, then the primary
 report and every current auxiliary A/B report as independently identified
@@ -104,7 +116,12 @@ report, but retained captures still require hash-verified Artifact storage.
 Production validates every selected adapter's execution mode against its
 Product Package provenance before durable claims, provider execution, or any
 egress authorization is used. `PRODUCTION_REPLAY` remains eligible only through
-its registered, hash-verified replay package. For `LIVE_PRODUCTION`, the
+its harness-owned immutable capture receipt and registered, hash-verified
+replay package. The WPS receipt allowlist binds the known retained Artifact,
+Trace, render, and package identity. Qwen currently has no complete captured
+PPTX receipt, so its retained partial attempt cannot become a production
+replay Artifact. Caller-provided sessions and Mock bytes cannot mint either
+receipt. For `LIVE_PRODUCTION`, the
 selected harness-owned executable or bridge must already be embedded and pass
 its fixed-file/hash readiness check.
 
@@ -159,19 +176,22 @@ Entrypoint hashes alone are insufficient. Renderer startup and every render
 recompute the deterministic dependency-closure digest over the complete frozen
 LibreOffice and Poppler roots, system/local/user fonts, and system/local color
 profiles, including directory and file modes, file contents, and symlink
-targets. The currently reviewed closure digest is
-`sha256:4e5ea60511a1d9f11c5bbfd796f634c672d5ec6af23408a43e0a9b7a591d9fdc`;
-any dylib, plugin, configuration, font, color profile, mode, or symlink drift
-fails closed.
+targets. Renderer identity also binds the macOS build, `/usr/lib/dyld` code
+directory, architecture-specific dyld shared-cache identities, and the system
+runtime closure. Any dylib, plugin, configuration, font, color profile, OS
+runtime, mode, or symlink drift fails closed.
 
 Canonical 16-page, 1920x1080, sRGB raster structure is necessary but not enough
-for visual fidelity. A `faithful` render additionally requires strict
-native-frozen evidence at
+for visual fidelity. A `faithful` render additionally requires a
+harness-owned, pre-registered native capture receipt plus strict native-frozen
+evidence at
 `<private-evidence-root>/<artifact-sha256-without-prefix>/manifest.json` plus
-the 16 ordered PNGs. The manifest is bound to the exact Artifact hash, native
-surface class, viewport/resolution, crop and completion-frame policies, and
-each PNG hash. Every native PNG must be a regular non-symlink 1920x1080 file
-whose bytes are identical to its canonical renderer page. Missing evidence
+the 16 ordered PNGs. The receipt and manifest bind the exact Artifact hash,
+native capture-tool identity, native surface class, viewport/resolution, crop
+and completion-frame policies, and each PNG hash. Every native PNG must be a
+regular non-symlink 1920x1080 file whose bytes are identical to its canonical
+renderer page. Copying canonical PNGs into a caller-selected directory cannot
+register a receipt. Missing evidence
 always yields `degraded` and prohibits Judge visual scoring; malformed,
 misbound, or tampered evidence fails closed rather than degrading silently.
 
@@ -187,6 +207,11 @@ Every Judge subprocess also has a hard ten-minute deadline and independent
 raw-byte caps of 16 MiB for stdout and 1 MiB for stderr. Exceeding the deadline
 or either cap terminates the whole subprocess group, waits for termination,
 and returns a bounded failure without persisting the overflowing output.
+The `result.json` channel has its own 1 MiB raw-byte limit. Codex and
+`sandbox-exec` identities are revalidated at every execution boundary; Codex
+runs from the private, read-only verified snapshot, and a limit error is not
+returned until the process group is confirmed absent within the cleanup
+deadline.
 
 The local attestation is implementation evidence. A successful real Judge call
 and persisted non-Mock score lineage are still required for production

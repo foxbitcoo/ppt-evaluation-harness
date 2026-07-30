@@ -481,6 +481,7 @@ test("retained real-provider capture is ingested only as PRODUCTION_REPLAY", asy
     {
       wpsAiPptBrowserDriver:
         createWpsAiPptRealProviderReplayPackage({
+          captureId: "unregistered-wps-test-capture",
           sessions: [replayResult],
         }),
     },
@@ -534,6 +535,7 @@ test("production rejects default in-memory recovery dependencies before driver e
         productAdapter: new WpsAiPptReplayAdapter(),
         wpsAiPptBrowserDriver:
           createWpsAiPptRealProviderReplayPackage({
+            captureId: "unregistered-wps-test-capture",
             sessions: [capturedBrowserResult(pptx)],
           }),
         egressAuthorization: {
@@ -614,6 +616,7 @@ test("production rejects caller objects that merely self-report durable and isol
         productAdapter: new WpsAiPptReplayAdapter(),
         wpsAiPptBrowserDriver:
           createWpsAiPptRealProviderReplayPackage({
+            captureId: "unregistered-wps-test-capture",
             sessions: [capturedBrowserResult(pptx)],
           }),
         artifactVault,
@@ -2021,6 +2024,7 @@ test("public production replay passes only its explicit REAL_PROVIDER_CAPTURE pa
         productAdapter: new WpsAiPptReplayAdapter(),
         wpsAiPptBrowserDriver:
           createWpsAiPptRealProviderReplayPackage({
+            captureId: "unregistered-wps-test-capture",
             sessions: [capturedBrowserResult(pptx)],
           }),
       }).startBakeoffJob({
@@ -2573,6 +2577,7 @@ test("a submitted retained replay checkpoint is durably reconciled without a liv
         attemptCheckpointStore: checkpoints,
         wpsAiPptBrowserDriver:
           createWpsAiPptRealProviderReplayPackage({
+            captureId: "unregistered-wps-test-capture",
             sessions: [
               {
                 outcome: "task_state_unknown",
@@ -2663,6 +2668,7 @@ test("a restarted production Attempt reads durable stateVersion checkpoints and 
         attemptCheckpointStore: checkpoints,
         wpsAiPptBrowserDriver:
           createWpsAiPptRealProviderReplayPackage({
+            captureId: "unregistered-wps-test-capture",
             sessions: [],
             reconciliations: [
               {

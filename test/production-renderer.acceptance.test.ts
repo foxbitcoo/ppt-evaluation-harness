@@ -22,6 +22,7 @@ import {
   FROZEN_ARTIFACT_RENDERER_ID,
   frozenRendererSandboxProfileForTest,
   rendererBundleClosureDigestForTest,
+  rendererSystemRuntimeAttestationDigestForTest,
   createHarnessOwnedProductionCapabilities,
 } from "../src/production-capabilities.ts";
 import {
@@ -180,7 +181,9 @@ async function writeNativeFrozenEvidence(
     join(evidenceDirectory, "manifest.json"),
     JSON.stringify({
       schemaVersion: "native-frozen-render-evidence-v1",
+      captureId: "caller-created-native-capture",
       artifactContentHash: source.contentHash,
+      nativeToolIdentity: "caller-claimed-native-tool@1",
       surfaceClass: "native_frozen",
       viewport: "1920x1080",
       resolution: "1920x1080",
@@ -213,6 +216,8 @@ test("the frozen renderer sandbox denies repository and ~/.codex reads plus non-
     for (const forbidden of [
       resolve("package.json"),
       join(homedir(), ".codex", "AGENTS.md"),
+      "/etc/hosts",
+      "/Library/Preferences/com.apple.SoftwareUpdate.plist",
     ]) {
       const attempt = spawnSync(
         "/usr/bin/sandbox-exec",
@@ -253,6 +258,51 @@ test("the frozen renderer identity changes when a loaded bundle dependency drift
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the renderer runtime identity changes when the OS build or dyld shared cache drifts", () => {
+  const baseline = rendererSystemRuntimeAttestationDigestForTest({
+    platform: "darwin",
+    architecture: "arm64",
+    osBuildManifestHash:
+      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    dyldExecutableCodeDirectoryHash:
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    dyldSharedCacheCodeDirectoryHashes: [
+      "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    ],
+    systemRuntimeClosureHash:
+      "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  });
+  const osDrift = rendererSystemRuntimeAttestationDigestForTest({
+    platform: "darwin",
+    architecture: "arm64",
+    osBuildManifestHash:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    dyldExecutableCodeDirectoryHash:
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    dyldSharedCacheCodeDirectoryHashes: [
+      "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    ],
+    systemRuntimeClosureHash:
+      "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  });
+  const dyldDrift = rendererSystemRuntimeAttestationDigestForTest({
+    platform: "darwin",
+    architecture: "arm64",
+    osBuildManifestHash:
+      "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    dyldExecutableCodeDirectoryHash:
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    dyldSharedCacheCodeDirectoryHashes: [
+      "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ],
+    systemRuntimeClosureHash:
+      "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  });
+
+  assert.notEqual(osDrift, baseline);
+  assert.notEqual(dyldDrift, baseline);
 });
 
 test("legacy pre-rendered slides are degraded and are isolated by Artifact content hash", async () => {
@@ -341,7 +391,7 @@ test("LibreOffice structural checks remain degraded without content-addressed na
   }
 });
 
-test("byte-identical content-addressed native-frozen evidence upgrades the canonical render to faithful", async () => {
+test("caller-copied content-addressed native-frozen evidence cannot upgrade the canonical render to faithful", async () => {
   const root = await mkdtemp(join(tmpdir(), "production-renderer-native-"));
   try {
     const evidenceRoot = join(root, "native-evidence");
@@ -376,12 +426,8 @@ test("byte-identical content-addressed native-frozen evidence upgrades the canon
       authorizationDecisionId: "renderer-approved",
     });
 
-    assert.equal(verified.renderOutcome, "faithful");
-    assert.equal(verified.fidelity.status, "verified");
-    assert.match(
-      verified.fidelity.notes.join("\n"),
-      /native-frozen.*sha256:[a-f0-9]{64}/i,
-    );
+    assert.equal(verified.renderOutcome, "degraded");
+    assert.equal(verified.fidelity.status, "degraded");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

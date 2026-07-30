@@ -76,6 +76,11 @@ function stableRunReplayPayload(record: RunRecord): unknown {
   return stable;
 }
 
+function stableReportReplayPayload(report: FeishuReport): unknown {
+  const { url: _url, ...stable } = report;
+  return stable;
+}
+
 function cloneWithEnvironmentOrigin<
   T extends { readonly environmentOrigin: EnvironmentOrigin },
 >(record: T): T {
@@ -909,7 +914,12 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       (candidate) => candidate.reportId === report.reportId,
     );
     if (existing !== undefined) {
-      if (!isDeepStrictEqual(existing, report)) {
+      if (
+        !isDeepStrictEqual(
+          stableReportReplayPayload(existing),
+          stableReportReplayPayload(report),
+        )
+      ) {
         throw new Error(`Report identity conflict: ${report.reportId}`);
       }
       return structuredClone(existing);
@@ -1249,7 +1259,29 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         const materializedReportIds = new Set(
           materializedSnapshot.reports.map(({ reportId }) => reportId),
         );
+        const materializedRunRecordIds = new Set(
+          materializedSnapshot.runRecordTable.map(
+            ({ recordId }) => recordId,
+          ),
+        );
         const currentBeforeMaterialization = working.snapshot();
+        for (const current of currentBeforeMaterialization.runRecordTable) {
+          if (!materializedRunRecordIds.has(current.recordId)) continue;
+          const staged = snapshot.runRecordTable.find(
+            ({ recordId }) => recordId === current.recordId,
+          );
+          if (
+            staged === undefined ||
+            !isDeepStrictEqual(
+              stableRunReplayPayload(current),
+              stableRunReplayPayload(staged),
+            )
+          ) {
+            throw new Error(
+              "Operational ledger materialization detected a concurrent Run mutation",
+            );
+          }
+        }
         for (const current of currentBeforeMaterialization.productGapCardTable) {
           if (!materializedProductGapIds.has(productGapIdentity(current))) {
             continue;
@@ -1295,6 +1327,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         }
         working.#replaceSnapshot({
           ...currentBeforeMaterialization,
+          runRecordTable:
+            currentBeforeMaterialization.runRecordTable.filter(
+              ({ recordId }) =>
+                !materializedRunRecordIds.has(recordId),
+            ),
           productGapCardTable:
             currentBeforeMaterialization.productGapCardTable.filter(
               (record) =>

@@ -1,10 +1,15 @@
 import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import {
+  chmod,
+  copyFile,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -105,14 +110,18 @@ function sha256(value: string | Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
 
-export const CODEX_CLI_FIXED_ARGUMENTS_HASH = sha256(
-  JSON.stringify(FIXED_ARGUMENT_TEMPLATE),
-);
-
 const CODEX_CLI_SUBPROCESS_DEADLINE_MS = 10 * 60 * 1_000;
 const CODEX_CLI_STDOUT_BYTE_LIMIT = 16 * 1_024 * 1_024;
 const CODEX_CLI_STDERR_BYTE_LIMIT = 1 * 1_024 * 1_024;
+const CODEX_CLI_RESULT_BYTE_LIMIT = 1 * 1_024 * 1_024;
 const CODEX_CLI_TERMINATION_GRACE_MS = 1_000;
+
+export const CODEX_CLI_FIXED_ARGUMENTS_HASH = sha256(
+  JSON.stringify({
+    arguments: FIXED_ARGUMENT_TEMPLATE,
+    resultJsonByteLimit: CODEX_CLI_RESULT_BYTE_LIMIT,
+  }),
+);
 
 interface CodexCliJudgeProcessOptions {
   readonly executable: string;
@@ -150,6 +159,48 @@ function positiveSafeInteger(value: number, label: string): number {
     throw new Error(`Codex CLI Judge invalid ${label}`);
   }
   return value;
+}
+
+async function readBoundedCodexCliJudgeResult(
+  path: string,
+  byteLimit: number,
+): Promise<Uint8Array> {
+  const limit = positiveSafeInteger(
+    byteLimit,
+    "result.json byte limit",
+  );
+  const handle = await open(path, "r");
+  try {
+    const bounded = Buffer.allocUnsafe(limit + 1);
+    let byteLength = 0;
+    while (byteLength <= limit) {
+      const { bytesRead } = await handle.read(
+        bounded,
+        byteLength,
+        limit + 1 - byteLength,
+        byteLength,
+      );
+      if (bytesRead === 0) break;
+      byteLength += bytesRead;
+    }
+    if (byteLength > limit) {
+      throw new Error(
+        "Codex CLI Judge result.json exceeded byte limit",
+      );
+    }
+    return Uint8Array.from(bounded.subarray(0, byteLength));
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readBoundedCodexCliJudgeResultForTest(
+  path: string,
+  byteLimit: number,
+): Promise<string> {
+  return Buffer.from(
+    await readBoundedCodexCliJudgeResult(path, byteLimit),
+  ).toString("utf8");
 }
 
 async function runBoundedCodexCliJudgeProcess(
@@ -212,6 +263,42 @@ async function runBoundedCodexCliJudgeProcess(
         }
       };
 
+      const waitForProcessGroupExit = async (): Promise<void> => {
+        if (
+          process.platform === "win32" ||
+          child.pid === undefined
+        ) {
+          return;
+        }
+        const deadline =
+          Date.now() + Math.max(terminationGraceMs, 1_000);
+        while (true) {
+          try {
+            process.kill(-child.pid, 0);
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              "code" in error &&
+              error.code === "ESRCH"
+            ) {
+              return;
+            }
+            throw new Error(
+              "Codex CLI Judge could not verify subprocess group termination",
+            );
+          }
+          if (Date.now() >= deadline) {
+            throw new Error(
+              "Codex CLI Judge subprocess group did not terminate",
+            );
+          }
+          signalProcessGroup("SIGKILL");
+          await new Promise<void>((resolveWait) => {
+            setTimeout(resolveWait, 10);
+          });
+        }
+      };
+
       const beginTermination = (
         reason: CodexCliJudgeProcessViolation,
       ): void => {
@@ -260,13 +347,23 @@ async function runBoundedCodexCliJudgeProcess(
           new Error("Codex CLI Judge subprocess failed to start"),
         );
       });
-      child.once("close", (code) => {
+      child.once("close", async (code) => {
         if (settled) return;
         settled = true;
         clearTimeout(deadlineTimer);
         if (terminationTimer !== null) clearTimeout(terminationTimer);
         if (violation !== null) {
           signalProcessGroup("SIGKILL");
+          try {
+            await waitForProcessGroupExit();
+          } catch {
+            rejectOutput(
+              new Error(
+                "Codex CLI Judge subprocess group cleanup could not be verified",
+              ),
+            );
+            return;
+          }
           rejectOutput(new Error(PROCESS_VIOLATION_MESSAGES[violation]));
           return;
         }
@@ -345,6 +442,96 @@ export interface CodexCliJudgeTransportPort {
   execute(
     command: CodexCliJudgeTransportCommand,
   ): Promise<CodexCliJudgeTransportResult>;
+}
+
+interface CodexCliJudgeExecutableIdentity {
+  readonly binaryPath: string;
+  readonly binaryHash: `sha256:${string}`;
+  readonly sandboxBinaryPath: string;
+  readonly sandboxBinaryHash: `sha256:${string}`;
+  readonly requireProtectedSandboxPath?: boolean;
+}
+
+class CodexCliJudgeExecutableVerifier {
+  readonly #identity: CodexCliJudgeExecutableIdentity;
+
+  constructor(identity: CodexCliJudgeExecutableIdentity) {
+    this.#identity = Object.freeze({ ...identity });
+  }
+
+  async snapshotInto(invocationRoot: string): Promise<{
+    readonly directory: string;
+    readonly binaryPath: string;
+    readonly sandboxBinaryPath: string;
+  }> {
+    const sandboxBinaryPath = await realpath(
+      this.#identity.sandboxBinaryPath,
+    );
+    const [sandboxBinary, sandboxMetadata] = await Promise.all([
+      readFile(sandboxBinaryPath),
+      stat(sandboxBinaryPath),
+    ]);
+    if (
+      sha256(Uint8Array.from(sandboxBinary)) !==
+        this.#identity.sandboxBinaryHash ||
+      (this.#identity.requireProtectedSandboxPath === true &&
+        (sandboxBinaryPath !== FROZEN_SANDBOX_EXEC_BINARY ||
+          sandboxMetadata.uid !== 0 ||
+          (sandboxMetadata.mode & 0o022) !== 0))
+    ) {
+      throw new Error(
+        "Codex CLI executable identity drifted before spawn",
+      );
+    }
+    const directory = await mkdtemp(
+      join(invocationRoot, "verified-executables-"),
+    );
+    const binaryPath = join(directory, "codex");
+    try {
+      await copyFile(
+        this.#identity.binaryPath,
+        binaryPath,
+        constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE,
+      );
+      await chmod(binaryPath, 0o500);
+      const [binaryReadback, sandboxReadback] = await Promise.all([
+        readFile(binaryPath),
+        readFile(sandboxBinaryPath),
+      ]);
+      if (
+        sha256(Uint8Array.from(binaryReadback)) !==
+          this.#identity.binaryHash ||
+        sha256(Uint8Array.from(sandboxReadback)) !==
+          this.#identity.sandboxBinaryHash
+      ) {
+        throw new Error(
+          "Codex CLI executable identity drifted before spawn",
+        );
+      }
+      return { directory, binaryPath, sandboxBinaryPath };
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+}
+
+export function createCodexCliJudgeExecutableVerifierForTest(
+  identity: CodexCliJudgeExecutableIdentity,
+): {
+  readonly snapshotInto: (
+    invocationRoot: string,
+  ) => Promise<{
+    readonly directory: string;
+    readonly binaryPath: string;
+    readonly sandboxBinaryPath: string;
+  }>;
+} {
+  const verifier = new CodexCliJudgeExecutableVerifier(identity);
+  return {
+    snapshotInto: (invocationRoot) =>
+      verifier.snapshotInto(invocationRoot),
+  };
 }
 
 const HARNESS_OWNED_PRODUCTION_JUDGES = new WeakMap<
@@ -698,6 +885,14 @@ class VerifiedCodexCliJudgeTransport
   readonly sandboxBinaryHash = FROZEN_SANDBOX_EXEC_SHA256;
   readonly sandboxProfileHash = CODEX_CLI_SANDBOX_PROFILE_HASH;
   #isolationAttestationHash: `sha256:${string}` | null = null;
+  readonly #executableVerifier =
+    new CodexCliJudgeExecutableVerifier({
+      binaryPath: FROZEN_CODEX_CLI_BINARY,
+      binaryHash: FROZEN_CODEX_CLI_SHA256,
+      sandboxBinaryPath: FROZEN_SANDBOX_EXEC_BINARY,
+      sandboxBinaryHash: FROZEN_SANDBOX_EXEC_SHA256,
+      requireProtectedSandboxPath: true,
+    });
 
   async #spawn(
     args: readonly string[],
@@ -713,26 +908,35 @@ class VerifiedCodexCliJudgeTransport
     readonly stderr: string;
   }> {
     const sandboxRoot = await realpath(options.sandboxRoot);
-    return await runBoundedCodexCliJudgeProcess({
-      executable: this.sandboxBinaryPath,
-      args: [
-        "-p",
-        seatbeltProfile(sandboxRoot),
-        options.executable ?? this.binaryPath,
-        ...args,
-      ],
-      stdin,
-      cwd: options.cwd,
-      env: {
-        HOME: process.env.HOME,
-        TMPDIR: sandboxRoot,
-        PATH: "/usr/bin:/bin",
-      },
-      deadlineMs: CODEX_CLI_SUBPROCESS_DEADLINE_MS,
-      stdoutByteLimit: CODEX_CLI_STDOUT_BYTE_LIMIT,
-      stderrByteLimit: CODEX_CLI_STDERR_BYTE_LIMIT,
-      terminationGraceMs: CODEX_CLI_TERMINATION_GRACE_MS,
-    });
+    const executableSnapshot =
+      await this.#executableVerifier.snapshotInto(sandboxRoot);
+    try {
+      return await runBoundedCodexCliJudgeProcess({
+        executable: executableSnapshot.sandboxBinaryPath,
+        args: [
+          "-p",
+          seatbeltProfile(sandboxRoot),
+          options.executable ?? executableSnapshot.binaryPath,
+          ...args,
+        ],
+        stdin,
+        cwd: options.cwd,
+        env: {
+          HOME: process.env.HOME,
+          TMPDIR: sandboxRoot,
+          PATH: "/usr/bin:/bin",
+        },
+        deadlineMs: CODEX_CLI_SUBPROCESS_DEADLINE_MS,
+        stdoutByteLimit: CODEX_CLI_STDOUT_BYTE_LIMIT,
+        stderrByteLimit: CODEX_CLI_STDERR_BYTE_LIMIT,
+        terminationGraceMs: CODEX_CLI_TERMINATION_GRACE_MS,
+      });
+    } finally {
+      await rm(executableSnapshot.directory, {
+        recursive: true,
+        force: true,
+      });
+    }
   }
 
   async #run(
@@ -881,12 +1085,16 @@ class VerifiedCodexCliJudgeTransport
         command.prompt,
         { cwd: isolatedCwd, sandboxRoot: directory },
       );
-      const outputText = await readFile(resultPath, "utf8");
+      const resultBytes = await readBoundedCodexCliJudgeResult(
+        resultPath,
+        CODEX_CLI_RESULT_BYTE_LIMIT,
+      );
+      const outputText = Buffer.from(resultBytes).toString("utf8");
       assertCodexCliTranscriptIsDataOnly(stdout, outputText);
       return {
         outputText,
         transcriptHash: sha256(stdout),
-        resultHash: sha256(outputText),
+        resultHash: sha256(resultBytes),
         invocationHash: command.invocationHash,
         isolationAttestationHash:
           this.#isolationAttestationHash,
