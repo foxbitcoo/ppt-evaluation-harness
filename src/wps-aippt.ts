@@ -1565,6 +1565,11 @@ export function createWpsAiPptReplayBehaviorExecutorForTest(input: {
   readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
   readonly checkpointStore?: AttemptCheckpointPort;
 }): ProductAdapterExecutor {
+  if (input.sessions.some((session) => session.outcome === "captured")) {
+    throw new Error(
+      "WPS TEST replay behavior fixture cannot mint an Artifact",
+    );
+  }
   const driver = createWpsAiPptBrowserDriverPackage({
     provenance: "TEST_FAKE",
     sessions: input.sessions,

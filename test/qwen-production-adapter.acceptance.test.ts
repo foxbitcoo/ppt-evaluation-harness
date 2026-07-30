@@ -649,7 +649,7 @@ test("the public production start path rejects a caller-supplied Qwen browser cl
   assert.equal(calls, 0);
 });
 
-test("a restarted Qwen replay reuses its durable reconciliation result idempotently", async () => {
+test("a restarted Qwen TEST replay reuses its durable reconciliation result idempotently", async () => {
   const attemptId = "attempt-qwen-recovery-1";
   const checkpointStore = new InMemoryAttemptCheckpointStore(
     "qwen-recovery-checkpoints",

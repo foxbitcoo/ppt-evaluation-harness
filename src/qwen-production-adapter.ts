@@ -1132,7 +1132,10 @@ function qwenExecutor(
   checkpointStore?: AttemptCheckpointPort,
   reconciliationDriver?: QwenBrowserDriverPort,
   testOnlyReconciliation = false,
+  testOnlyProductionValidation = false,
 ): QwenProductAdapterExecutor {
+  const productionValidation =
+    provenance !== "MOCK" || testOnlyProductionValidation;
   const executor: QwenProductAdapterExecutor = async (command) => {
     if (
       command.evaluationCase.caseId !== VOLCANO_CASE_ID ||
@@ -1312,7 +1315,7 @@ function qwenExecutor(
       command,
       execution,
       checkpointStore,
-      provenance !== "MOCK",
+      productionValidation,
     );
     if (execution.status === "terminal") {
       validateTerminalExecution(execution);
@@ -1328,7 +1331,7 @@ function qwenExecutor(
             ? null
             : validateObservedConfiguration(
                 execution.observedConfiguration,
-                provenance !== "MOCK",
+                productionValidation,
               ),
         trace: createTerminalTrace(execution),
         manualActions: Object.freeze(
@@ -1343,9 +1346,9 @@ function qwenExecutor(
     const observedConfiguration =
       validateObservedConfiguration(
         execution.observedConfiguration,
-        provenance !== "MOCK",
+        productionValidation,
       );
-    if (provenance !== "MOCK") {
+    if (productionValidation) {
       const evidenceBindings =
         observedConfiguration.evidenceBindings!;
       const dedicatedMilestones = [
@@ -1375,7 +1378,7 @@ function qwenExecutor(
       environmentOrigin,
     );
     if (
-      provenance !== "MOCK" &&
+      productionValidation &&
       execution.staticRenders.length > 0
     ) {
       throw new Error(
@@ -1508,10 +1511,11 @@ export function createQwenReplayBehaviorExecutorForTest(input: {
   });
   return qwenExecutor(
     driver,
-    "PRODUCTION_REPLAY",
-    PRODUCTION_ENVIRONMENT_ORIGIN,
+    "MOCK",
+    MOCK_TEST_ENVIRONMENT_ORIGIN,
     input.checkpointStore,
     driver,
+    true,
     true,
   );
 }

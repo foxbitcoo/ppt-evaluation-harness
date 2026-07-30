@@ -726,7 +726,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:8fb94068c5598f95046f966df495235e8c8ffac8d91df0f75ebaabc11c6030cf",
+        "sha256:267bd05ff05314c4cb17f25584c8c9c8342e39ae887bede18d499db8eff99715",
       sourceArchiveEntryCount: 48,
     },
   );
@@ -2469,7 +2469,7 @@ test("an arbitrary localhost fetch mock cannot mint a LIVE_PRODUCTION bridge out
   }
 });
 
-test("a submitted retained replay checkpoint is durably reconciled without a live bridge", async () => {
+test("a submitted WPS TEST replay checkpoint is durably reconciled without a live bridge", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "wps-submitted-reconcile-"),
   );
@@ -2562,7 +2562,7 @@ test("a submitted retained replay checkpoint is durably reconciled without a liv
   }
 });
 
-test("a restarted production Attempt reads durable stateVersion checkpoints and reconciles before another browser call", async () => {
+test("a restarted WPS TEST Attempt reads durable stateVersion checkpoints and reconciles before another browser call", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "wps-restart-reconcile-"),
   );
