@@ -21,6 +21,7 @@ import type {
 import {
   appendProviderSubmissionIntentCheckpoint,
   attemptSubmissionState,
+  InMemoryAttemptCheckpointStore,
   isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
   submissionEvidenceBoundToCheckpoints,
@@ -1545,7 +1546,10 @@ export function createQwenProductAdapterExecutorForTest(
     driver,
     "MOCK",
     MOCK_TEST_ENVIRONMENT_ORIGIN,
-    checkpointStore,
+    checkpointStore ??
+      new InMemoryAttemptCheckpointStore(
+        "qwen-test-product-adapter-checkpoints",
+      ),
     undefined,
     false,
     false,

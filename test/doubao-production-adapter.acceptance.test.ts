@@ -232,7 +232,13 @@ async function executeWithDriver(
     parseAdapterExecutionConfiguration(
       adapter.executionConfigurationPackage,
     ),
-    { doubaoBrowserDriver: driver },
+    {
+      attemptCheckpointStore:
+        new InMemoryAttemptCheckpointStore(
+          `doubao-test-execution:${attemptId}`,
+        ),
+      doubaoBrowserDriver: driver,
+    },
   );
   const execution = await executor({
     jobId: `job-${attemptId}`,
@@ -406,7 +412,13 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
     parseAdapterExecutionConfiguration(
       adapter.executionConfigurationPackage,
     ),
-    { doubaoBrowserDriver: driver },
+    {
+      attemptCheckpointStore:
+        new InMemoryAttemptCheckpointStore(
+          "doubao-test-real-boundary",
+        ),
+      doubaoBrowserDriver: driver,
+    },
   );
   const execution = await executor({
     jobId: "job-doubao-real-1",

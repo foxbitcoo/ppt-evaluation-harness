@@ -177,7 +177,10 @@ async function knownGoodPptxBytes(): Promise<Uint8Array> {
 
 function capturedBrowserResult(
   pptx: Uint8Array,
-  submissionEvidence: "submitted" | "unknown" = "submitted",
+  submissionEvidence:
+    | "submitted"
+    | "not_submitted"
+    | "unknown" = "submitted",
   renderOutcome: "faithful" | "degraded" = "faithful",
 ): WpsAiPptCapturedBrowserResult {
   const png = Uint8Array.from(
@@ -671,8 +674,8 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:3d99240b4ca9ac83a5ebe5e5d44f6b4e88fa87a5859ad5c5e50aabc12e88ee47",
-      sourceArchiveEntryCount: 50,
+        "sha256:3cbb04ed109473d45c6ab2842f5397e75be278e3b091b28c44e211caf9a71682",
+      sourceArchiveEntryCount: 52,
     },
   );
 });
@@ -1026,29 +1029,34 @@ test("WPS Trace rejects non-WPS origins and JWT-like path evidence", async () =>
 test("a captured WPS Artifact must carry proved submission evidence", async () => {
   const adapter = new WpsAiPptProductAdapter();
   const pptx = await knownGoodPptxBytes();
-  const driver = browserDriverPackage(
-    capturedBrowserResult(pptx, "unknown"),
-  );
-  const execute = resolveHarnessProductAdapterExecutor(
-    adapter.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      adapter.executionConfigurationPackage,
-    ),
-    { wpsAiPptBrowserDriver: driver },
-  );
+  for (const submissionEvidence of [
+    "unknown",
+    "not_submitted",
+  ] as const) {
+    const driver = browserDriverPackage(
+      capturedBrowserResult(pptx, submissionEvidence),
+    );
+    const execute = resolveHarnessProductAdapterExecutor(
+      adapter.implementationPackage,
+      parseAdapterExecutionConfiguration(
+        adapter.executionConfigurationPackage,
+      ),
+      { wpsAiPptBrowserDriver: driver },
+    );
 
-  await assert.rejects(
-    execute({
-      jobId: "job-wps-unknown",
-      runId: "run-wps-unknown",
-      attemptId: "attempt-wps-unknown-1",
-      attemptSeq: 1,
-      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-      signal: new AbortController().signal,
-      evaluationCase: VOLCANO_EVALUATION_CASE,
-    }),
-    /captured Artifact requires submitted evidence/,
-  );
+    await assert.rejects(
+      execute({
+        jobId: `job-wps-${submissionEvidence}`,
+        runId: `run-wps-${submissionEvidence}`,
+        attemptId: `attempt-wps-${submissionEvidence}-1`,
+        attemptSeq: 1,
+        timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+        signal: new AbortController().signal,
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+      }),
+      /captured Artifact requires submitted evidence/,
+    );
+  }
 });
 
 test("the WPS adapter rejects a PPTX whose ZIP central-directory CRC does not match its entry bytes", async () => {

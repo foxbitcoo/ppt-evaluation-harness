@@ -1563,7 +1563,10 @@ function createWpsAiPptProductAdapterExecutor(
         manualActions,
       };
     }
-    if (durableSubmissionEvidence !== "submitted") {
+    if (
+      result.submissionEvidence !== "submitted" ||
+      durableSubmissionEvidence !== "submitted"
+    ) {
       throw new Error(
         "WPS captured Artifact requires submitted evidence",
       );

@@ -592,6 +592,12 @@ test("the harness-owned registry binds Qwen execution from frozen packages inste
   const liveExecutor = resolveHarnessProductAdapterExecutor(
     callerExtendedDescriptor.implementationPackage,
     executionConfiguration,
+    {
+      attemptCheckpointStore:
+        new InMemoryAttemptCheckpointStore(
+          "qwen-live-registry-checkpoints",
+        ),
+    },
   );
   await assert.rejects(
     liveExecutor({
