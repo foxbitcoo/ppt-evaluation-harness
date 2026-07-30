@@ -960,10 +960,19 @@ function assertPptxExport(
     );
   }
   try {
-    return validatedOpenXmlPresentationSlideNames(
-      exported.content,
-    ).length;
+    const actualPageCount =
+      validatedOpenXmlPresentationSlideNames(exported.content).length;
+    if (
+      exported.pageCount !== 16 ||
+      actualPageCount !== 16
+    ) {
+      throw new DoubaoCaptureValidationError(
+        "Doubao export metadata and openable OPC presentation must both contain exactly 16 pages",
+      );
+    }
+    return actualPageCount;
   } catch (error) {
+    if (error instanceof DoubaoCaptureValidationError) throw error;
     throw new DoubaoCaptureValidationError(
       "Doubao export must be an openable, inactive-content OPC presentation",
       { cause: error },

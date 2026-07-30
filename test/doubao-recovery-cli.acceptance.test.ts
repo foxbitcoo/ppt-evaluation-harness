@@ -49,6 +49,8 @@ const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
     purpose: "offline_validation_fixture",
     artifactContentHash:
       "sha256:fadcc2150e1d5262efa0ba3364c0665b59efd1fd0b536fa65fdc19b7b4613942",
+    checkpointTraceHash:
+      "sha256:e2c4eca0f43e2a6e4c557094bf428309b355f30e0aa944911c276b8dc7f41398",
     pageCount: 16,
     packageId: "doubao-web-ppt-real-provider-replay-v1",
     adapterVersion: "doubao-web-ppt@1",
@@ -94,7 +96,12 @@ type MalformedLineageCase =
   | "wrong_checkpoint"
   | "fake_pptx_signature"
   | "fake_png_signature"
-  | "wrong_png_dimensions";
+  | "wrong_png_dimensions"
+  | "trace_timestamp_tamper"
+  | "trace_evidence_tamper"
+  | "trace_event_omission"
+  | "trace_event_insertion"
+  | "trace_extra_authorization_field";
 
 interface FixtureDerivative {
   derivativeId: string;
@@ -534,6 +541,28 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
       taskStateVersion: event.taskStateVersion,
       artifactId: event.artifactId,
     }));
+    if (malformedCase === "trace_timestamp_tamper") {
+      events[0]!.sourceAt = "2026-07-27T10:34:45.000Z";
+      events[0]!.observedAt = "2026-07-27T10:34:45.000Z";
+    } else if (malformedCase === "trace_evidence_tamper") {
+      events[2]!.evidenceRef =
+        "ui://doubao/generated-substituted-audit-anchor";
+    } else if (malformedCase === "trace_event_omission") {
+      events.splice(2, 1);
+    } else if (malformedCase === "trace_event_insertion") {
+      events.splice(2, 0, {
+        ...events[1]!,
+        eventId: `${attemptId}-event-injected`,
+        eventType: "generation_started",
+        taskStateVersion: "generation_started@3",
+      });
+    } else if (
+      malformedCase === "trace_extra_authorization_field"
+    ) {
+      Object.assign(events[1]!, {
+        authorization: "credential-material-must-not-be-persisted",
+      });
+    }
     const checkpointFilename =
       `${createHash("sha256").update(attemptId).digest("hex")}.jsonl`;
     await writeFile(
@@ -660,6 +689,29 @@ test("the recovery validator rejects decoded PNG dimensions outside the trusted 
   await assert.rejects(
     runRecoveryFixture("wrong_png_dimensions"),
     /PNG dimensions do not match the trusted checkpoint/i,
+  );
+});
+
+test("the recovery validator binds the complete ordered Trace to the independent trusted checkpoint", async (context) => {
+  for (const malformedCase of [
+    "trace_timestamp_tamper",
+    "trace_evidence_tamper",
+    "trace_event_omission",
+    "trace_event_insertion",
+  ] as const) {
+    await context.test(malformedCase, async () => {
+      await assert.rejects(
+        runRecoveryFixture(malformedCase),
+        /checkpoint|Trace|trusted/i,
+      );
+    });
+  }
+});
+
+test("the recovery validator rejects non-schema checkpoint fields before they can persist credentials or hidden reasoning", async () => {
+  await assert.rejects(
+    runRecoveryFixture("trace_extra_authorization_field"),
+    /checkpoint.*schema|unexpected.*field/i,
   );
 });
 

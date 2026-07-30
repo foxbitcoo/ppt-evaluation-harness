@@ -123,6 +123,12 @@ to this manually reviewed observation record. They are not URLs or filesystem
 paths for retained screenshots, and this evidence package does not claim that
 downloadable screenshot files exist.
 
+Recovery canonicalizes the complete ordered four-event checkpoint Trace,
+rejects every non-schema field, and requires its hash to match the
+harness-owned recovery checkpoint before returning trusted recovery output.
+The retained PPTX must also decode as exactly 16 safe OPC slides, and both the
+driver metadata and decoded slide count must independently equal 16.
+
 ## Static render hashes
 
 | Slide | SHA-256 |

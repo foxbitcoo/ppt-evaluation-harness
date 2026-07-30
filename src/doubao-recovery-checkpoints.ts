@@ -15,6 +15,7 @@ export interface TrustedDoubaoRecoveryCheckpoint {
     | "real_provider_recovery"
     | "offline_validation_fixture";
   readonly artifactContentHash: DoubaoRecoverySha256;
+  readonly checkpointTraceHash: DoubaoRecoverySha256;
   readonly pageCount: 16;
   readonly packageId: string;
   readonly adapterVersion: "doubao-web-ppt@1";
@@ -58,6 +59,8 @@ const TRUSTED_CHECKPOINTS = Object.freeze<
     purpose: "real_provider_recovery",
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    checkpointTraceHash:
+      "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
     pageCount: 16,
     packageId: "doubao-web-ppt-real-provider-replay-v1",
     adapterVersion: "doubao-web-ppt@1",

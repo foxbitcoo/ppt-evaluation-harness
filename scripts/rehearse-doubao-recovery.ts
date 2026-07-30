@@ -23,6 +23,7 @@ import {
   registerDurableRoots,
   resolveDurableRoot,
   retainedRehearsalRoot,
+  trustedDoubaoRecoveryCheckpoint,
   type DoubaoRealProviderCapture,
   type EgressAuthorizationPort,
 } from "../src/index.ts";
@@ -329,6 +330,10 @@ const recovery = await execFileAsync(
   { cwd: new URL("..", import.meta.url).pathname },
 );
 const recoveryResult = recovery.stdout.trim();
+const trustedRecoveryCheckpoint =
+  trustedDoubaoRecoveryCheckpoint(
+    DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+  );
 const parsedRecoveryResult = JSON.parse(recoveryResult) as {
   readonly registryId: string;
   readonly manifestHash: `sha256:${string}`;
@@ -339,6 +344,7 @@ const parsedRecoveryResult = JSON.parse(recoveryResult) as {
   readonly derivativeSetHash: `sha256:${string}`;
   readonly runSpecificationHash: `sha256:${string}`;
   readonly checkpointCount: number;
+  readonly checkpointTraceHash: `sha256:${string}`;
   readonly browserDriverId: string;
   readonly trustedRecoveryCheckpoint: {
     readonly checkpointId: string;
@@ -363,6 +369,8 @@ if (
   parsedRecoveryResult.runSpecificationHash !==
     specReference.contentHash ||
   parsedRecoveryResult.checkpointCount !== checkpoints.length ||
+  parsedRecoveryResult.checkpointTraceHash !==
+    trustedRecoveryCheckpoint.checkpointTraceHash ||
   parsedRecoveryResult.browserDriverId !==
     "doubao-real-provider-replay" ||
   parsedRecoveryResult.trustedRecoveryCheckpoint.checkpointId !==
@@ -458,6 +466,8 @@ process.stdout.write(
       browserDriverEvidence:
         recoveredSpec.adapterSpecification.browserDriverEvidence,
       checkpointCount: checkpoints.length,
+      checkpointTraceHash:
+        parsedRecoveryResult.checkpointTraceHash,
       trustedRecoveryCheckpoint:
         parsedRecoveryResult.trustedRecoveryCheckpoint,
       binaryValidation: parsedRecoveryResult.binaryValidation,

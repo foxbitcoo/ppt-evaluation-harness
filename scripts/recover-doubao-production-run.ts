@@ -8,6 +8,7 @@ import {
   FileSystemImmutableBlobStore,
   BUILD_SPEC_COMMIT_SHA,
   calculateArtifactDerivativeSetHash,
+  canonicalJsonBytes,
   loadDurableRootRegistry,
   resolveDurableRoot,
   trustedDoubaoRecoveryCheckpoint,
@@ -71,6 +72,23 @@ function record(value: unknown, label: string): JsonRecord {
     throw new Error(`Durable Doubao recovery ${label} schema is invalid`);
   }
   return value as JsonRecord;
+}
+
+function exactKeys(
+  value: JsonRecord,
+  allowedKeys: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const expected = [...allowedKeys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    throw new Error(
+      `Durable Doubao recovery ${label} schema contains an unexpected field`,
+    );
+  }
 }
 
 function json(bytes: Uint8Array, label: string): JsonRecord {
@@ -841,6 +859,25 @@ const expectedEventTypes = [
   "generation_ready",
   "artifact_exported",
 ] as const;
+const checkpointEventKeys = Object.freeze([
+  "eventId",
+  "jobId",
+  "caseId",
+  "runId",
+  "attemptId",
+  "attemptSeq",
+  "eventType",
+  "sourceAt",
+  "observedAt",
+  "writerId",
+  "evidenceRef",
+  "adapterVersion",
+  "sourceUrl",
+  "submissionEvidenceAtCheckpoint",
+  "vendorTaskId",
+  "taskStateVersion",
+  "artifactId",
+] as const);
 if (checkpoints.length !== expectedEventTypes.length) {
   throw new Error(
     "Durable Doubao recovery checkpoint terminal sequence is incomplete",
@@ -851,6 +888,7 @@ let rawVendorTaskId: string | null = null;
 let priorObservedAt = Number.NEGATIVE_INFINITY;
 checkpoints.forEach((event, index) => {
   const eventLabel = `checkpoint[${index}]`;
+  exactKeys(record(event, eventLabel), checkpointEventKeys, eventLabel);
   const eventId = text(event.eventId, `${eventLabel}.eventId`);
   if (
     eventId !== `${attemptId}-event-${index + 1}` ||
@@ -918,6 +956,14 @@ checkpoints.forEach((event, index) => {
     }
   }
 });
+const checkpointTraceHash = hash(canonicalJsonBytes(checkpoints));
+if (
+  checkpointTraceHash !== trustedCheckpoint.checkpointTraceHash
+) {
+  throw new Error(
+    "Durable Doubao recovery checkpoint Trace does not match the harness-owned trusted checkpoint",
+  );
+}
 if (
   rawVendorTaskId === null ||
   normalizedProductionTaskId(rawVendorTaskId) !== manifestVendorTaskId ||
@@ -949,6 +995,7 @@ return Object.freeze({
     derivativeSetHash,
     runSpecificationHash,
     checkpointCount: checkpoints.length,
+    checkpointTraceHash,
     browserDriverId,
     trustedRecoveryCheckpoint: {
       checkpointId: trustedCheckpoint.checkpointId,

@@ -52,6 +52,107 @@ async function knownGoodPptxBytes(): Promise<Uint8Array> {
   return artifact.content;
 }
 
+function testCrc32(content: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of content) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function realMinimalPptxWithPageCount(pageCount: 15 | 17): Uint8Array {
+  const encode = (value: string) => new TextEncoder().encode(value);
+  const slideIds = Array.from(
+    { length: pageCount },
+    (_, index) =>
+      `<p:sldId id="${256 + index}" r:id="rId${index + 1}"/>`,
+  ).join("");
+  const slideRelationships = Array.from(
+    { length: pageCount },
+    (_, index) =>
+      `<Relationship Id="rId${index + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide${index + 1}.xml"/>`,
+  ).join("");
+  const slideContentTypes = Array.from(
+    { length: pageCount },
+    (_, index) =>
+      `<Override PartName="/ppt/slides/slide${index + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>`,
+  ).join("");
+  const entries = [
+    {
+      name: "[Content_Types].xml",
+      content: encode(
+        `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>${slideContentTypes}</Types>`,
+      ),
+    },
+    {
+      name: "_rels/.rels",
+      content: encode(
+        `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>`,
+      ),
+    },
+    {
+      name: "ppt/presentation.xml",
+      content: encode(
+        `<?xml version="1.0" encoding="UTF-8"?><p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst>${slideIds}</p:sldIdLst></p:presentation>`,
+      ),
+    },
+    {
+      name: "ppt/_rels/presentation.xml.rels",
+      content: encode(
+        `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${slideRelationships}</Relationships>`,
+      ),
+    },
+    ...Array.from({ length: pageCount }, (_, index) => ({
+      name: `ppt/slides/slide${index + 1}.xml`,
+      content: encode(
+        `<?xml version="1.0" encoding="UTF-8"?><p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>`,
+      ),
+    })),
+  ];
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let localOffset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const content = Buffer.from(entry.content);
+    const checksum = testCrc32(content);
+    const localHeader = Buffer.alloc(30);
+    localHeader.writeUInt32LE(0x04034b50, 0);
+    localHeader.writeUInt16LE(20, 4);
+    localHeader.writeUInt16LE(0x0800, 6);
+    localHeader.writeUInt32LE(checksum, 14);
+    localHeader.writeUInt32LE(content.length, 18);
+    localHeader.writeUInt32LE(content.length, 22);
+    localHeader.writeUInt16LE(name.length, 26);
+    localParts.push(localHeader, name, content);
+    const centralHeader = Buffer.alloc(46);
+    centralHeader.writeUInt32LE(0x02014b50, 0);
+    centralHeader.writeUInt16LE(20, 4);
+    centralHeader.writeUInt16LE(20, 6);
+    centralHeader.writeUInt16LE(0x0800, 8);
+    centralHeader.writeUInt32LE(checksum, 16);
+    centralHeader.writeUInt32LE(content.length, 20);
+    centralHeader.writeUInt32LE(content.length, 24);
+    centralHeader.writeUInt16LE(name.length, 28);
+    centralHeader.writeUInt32LE(localOffset, 42);
+    centralParts.push(centralHeader, name);
+    localOffset += localHeader.length + name.length + content.length;
+  }
+  const centralDirectory = Buffer.concat(centralParts);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(entries.length, 8);
+  end.writeUInt16LE(entries.length, 10);
+  end.writeUInt32LE(centralDirectory.length, 12);
+  end.writeUInt32LE(localOffset, 16);
+  return Uint8Array.from(
+    Buffer.concat([...localParts, centralDirectory, end]),
+  );
+}
+
 function completeDoubaoDriver(): DoubaoBrowserDriverPort {
   return {
     async inspectCurrentPackage() {
@@ -523,6 +624,63 @@ test("a generated preview page deviation remains task success and proceeds to ex
   );
 });
 
+test("a 15-page or 17-page real OPC export fails closed without a compliant Artifact", async (context) => {
+  for (const pageCount of [15, 17] as const) {
+    await context.test(`${pageCount} pages`, async () => {
+      const complete = completeDoubaoDriver();
+      let renderCalled = false;
+      const result = await executeWithDriver(
+        {
+          ...complete,
+          async exportPresentation(command) {
+            const exported =
+              await complete.exportPresentation(command);
+            assert.equal(exported.status, "exported");
+            return {
+              ...exported,
+              pageCount,
+              content: realMinimalPptxWithPageCount(pageCount),
+            };
+          },
+          async renderPresentation(command) {
+            renderCalled = true;
+            return complete.renderPresentation(command);
+          },
+        },
+        `attempt-doubao-${pageCount}-page-export`,
+      );
+
+      assert.equal(result.terminalReason, "technical_failure");
+      assert.equal(result.submissionEvidence, "submitted");
+      assert.equal(result.artifactCandidates.length, 0);
+      assert.equal(renderCalled, false);
+    });
+  }
+});
+
+test("driver page-count metadata must independently report the frozen 16 pages", async () => {
+  const complete = completeDoubaoDriver();
+  const result = await executeWithDriver(
+    {
+      ...complete,
+      async exportPresentation(command) {
+        const exported = await complete.exportPresentation(command);
+        assert.equal(exported.status, "exported");
+        return { ...exported, pageCount: 15 };
+      },
+      async renderPresentation() {
+        throw new Error(
+          "mismatched driver metadata must stop before rendering",
+        );
+      },
+    },
+    "attempt-doubao-wrong-export-metadata",
+  );
+
+  assert.equal(result.terminalReason, "technical_failure");
+  assert.equal(result.artifactCandidates.length, 0);
+});
+
 test("a non-PPTX export is a submitted export failure and cannot become a policy-compliant Artifact", async () => {
   const complete = completeDoubaoDriver();
   const result = await executeWithDriver(
@@ -837,6 +995,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
       readonly cliRecoveredDerivativeCount: number;
       readonly cliDerivativeSetHash: string;
       readonly checkpointCount: number;
+      readonly checkpointTraceHash: string;
       readonly trustedRecoveryCheckpoint: {
         readonly checkpointId: string;
         readonly purpose: string;
@@ -964,6 +1123,10 @@ test("the exact-current public Doubao replay fixture records durable recovery an
     "sha256:047f33568528b87be6abc3ce17898fdb98d36ed5f38742eed3d4b05db7e26826",
   );
   assert.equal(fixture.recovery.checkpointCount, 4);
+  assert.equal(
+    fixture.recovery.checkpointTraceHash,
+    "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
+  );
   assert.deepEqual(fixture.recovery.trustedRecoveryCheckpoint, {
     checkpointId: "doubao-volcano-20260727-real-provider-v1",
     purpose: "real_provider_recovery",
