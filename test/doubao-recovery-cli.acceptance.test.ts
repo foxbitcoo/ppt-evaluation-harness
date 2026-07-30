@@ -27,8 +27,10 @@ import {
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
   currentVerifierRecoveryEvidenceAttestedView,
+  doubaoRecoveryResultAttestedView,
   parseAdapterExecutionConfiguration,
   parseDoubaoCurrentVerifierRecoveryEvidence,
+  parseDoubaoRecoveryCliResult,
   registerDurableRoots,
   resolveHarnessProductAdapterExecutor,
   trustedDoubaoRecoveryCheckpoint,
@@ -1042,6 +1044,18 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
   );
   const evidence =
     parseDoubaoCurrentVerifierRecoveryEvidence(evidenceSource);
+  const rawRecoveryCliResultSource = (
+    await readFile(
+      new URL(
+        "../evidence/doubao-v30-final-recovery-cli-result.json",
+        import.meta.url,
+      ),
+      "utf8",
+    )
+  ).trim();
+  const rawRecoveryCliResult = parseDoubaoRecoveryCliResult(
+    rawRecoveryCliResultSource,
+  );
   const trustedCheckpoint = trustedDoubaoRecoveryCheckpoint(
     DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   );
@@ -1105,14 +1119,46 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       staticPngCount: 16,
       contactSheetPngCount: 1,
     },
-    recoveryCliResultHash:
-      "sha256:4c1013c84dcc01dba070bfc52975bff7233f72b22312e2682353351765d81ff2",
+    recoveryCliEvidence: {
+      schemaVersion: "doubao-recovery-cli-evidence-v1",
+      rawResultReference:
+        "evidence/doubao-v30-final-recovery-cli-result.json",
+      rawResultHash:
+        "sha256:REPLACE_AFTER_POST_FREEZE_REAL_CLI_RUN",
+      rawResultVerifierBuildIdentity: BUILD_IDENTITY,
+      attestedResultSchemaVersion:
+        "doubao-recovery-result-attestation-v1",
+      attestedResultHash:
+        "sha256:REPLACE_AFTER_POST_FREEZE_REAL_CLI_RUN",
+      attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
+    },
     resultHash:
       "sha256:cb58b001e4eb7523e0bfe2b172e64bdf0b7cbd59943a543b57727a79f912358a",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
     evidence.verifierBuildIdentity.specCommitSha,
+  );
+  assert.deepEqual(
+    rawRecoveryCliResult.verifierBuildIdentity,
+    evidence.recoveryCliEvidence.rawResultVerifierBuildIdentity,
+  );
+  assert.deepEqual(
+    rawRecoveryCliResult.verifierBuildIdentity,
+    evidence.recoveryCliEvidence
+      .attestedResultVerifierBuildIdentity,
+  );
+  assert.equal(
+    evidence.recoveryCliEvidence.rawResultHash,
+    hash(encoder.encode(rawRecoveryCliResultSource)),
+  );
+  assert.equal(
+    evidence.recoveryCliEvidence.attestedResultHash,
+    hash(
+      canonicalJsonBytes(
+        doubaoRecoveryResultAttestedView(rawRecoveryCliResult),
+      ),
+    ),
   );
   assert.equal(
     evidence.resultHash,
@@ -1144,6 +1190,10 @@ test("current-verifier recovery evidence rejects duplicate and unknown authentic
     '"evaluatedRunIdentity": {',
     '"evaluatedRunIdentity": {\n    "unexpectedNested": "untrusted",',
   );
+  const unknownRecoveryCliEvidenceField = evidenceSource.replace(
+    '"recoveryCliEvidence": {',
+    '"recoveryCliEvidence": {\n    "unexpectedNested": "untrusted",',
+  );
 
   assert.throws(
     () =>
@@ -1159,5 +1209,12 @@ test("current-verifier recovery evidence rejects duplicate and unknown authentic
     () =>
       parseDoubaoCurrentVerifierRecoveryEvidence(unknownNestedField),
     /unexpected field "unexpectedNested".*evaluatedRunIdentity/i,
+  );
+  assert.throws(
+    () =>
+      parseDoubaoCurrentVerifierRecoveryEvidence(
+        unknownRecoveryCliEvidenceField,
+      ),
+    /unexpected field "unexpectedNested".*recoveryCliEvidence/i,
   );
 });

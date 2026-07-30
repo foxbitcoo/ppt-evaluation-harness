@@ -42,6 +42,30 @@
     "staticPngCount": 16,
     "contactSheetPngCount": 1
   },
-  "recoveryCliResultHash": "sha256:4c1013c84dcc01dba070bfc52975bff7233f72b22312e2682353351765d81ff2",
+  "recoveryCliEvidence": {
+    "schemaVersion": "doubao-recovery-cli-evidence-v1",
+    "rawResultReference": "evidence/doubao-v30-final-recovery-cli-result.json",
+    "rawResultHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "rawResultVerifierBuildIdentity": {
+      "schemaVersion": "ppt-evaluation-build-identity-v1",
+      "specCommitSha": "6a6f7cb5351a7add0ee607878b1ea4fe6fc55d61",
+      "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+      "sourceArchiveDigest": "sha256:f8a2ac5f7a0c92efd81d2868a82b6e2abe1327beee3ea043daba8c2bfd31aedc",
+      "sourceArchiveEntryCount": 45,
+      "embeddedManifestHash": "sha256:1d3692e5d0212f87099f6a9985cb9af71e2b0d24c2a462b7d6bc13a8fc5ae6f3",
+      "manifestHash": "sha256:5004dd20d90a964150641a374042b140c925bc5b1c6916c623dc045cb22cedc2"
+    },
+    "attestedResultSchemaVersion": "doubao-recovery-result-attestation-v1",
+    "attestedResultHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "attestedResultVerifierBuildIdentity": {
+      "schemaVersion": "ppt-evaluation-build-identity-v1",
+      "specCommitSha": "6a6f7cb5351a7add0ee607878b1ea4fe6fc55d61",
+      "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+      "sourceArchiveDigest": "sha256:f8a2ac5f7a0c92efd81d2868a82b6e2abe1327beee3ea043daba8c2bfd31aedc",
+      "sourceArchiveEntryCount": 45,
+      "embeddedManifestHash": "sha256:1d3692e5d0212f87099f6a9985cb9af71e2b0d24c2a462b7d6bc13a8fc5ae6f3",
+      "manifestHash": "sha256:5004dd20d90a964150641a374042b140c925bc5b1c6916c623dc045cb22cedc2"
+    }
+  },
   "resultHash": "sha256:cb58b001e4eb7523e0bfe2b172e64bdf0b7cbd59943a543b57727a79f912358a"
 }

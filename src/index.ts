@@ -7,9 +7,13 @@ export {
 export { parseStrictJson } from "./strict-json.ts";
 export {
   currentVerifierRecoveryEvidenceAttestedView,
+  doubaoRecoveryResultAttestedView,
   parseDoubaoCurrentVerifierRecoveryEvidence,
+  parseDoubaoRecoveryCliResult,
   type DoubaoCurrentVerifierRecoveryEvidence,
   type DoubaoCurrentVerifierRecoveryEvidenceAttestedView,
+  type DoubaoRecoveryCliResult,
+  type VerifiedBuildIdentity,
 } from "./doubao-current-verifier-evidence.ts";
 export {
   FileSystemBrowserProfileLock,

@@ -55,6 +55,17 @@ date-only and its `timingBasis` is
 no independently trustworthy exact CLI-completion timestamp was observed, so
 the evidence does not manufacture a midnight timestamp.
 
+The current-verifier evidence distinguishes the exact raw CLI stdout hash from
+the stable attested recovery-result hash. The raw hash is bound to the complete
+embedded verifier build identity that appears in that same CLI result. The
+attested hash uses the versioned
+`doubao-recovery-result-attestation-v1` view: it includes every recovery,
+lineage, authorization, and binary-validation field, while excluding only the
+current verifier build identity that necessarily changes when executable
+source is frozen. The evidence records the exact verifier build identity that
+produced both hashes and retains the raw post-freeze CLI result as a separate
+checked-in evidence file.
+
 ## Fixed protocol
 
 - Use the current signed-in account.
