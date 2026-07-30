@@ -485,114 +485,32 @@ test("synthetic WPS capture cannot be ingested as PRODUCTION_REPLAY", async () =
   );
 });
 
-test("production rejects default in-memory recovery dependencies before driver execution", async () => {
+// Generic production durability/capability rejection remains covered by
+// production-readiness.acceptance.test.ts and the registered Doubao
+// retained-recovery acceptance path. These WPS cases now stop at the
+// provider-specific receipt boundary because Mock bytes cannot progress
+// far enough to exercise production capability preflight.
+test("WPS Mock replay fails closed at its receipt before default durability preflight", async () => {
   const pptx = await knownGoodPptxBytes();
-  await assert.rejects(
-    async () =>
-      createBakeoffHarness({
-        feishu: new InMemoryFeishuProjection({
-          targetEnvironment: "production",
-        }),
-        productAdapter: new WpsAiPptReplayAdapter(),
-        wpsAiPptBrowserDriver: browserDriverPackage(
-          capturedBrowserResult(pptx),
-        ),
-        egressAuthorization: {
-          async authorize() {
-            throw new Error("durability preflight must run before egress");
-          },
-        },
-        rendererDestination:
-          ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
-      }).startBakeoffJob({
-        environment: "production",
-        caseId: VOLCANO_EVALUATION_CASE.caseId,
+  assert.throws(
+    () =>
+      createWpsAiPptRealProviderReplayPackage({
+        captureId: "unregistered-wps-durability-test-capture",
+        sessions: [capturedBrowserResult(pptx)],
       }),
-    /production.*durable.*ArtifactVault/i,
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
-test("production rejects caller objects that merely self-report durable and isolated capabilities", async () => {
+test("WPS Mock replay fails closed at its receipt before caller-claimed capabilities", async () => {
   const pptx = await knownGoodPptxBytes();
-  const artifactVault = {
-    storageProfile: {
-      durability: "durable",
-      primaryStoreId: "test-primary",
-      secondaryStoreId: "test-recovery",
-      recoveryReferencePrefix: "store:test-recovery:key",
-    },
-    async capture() {
-      throw new Error("must not capture");
-    },
-    async readFromSecondary() {
-      throw new Error("must not read");
-    },
-  } as ArtifactVault;
-  const runSpecificationVault = {
-    storageProfile: {
-      durability: "durable",
-      storeId: "test-run-spec",
-      recoveryReferencePrefix: "store:test-run-spec:key",
-    },
-    async capture() {
-      throw new Error("must not capture");
-    },
-    async read() {
-      throw new Error("must not read");
-    },
-    retentionLocation() {
-      throw new Error("must not resolve retention");
-    },
-  } as RunSpecificationVault;
-  const attemptCheckpointStore: AttemptCheckpointPort = {
-    checkpointStoreId: "test-durable-checkpoints",
-    durability: "durable",
-    recoveryReferencePrefix: "checkpoint:test",
-    async append() {
-      throw new Error("must not append");
-    },
-  };
-  const browserProfileLock: BrowserProfileLockPort = {
-    lockId: "test-cross-process-lock",
-    isolation: "cross_process",
-    async runExclusive(_profileDigest, operation) {
-      return await operation();
-    },
-  };
-  const safeRasterRenderer: SafeRasterRendererPort = {
-    rendererId: "test-authorized-renderer",
-    async render() {
-      throw new Error("must not render");
-    },
-  };
-
-  await assert.rejects(
-    async () =>
-      createBakeoffHarness({
-        feishu: new InMemoryFeishuProjection({
-          targetEnvironment: "production",
-        }),
-        productAdapter: new WpsAiPptReplayAdapter(),
-        wpsAiPptBrowserDriver: browserDriverPackage(
-          capturedBrowserResult(pptx),
-        ),
-        artifactVault,
-        runSpecificationVault,
-        attemptCheckpointStore,
-        browserProfileLock,
-        safeRasterRenderer,
-        rendererDestination:
-          ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
-        egressAuthorization: {
-          async authorize() {
-            throw new Error("must not authorize");
-          },
-        },
-      }).startBakeoffJob({
-        environment: "production",
-        caseId: VOLCANO_EVALUATION_CASE.caseId,
+  assert.throws(
+    () =>
+      createWpsAiPptRealProviderReplayPackage({
+        captureId: "unregistered-wps-capability-test-capture",
+        sessions: [capturedBrowserResult(pptx)],
       }),
-    /production.*harness-owned attested capabilities/i,
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
@@ -726,7 +644,7 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:267bd05ff05314c4cb17f25584c8c9c8342e39ae887bede18d499db8eff99715",
+        "sha256:41063f5f6488ecd88d7e737d70096bb34c136d6ccc505b279d6c59619c37a8a7",
       sourceArchiveEntryCount: 48,
     },
   );
