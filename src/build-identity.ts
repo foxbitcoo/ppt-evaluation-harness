@@ -35,6 +35,7 @@ function sourceFiles(directory: URL): readonly URL[] {
 const archiveEntries = Object.freeze(
   [
     ...sourceFiles(new URL("./", import.meta.url)),
+    ...sourceFiles(new URL("../scripts/", import.meta.url)),
     new URL("../package.json", import.meta.url),
     new URL("../package-lock.json", import.meta.url),
   ]
