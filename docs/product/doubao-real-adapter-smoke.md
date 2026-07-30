@@ -79,8 +79,8 @@ did not accept any upgrade.
 |---|---|
 | Attempt started at | `2026-07-27T18:34:46+08:00` |
 | Submission evidence | New conversation created; frozen prompt visibly echoed; status advanced to `思考中` |
-| Vendor task reference | Conversation `38435879568317954` |
-| Generation-ready at | Vendor showed `已完成PPT生成(9m 31s)` and a completed 16-page editor before export |
+| Vendor task reference | Conversation `38435879568317954`; the harness stores this as typed ID `task_38435879568317954` |
+| Generation-ready at | Conservatively recorded at the artifact-capture observation, `2026-07-27T18:45:58+08:00`; the UI separately showed `已完成PPT生成(9m 31s)` and a completed 16-page editor before export |
 | Export-ready at | `下载` became enabled after the completion message |
 | Artifact captured at | `2026-07-27T18:45:58+08:00` |
 | Filename and MIME type | `doubao-volcano-16.pptx`; `application/vnd.openxmlformats-officedocument.presentationml.presentation`; 5,184,523 bytes |
@@ -88,13 +88,31 @@ did not accept any upgrade.
 | Exported page count | 16 slide XML parts in a valid OOXML ZIP package |
 | Static render count | 16 PNG files, each 1600×900 |
 | Artifact directory | `/Users/chenyifan/Downloads/doubao-volcano-16-smoke-20260727-1845` |
-| Manual actions | Open new Doubao task; select PPT mode; select detailed length; retain intelligent matching; enter frozen prompt; submit once; choose Download → PPTX once |
+| Manual actions | `open a new Doubao task`; `select PPT mode`; `select detailed length`; `retain intelligent matching`; `enter the frozen 16-page Volcano prompt`; `submit exactly once`; `observe vendor completion label: 9m 31s`; `observe completed 16-page editor and enabled Download control`; `choose Download -> PPTX exactly once`; `validate the one retained PPTX after the download listener timed out`; `do not click export again; do not retry` |
 | Terminal reason | Generation, PPTX capture, hash, page-count validation, and 16 static renders completed; no retry |
 
 The browser download-event listener did not emit a completion event within its
 timeout, but the PPTX appeared in the Downloads directory with the current run
 timestamp. Validation used that one downloaded file; export was not clicked a
 second time.
+
+The retained Trace deliberately uses only two exact wall-clock observations
+that were actually captured: Attempt start/submission at
+`2026-07-27T18:34:46+08:00`, and Artifact capture at
+`2026-07-27T18:45:58+08:00`. Because no separate trustworthy wall-clock
+timestamp was retained for the completion transition, `generation_ready` uses
+the latter as a conservative upper bound. The vendor's `9m 31s` label is kept
+verbatim as vendor-reported elapsed time and is not subtracted to manufacture
+an exact milestone. The retained source/completion URL and raw vendor task
+reference are both
+`https://www.doubao.com/chat/38435879568317954` /
+`38435879568317954`; the Trace's schema-prefixed `vendorTaskId` is
+`task_38435879568317954`.
+
+Trace `ui://doubao/*-audit-anchor` values are opaque, secret-free anchors back
+to this manually reviewed observation record. They are not URLs or filesystem
+paths for retained screenshots, and this evidence package does not claim that
+downloadable screenshot files exist.
 
 ## Static render hashes
 

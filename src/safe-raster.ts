@@ -243,20 +243,11 @@ export function createFailedSafeRasterManifest(input: {
   readonly failure: unknown;
   readonly renderManifestId: string;
 }): RenderManifest {
-  const message =
-    input.failure instanceof Error
-      ? input.failure.message
-      : "unknown rasterization failure";
-  const safeMessage = message
-    .replace(
-      /(?:\/Users\/|\/tmp\/)[^\s<>"']+/g,
-      "[local-path-redacted]",
-    )
-    .replace(
-      /(?:cookie|authorization|bearer|token|password)[^\s<>"']*/gi,
-      "[secret-redacted]",
-    )
-    .slice(0, 240);
+  // The renderer failure belongs in an operator-controlled diagnostic channel,
+  // never in the durable evaluation Artifact. Error.message may contain
+  // subprocess stderr, local paths, API keys, JWTs, or other credentials.
+  void input.failure;
+  const failureCode = "RASTERIZATION_FAILED" as const;
   const contactSheet = [
     '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">',
     '<rect width="1280" height="720" fill="#fff"/>',
@@ -277,7 +268,7 @@ export function createFailedSafeRasterManifest(input: {
     fidelity: Object.freeze({
       status: "unknown",
       notes: Object.freeze([
-        `render failed: ${safeMessage}`,
+        `${failureCode}: static rendering failed; inspect the authorized operator diagnostic channel`,
       ]),
     }),
     pageCount: input.artifact.pageCount,

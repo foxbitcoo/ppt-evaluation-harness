@@ -410,7 +410,7 @@ const HARNESS_OWNED_DOUBAO_CAPTURE_RECEIPTS =
         artifactContentHash:
           "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
         traceDigest:
-          "sha256:088d839e1a4abecd326622fbe334e640ef93996c27e59ccfecec3588216c0226",
+          "sha256:594d9b94d81d98e4b8a1986db7353f6852ac17201076d85e5d6f64df505d40ad",
         retainedPageDigest:
           "sha256:8f9453b0cf3b88525d2ad69d7f0d854efd24cc7e86108fcafb82727912b46c3f",
         renderDigest:
