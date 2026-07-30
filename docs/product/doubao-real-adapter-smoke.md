@@ -16,9 +16,9 @@ promote the product output to a quality baseline, and it does not expose
 cookies, authorization data, personal identifiers, browser storage, or hidden
 reasoning.
 
-## Exact-current public replay
+## Retained historical provider replay
 
-On `2026-07-28`, the retained provider PPTX and the same 16 PNGs were ingested
+On `2026-07-28`, the retained historical provider PPTX and the same 16 PNGs were ingested
 through the public `DoubaoProductionReplayAdapter` as
 `PRODUCTION_REPLAY` / `REAL_PROVIDER_CAPTURE`. No browser rerun occurred.
 

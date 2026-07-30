@@ -372,6 +372,25 @@ const parsedRecoveryResult = JSON.parse(recoveryResult) as {
     readonly purpose: string;
     readonly schemaVersion: string;
   };
+  readonly evaluatedRunIdentity: {
+    readonly specCommitSha: string;
+    readonly buildIdentitySource: string;
+    readonly runnerCodeDigest: string | undefined;
+    readonly runSpecificationCanonicalHash: string | undefined;
+  };
+  readonly verifierBuildIdentity: typeof BUILD_IDENTITY;
+  readonly rendererAuthorizationEvidence: {
+    readonly decisionId: string;
+    readonly authorizationAuditDigest: string;
+    readonly requestId: string;
+    readonly targetService: string;
+    readonly targetAccount: string;
+    readonly targetRegion: string;
+    readonly payloadHash: string;
+    readonly policyVersion: string;
+    readonly approvedAt: string;
+    readonly expiresAt: string;
+  };
   readonly binaryValidation: {
     readonly pptxSlideCount: number;
     readonly staticPngCount: number;
@@ -390,6 +409,7 @@ assertExactObjectKeys(
     "checkpointTraceHash",
     "derivativeCount",
     "derivativeSetHash",
+    "evaluatedRunIdentity",
     "jobId",
     "manifestHash",
     "originalHash",
@@ -397,10 +417,12 @@ assertExactObjectKeys(
     "registryHash",
     "registryId",
     "renderManifestHash",
+    "rendererAuthorizationEvidence",
     "rootReferences",
     "runId",
     "runSpecificationHash",
     "trustedRecoveryCheckpoint",
+    "verifierBuildIdentity",
   ],
   "Doubao recovery CLI result",
 );
@@ -413,6 +435,45 @@ assertExactObjectKeys(
   parsedRecoveryResult.trustedRecoveryCheckpoint,
   ["checkpointId", "purpose", "schemaVersion"],
   "Doubao recovery CLI result.trustedRecoveryCheckpoint",
+);
+assertExactObjectKeys(
+  parsedRecoveryResult.rendererAuthorizationEvidence,
+  [
+    "approvedAt",
+    "authorizationAuditDigest",
+    "decisionId",
+    "expiresAt",
+    "payloadHash",
+    "policyVersion",
+    "requestId",
+    "targetAccount",
+    "targetRegion",
+    "targetService",
+  ],
+  "Doubao recovery CLI result.rendererAuthorizationEvidence",
+);
+assertExactObjectKeys(
+  parsedRecoveryResult.evaluatedRunIdentity,
+  [
+    "buildIdentitySource",
+    "runSpecificationCanonicalHash",
+    "runnerCodeDigest",
+    "specCommitSha",
+  ],
+  "Doubao recovery CLI result.evaluatedRunIdentity",
+);
+assertExactObjectKeys(
+  parsedRecoveryResult.verifierBuildIdentity,
+  [
+    "embeddedManifestHash",
+    "manifestHash",
+    "schemaVersion",
+    "source",
+    "sourceArchiveDigest",
+    "sourceArchiveEntryCount",
+    "specCommitSha",
+  ],
+  "Doubao recovery CLI result.verifierBuildIdentity",
 );
 assertExactObjectKeys(
   parsedRecoveryResult.binaryValidation,
@@ -435,6 +496,24 @@ if (
     trustedRecoveryCheckpoint.checkpointTraceHash ||
   parsedRecoveryResult.browserDriverId !==
     "doubao-real-provider-replay" ||
+  parsedRecoveryResult.rendererAuthorizationEvidence.decisionId !==
+    trustedRecoveryCheckpoint.rendererAuthorizationDecision.decisionId ||
+  parsedRecoveryResult.rendererAuthorizationEvidence
+    .authorizationAuditDigest !==
+    trustedRecoveryCheckpoint.rendererAuthorizationAuditDigest ||
+  parsedRecoveryResult.rendererAuthorizationEvidence.payloadHash !==
+    artifactContentHash ||
+  parsedRecoveryResult.evaluatedRunIdentity.specCommitSha !==
+    trustedRecoveryCheckpoint.evaluatedSpecCommitSha ||
+  parsedRecoveryResult.evaluatedRunIdentity.buildIdentitySource !==
+    trustedRecoveryCheckpoint.evaluatedBuildIdentitySource ||
+  parsedRecoveryResult.evaluatedRunIdentity.runnerCodeDigest !==
+    trustedRecoveryCheckpoint.runnerCodeDigest ||
+  parsedRecoveryResult.evaluatedRunIdentity
+    .runSpecificationCanonicalHash !==
+    trustedRecoveryCheckpoint.runSpecificationCanonicalHash ||
+  JSON.stringify(parsedRecoveryResult.verifierBuildIdentity) !==
+    JSON.stringify(BUILD_IDENTITY) ||
   parsedRecoveryResult.trustedRecoveryCheckpoint.checkpointId !==
     DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID ||
   parsedRecoveryResult.trustedRecoveryCheckpoint.purpose !==

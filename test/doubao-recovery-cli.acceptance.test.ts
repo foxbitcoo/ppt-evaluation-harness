@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   mkdtemp,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -15,12 +16,14 @@ import sharp from "sharp";
 
 import {
   BUILD_SPEC_COMMIT_SHA,
+  BUILD_IDENTITY,
   DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   FileSystemImmutableBlobStore,
   MockDoubaoProductAdapter,
   MockWpsProductAdapter,
   VENDOR_GENERATION_TIMEOUT_MS,
   VOLCANO_EVALUATION_CASE,
+  approvedEgressAuthorizationHash,
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
   parseAdapterExecutionConfiguration,
@@ -45,6 +48,34 @@ const HASH_B =
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
 const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT_ID =
   "doubao-offline-recovery-fixture-v1";
+const OFFLINE_RENDERER_AUTHORIZATION_DECISION = Object.freeze({
+  status: "approved" as const,
+  decisionId: "fixture-renderer-authorization-v1",
+  policyVersion: "fixture-renderer-policy-v1",
+  request: Object.freeze({
+    requestId:
+      "artifact-rendering:artifact-doubao-lineage",
+    jobId: "job-doubao-lineage",
+    runId: "run-doubao-lineage",
+    attemptId: "attempt-doubao-lineage-1",
+    dataClassification: "public_or_synthetic" as const,
+    sourceOwner: "ppt-evaluation-harness",
+    processingPurpose: "artifact_rendering" as const,
+    targetKind: "renderer" as const,
+    targetService: "isolated-offline-png-rasterizer",
+    targetAccount: "local-sandbox",
+    targetRegion: "local",
+    subprocessors: Object.freeze([]),
+    contentFields: Object.freeze(["artifact_binary"]),
+    payloadHash:
+      "sha256:fadcc2150e1d5262efa0ba3364c0665b59efd1fd0b536fa65fdc19b7b4613942" as const,
+    requiredRedactions: Object.freeze([]),
+    requestedAt: "2026-07-27T10:34:46.000Z",
+  }),
+  legalSecurityBasis: "offline validation fixture",
+  approvedAt: "2026-07-27T10:34:46.000Z",
+  expiresAt: "2099-01-01T00:00:00.000Z",
+});
 const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
   Object.freeze<TrustedDoubaoRecoveryCheckpoint>({
     schemaVersion: "doubao-recovery-checkpoint-v1",
@@ -52,6 +83,15 @@ const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
     purpose: "offline_validation_fixture",
     artifactContentHash:
       "sha256:fadcc2150e1d5262efa0ba3364c0665b59efd1fd0b536fa65fdc19b7b4613942",
+    evaluatedSpecCommitSha: BUILD_SPEC_COMMIT_SHA,
+    evaluatedBuildIdentitySource:
+      "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    rendererAuthorizationDecision:
+      OFFLINE_RENDERER_AUTHORIZATION_DECISION,
+    rendererAuthorizationAuditDigest:
+      approvedEgressAuthorizationHash(
+        OFFLINE_RENDERER_AUTHORIZATION_DECISION,
+      ),
     checkpointTraceHash:
       "sha256:e2c4eca0f43e2a6e4c557094bf428309b355f30e0aa944911c276b8dc7f41398",
     caseId: "volcano-query-v1",
@@ -128,7 +168,8 @@ type MalformedLineageCase =
   | "run_spec_nested_duplicate_key"
   | "artifact_metadata_tamper"
   | "render_manifest_metadata_tamper"
-  | "run_spec_package_tamper";
+  | "run_spec_package_tamper"
+  | "render_authorization_decision_tamper";
 
 interface FixtureDerivative {
   derivativeId: string;
@@ -293,6 +334,8 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
       artifactId,
       pageCount: 16,
       renderer: "fixture-renderer-v1",
+      rendererAuthorizationDecisionId:
+        OFFLINE_RENDERER_AUTHORIZATION_DECISION.decisionId,
       contactSheet: {
         contentHash: hash(contactPayload),
         filename: "contact-sheet.png",
@@ -306,7 +349,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         extractedTextHash: hash(textPayloads[index]!),
       })),
     };
-    const trustedRenderManifestAttestedPayloadHash =
+    let trustedRenderManifestAttestedPayloadHash =
       renderManifestAttestedPayloadHash(renderManifestObject);
     if (malformedCase === "render_manifest_metadata_tamper") {
       renderManifestObject.renderer = "self-asserted-renderer-v99";
@@ -314,6 +357,15 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
     if (malformedCase === "render_manifest_extra_field") {
       renderManifestObject.hiddenReasoning =
         "must-not-survive-schema-validation";
+    } else if (
+      malformedCase === "render_authorization_decision_tamper"
+    ) {
+      renderManifestObject.rendererAuthorizationDecisionId =
+        "fixture-renderer-authorization-replaced";
+      // Simulates an attacker who updates every self-controlled hash while
+      // the independent authorization audit remains unchanged.
+      trustedRenderManifestAttestedPayloadHash =
+        renderManifestAttestedPayloadHash(renderManifestObject);
     }
     const renderManifest = encoder.encode(JSON.stringify(renderManifestObject));
     const derivatives: FixtureDerivative[] = [
@@ -944,6 +996,13 @@ test("the recovery validator rejects self-hashed authenticated metadata changes 
   }
 });
 
+test("the recovery validator rejects a safely formatted replacement renderer decision even when manifest hashes are recomputed", async () => {
+  await assert.rejects(
+    runRecoveryFixture("render_authorization_decision_tamper"),
+    /renderer authorization decision.*trusted checkpoint audit/i,
+  );
+});
+
 test("the production CLI rejects the offline fixture checkpoint before reading recovery stores", async () => {
   await assert.rejects(
     execFileAsync(
@@ -969,4 +1028,71 @@ test("the production CLI rejects the offline fixture checkpoint before reading r
     ),
     /requires the real-provider trusted checkpoint/i,
   );
+});
+
+test("checked-in evidence records a successful allowlisted v30 replay under the current verifier", async () => {
+  const evidence = JSON.parse(
+    await readFile(
+      new URL(
+        "../evidence/doubao-v30-current-verifier-recovery.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as {
+    readonly schemaVersion: string;
+    readonly status: string;
+    readonly registryId: string;
+    readonly checkpointId: string;
+    readonly artifactContentHash: string;
+    readonly runSpecificationHash: string;
+    readonly checkpointTraceHash: string;
+    readonly evaluatedRunIdentity: {
+      readonly specCommitSha: string;
+      readonly runnerCodeDigest: string;
+    };
+    readonly verifierBuildIdentity: typeof import("../src/index.ts").BUILD_IDENTITY;
+    readonly rendererAuthorizationEvidence: {
+      readonly decisionId: string;
+      readonly authorizationAuditDigest: string;
+      readonly payloadHash: string;
+    };
+    readonly binaryValidation: {
+      readonly pptxSlideCount: number;
+      readonly staticPngCount: number;
+      readonly contactSheetPngCount: number;
+    };
+    readonly resultHash: string;
+  };
+  const { resultHash, ...result } = evidence;
+  assert.equal(
+    evidence.schemaVersion,
+    "doubao-current-verifier-trusted-recovery-evidence-v1",
+  );
+  assert.equal(evidence.status, "recovery_succeeded");
+  assert.equal(
+    evidence.checkpointId,
+    DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+  );
+  assert.equal(
+    evidence.evaluatedRunIdentity.specCommitSha,
+    trustedDoubaoRecoveryCheckpoint(
+      DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+    ).evaluatedSpecCommitSha,
+  );
+  assert.notEqual(
+    evidence.evaluatedRunIdentity.specCommitSha,
+    evidence.verifierBuildIdentity.specCommitSha,
+  );
+  assert.deepEqual(evidence.verifierBuildIdentity, BUILD_IDENTITY);
+  assert.equal(
+    evidence.rendererAuthorizationEvidence.payloadHash,
+    evidence.artifactContentHash,
+  );
+  assert.deepEqual(evidence.binaryValidation, {
+    pptxSlideCount: 16,
+    staticPngCount: 16,
+    contactSheetPngCount: 1,
+  });
+  assert.equal(resultHash, hash(canonicalJsonBytes(result)));
 });

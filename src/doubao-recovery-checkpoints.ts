@@ -1,3 +1,7 @@
+import type {
+  ApprovedEgressAuthorization,
+} from "./egress-authorization.ts";
+
 export type DoubaoRecoverySha256 = `sha256:${string}`;
 
 export interface TrustedDoubaoRecoveryReceipt {
@@ -19,6 +23,12 @@ export interface TrustedDoubaoRecoveryCheckpoint {
   readonly renderManifestAttestedPayloadHash?: DoubaoRecoverySha256;
   readonly runSpecificationCanonicalHash?: DoubaoRecoverySha256;
   readonly runnerCodeDigest?: DoubaoRecoverySha256;
+  readonly evaluatedSpecCommitSha: string;
+  readonly evaluatedBuildIdentitySource:
+    "EMBEDDED_VERIFIED_BUILD_MANIFEST";
+  readonly rendererAuthorizationDecision:
+    ApprovedEgressAuthorization;
+  readonly rendererAuthorizationAuditDigest: DoubaoRecoverySha256;
   readonly checkpointTraceHash: DoubaoRecoverySha256;
   readonly caseId: "volcano-query-v1";
   readonly caseVersion: 1;
@@ -71,13 +81,50 @@ const TRUSTED_CHECKPOINTS = Object.freeze<
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
     artifactManifestAttestedPayloadHash:
-      "sha256:34db8db99f661566eee70e025f7bd489fa8d795467f0b0ce647cd7d57bb56a37",
+      "sha256:1697e0128db2880c3bf7de7dc7fc03d376582d0bc16b3e293fbe68229c12a53a",
     renderManifestAttestedPayloadHash:
-      "sha256:0055a88b71da5349212f8d1cab0c0472ec2b4e8600a2bf709c8b0621f6fb97c8",
+      "sha256:6daf8702f7007148336931dca858f1b01dc288832545f9ae5bf534a3be2c32f0",
     runSpecificationCanonicalHash:
       "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b",
     runnerCodeDigest:
       "sha256:ba691d59c346eb96f2cd68ba5d54bde341ffe0f2f4486aa3f765056d60732b18",
+    evaluatedSpecCommitSha:
+      "fb08a1096bad8e63f33c27bd6add40e0ee6c792c",
+    evaluatedBuildIdentitySource:
+      "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    rendererAuthorizationDecision: Object.freeze({
+      status: "approved",
+      decisionId: "doubao-replay:b7b30a5f6730e1de522c6164",
+      policyVersion: "doubao-real-provider-replay-ingest-v1",
+      request: Object.freeze({
+        requestId:
+          "artifact-rendering:artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4",
+        jobId: "production-job-volcano-wps-v1",
+        runId:
+          "production-replay-run-doubao-web-ppt-real-provider-rep-d77ffcfc6c17d7cf2ad9e9a7972fce90-volcano-v1",
+        attemptId:
+          "production-replay-run-doubao-web-ppt-real-provider-rep-d77ffcfc6c17d7cf2ad9e9a7972fce90-volcano-v1-attempt-1",
+        dataClassification: "public_or_synthetic",
+        sourceOwner: "ppt-evaluation-harness",
+        processingPurpose: "artifact_rendering",
+        targetKind: "renderer",
+        targetService: "isolated-offline-png-rasterizer",
+        targetAccount: "local-sandbox",
+        targetRegion: "local",
+        subprocessors: Object.freeze([]),
+        contentFields: Object.freeze(["artifact_binary"]),
+        payloadHash:
+          "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+        requiredRedactions: Object.freeze([]),
+        requestedAt: "2026-07-30T15:40:45.090Z",
+      }),
+      legalSecurityBasis:
+        "authorized retained real-provider capture ingest",
+      approvedAt: "2026-07-30T15:40:45.090Z",
+      expiresAt: "2099-01-01T00:00:00.000Z",
+    }),
+    rendererAuthorizationAuditDigest:
+      "sha256:1ed43314b7d5a8c0c99a05cd300fc388b56de95a36347563839e77d470317315",
     checkpointTraceHash:
       "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
     caseId: "volcano-query-v1",

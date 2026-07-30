@@ -6,7 +6,9 @@ import {
   DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   FileSystemAttemptCheckpointStore,
   FileSystemImmutableBlobStore,
-  BUILD_SPEC_COMMIT_SHA,
+  BUILD_IDENTITY,
+  approvedEgressAuthorizationHash,
+  assertPersistedApprovedEgressAuthorization,
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
   loadDurableRootRegistry,
@@ -220,48 +222,24 @@ function requireCanonicalAuthenticatedJson(
 }
 
 /**
- * Renderer authorization decision IDs bind the current verifier build and
- * would make a policy checkpoint self-referential. The decision itself is
- * schema-checked below; this attested view freezes every provider/render
- * semantic while replacing only that separately verified runtime binding.
+ * The checkpoint attests the complete canonical Render manifest, including
+ * the renderer authorization decision ID and every raw derivative hash.
  */
 export function renderManifestAttestedPayloadHash(
   parsed: JsonRecord,
 ): Sha256 {
-  return hash(
-    canonicalJsonBytes({
-      ...parsed,
-      rendererAuthorizationDecisionId:
-        "<runtime-authorization-decision-verified-separately>",
-    }),
-  );
+  return hash(canonicalJsonBytes(parsed));
 }
 
 /**
- * The Artifact manifest points to the raw render-manifest hash, whose
- * authorization decision is build-bound. Those two copies are replaced only
- * in the attested view and remain cross-checked against the recovered render
- * bytes below.
+ * The checkpoint attests the complete canonical Artifact manifest. Raw render
+ * hashes remain in this payload and are cross-checked against the recovered
+ * render bytes below.
  */
 export function artifactManifestAttestedPayloadHash(
   parsed: JsonRecord,
 ): Sha256 {
-  const execution = record(
-    parsed.productionExecutionEvidence,
-    "Artifact manifest.productionExecutionEvidence",
-  );
-  return hash(
-    canonicalJsonBytes({
-      ...parsed,
-      renderManifestHash:
-        "<render-manifest-bytes-verified-separately>",
-      productionExecutionEvidence: {
-        ...execution,
-        rasterManifestHash:
-          "<render-manifest-bytes-verified-separately>",
-      },
-    }),
-  );
+  return hash(canonicalJsonBytes(parsed));
 }
 
 function text(
@@ -804,7 +782,7 @@ if (
 text(
   runSpecificationBundle.specCommitSha,
   "Run Specification.specCommitSha",
-  BUILD_SPEC_COMMIT_SHA,
+  trustedCheckpoint.evaluatedSpecCommitSha,
 );
 const evaluationCase = record(
   runSpecificationBundle.evaluationCase,
@@ -1318,8 +1296,8 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     text(
       runnerCodeEvidence.specCommitSha,
       "Run Specification.runnerCodeEvidence.specCommitSha",
-      BUILD_SPEC_COMMIT_SHA,
-    ) !== BUILD_SPEC_COMMIT_SHA ||
+      trustedCheckpoint.evaluatedSpecCommitSha,
+    ) !== trustedCheckpoint.evaluatedSpecCommitSha ||
     runnerFilesHash !== runnerCodeDigest ||
     sha(
       versionReferences.runnerCodeDigest,
@@ -1454,6 +1432,7 @@ exactKeys(
         "contactSheet",
         "pageCount",
         "renderer",
+        "rendererAuthorizationDecisionId",
         "renderManifestId",
         "schemaVersion",
         "slides",
@@ -1482,6 +1461,10 @@ if (
     "Durable Doubao recovery render manifest lineage is invalid",
   );
 }
+const rendererAuthorizationDecisionId = safeEvidenceText(
+  renderIdentity.rendererAuthorizationDecisionId,
+  "render manifest.rendererAuthorizationDecisionId",
+);
 const rawSlides = renderIdentity.slides;
 if (!Array.isArray(rawSlides) || rawSlides.length !== 16) {
   throw new Error(
@@ -1630,14 +1613,46 @@ if (trustedCheckpoint.purpose === "real_provider_recovery") {
     "render manifest.provenance",
     "PRODUCTION_REPLAY",
   );
-  safeEvidenceText(
-    renderIdentity.rendererAuthorizationDecisionId,
-    "render manifest.rendererAuthorizationDecisionId",
-  );
   text(
     renderIdentity.renderOutcome,
     "render manifest.renderOutcome",
     "degraded",
+  );
+}
+
+const trustedRendererAuthorization =
+  trustedCheckpoint.rendererAuthorizationDecision;
+const expectedRendererAuthorizationRequest = Object.freeze({
+  ...trustedRendererAuthorization.request,
+  requestId: `artifact-rendering:${artifactId}`,
+  jobId,
+  runId,
+  attemptId,
+  dataClassification: "public_or_synthetic" as const,
+  sourceOwner: "ppt-evaluation-harness",
+  processingPurpose: "artifact_rendering" as const,
+  targetKind: "renderer" as const,
+  targetService: "isolated-offline-png-rasterizer",
+  targetAccount: "local-sandbox",
+  targetRegion: "local",
+  subprocessors: Object.freeze([]),
+  contentFields: Object.freeze(["artifact_binary"]),
+  payloadHash: artifactContentHash,
+  requiredRedactions: Object.freeze([]),
+});
+assertPersistedApprovedEgressAuthorization(
+  trustedRendererAuthorization,
+  expectedRendererAuthorizationRequest,
+  trustedCheckpoint.rendererAuthorizationAuditDigest,
+);
+if (
+  approvedEgressAuthorizationHash(trustedRendererAuthorization) !==
+    trustedCheckpoint.rendererAuthorizationAuditDigest ||
+  rendererAuthorizationDecisionId !==
+    trustedRendererAuthorization.decisionId
+) {
+  throw new Error(
+    "Durable Doubao recovery renderer authorization decision does not match the harness-owned trusted checkpoint audit",
   );
 }
 
@@ -1976,6 +1991,30 @@ return Object.freeze({
       checkpointId: trustedCheckpoint.checkpointId,
       purpose: trustedCheckpoint.purpose,
       schemaVersion: trustedCheckpoint.schemaVersion,
+    },
+    evaluatedRunIdentity: {
+      specCommitSha: trustedCheckpoint.evaluatedSpecCommitSha,
+      buildIdentitySource:
+        trustedCheckpoint.evaluatedBuildIdentitySource,
+      runnerCodeDigest: trustedCheckpoint.runnerCodeDigest,
+      runSpecificationCanonicalHash:
+        trustedCheckpoint.runSpecificationCanonicalHash,
+    },
+    verifierBuildIdentity: BUILD_IDENTITY,
+    rendererAuthorizationEvidence: {
+      decisionId: trustedRendererAuthorization.decisionId,
+      authorizationAuditDigest:
+        trustedCheckpoint.rendererAuthorizationAuditDigest,
+      requestId: trustedRendererAuthorization.request.requestId,
+      targetService:
+        trustedRendererAuthorization.request.targetService,
+      targetAccount:
+        trustedRendererAuthorization.request.targetAccount,
+      targetRegion: trustedRendererAuthorization.request.targetRegion,
+      payloadHash: trustedRendererAuthorization.request.payloadHash,
+      policyVersion: trustedRendererAuthorization.policyVersion,
+      approvedAt: trustedRendererAuthorization.approvedAt,
+      expiresAt: trustedRendererAuthorization.expiresAt,
     },
     binaryValidation: {
       pptxSlideCount: originalSlideNames.length,

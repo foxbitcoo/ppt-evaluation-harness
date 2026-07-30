@@ -945,7 +945,7 @@ test("a known capture ID cannot bless forged artifact, trace, or render bytes", 
   );
 });
 
-test("the exact-current public Doubao replay fixture records durable recovery and retained render warnings", () => {
+test("the retained historical v28 Doubao provider fixture records durable recovery and retained render warnings", () => {
   const text = readFileSync(
     new URL(
       "../docs/smoke/doubao-real-provider-replay-2026-07-28.json",
