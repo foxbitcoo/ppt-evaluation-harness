@@ -19,10 +19,11 @@ import type {
   TerminalReason,
 } from "./domain.ts";
 import {
+  appendProviderSubmissionIntentCheckpoint,
   attemptSubmissionState,
-  createProviderSubmissionIntentCheckpoint,
   isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
+  submissionEvidenceBoundToCheckpoints,
 } from "./product-adapter.ts";
 import type {
   ProductAdapterImplementationPackage,
@@ -1342,11 +1343,15 @@ function qwenExecutor(
       }
     }
     if (recordSubmissionIntent) {
-      await checkpointStore?.append(
-        createProviderSubmissionIntentCheckpoint(
-          command,
-          QWEN_ADAPTER_VERSION,
-        ),
+      if (checkpointStore === undefined) {
+        throw new Error(
+          "Qwen live provider submission requires durable checkpoints",
+        );
+      }
+      await appendProviderSubmissionIntentCheckpoint(
+        checkpointStore,
+        command,
+        QWEN_ADAPTER_VERSION,
       );
     }
     const execution = await driver.execute({
@@ -1368,12 +1373,21 @@ function qwenExecutor(
       checkpointStore,
       productionValidation,
     );
+    const durableResultEvents =
+      checkpointStore?.readAttempt === undefined
+        ? observableEvents
+        : await checkpointStore.readAttempt(command.attemptId);
+    const durableSubmissionEvidence =
+      submissionEvidenceBoundToCheckpoints(
+        execution.submissionEvidence,
+        durableResultEvents,
+      );
     if (execution.status === "terminal") {
       validateTerminalExecution(execution);
       return Object.freeze({
         terminalReason: execution.terminalReason,
         blockReason: execution.blockReason,
-        submissionEvidence: execution.submissionEvidence,
+        submissionEvidence: durableSubmissionEvidence,
         elapsedMs: execution.elapsedMs,
         artifactCandidates: Object.freeze([]),
         observableEvents,

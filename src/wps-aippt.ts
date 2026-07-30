@@ -14,11 +14,12 @@ import {
   PRODUCTION_ENVIRONMENT_ORIGIN,
 } from "./environment-origin.ts";
 import {
+  appendProviderSubmissionIntentCheckpoint,
   attemptSubmissionState,
-  createProviderSubmissionIntentCheckpoint,
   isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
   parseAdapterExecutionConfiguration,
+  submissionEvidenceBoundToCheckpoints,
   type AttemptCheckpointPort,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
@@ -1367,11 +1368,15 @@ function createWpsAiPptProductAdapterExecutor(
         executionMode === "live" &&
         (!testOnlyReplay || testOnlyRecordSubmissionIntent)
       ) {
-        await checkpointStore?.append(
-          createProviderSubmissionIntentCheckpoint(
-            command,
-            WPS_AIPPT_ADAPTER_VERSION,
-          ),
+        if (checkpointStore === undefined) {
+          throw new Error(
+            "WPS live provider submission requires durable checkpoints",
+          );
+        }
+        await appendProviderSubmissionIntentCheckpoint(
+          checkpointStore,
+          command,
+          WPS_AIPPT_ADAPTER_VERSION,
         );
       }
       result = await runBrowser({
@@ -1532,6 +1537,15 @@ function createWpsAiPptProductAdapterExecutor(
       );
     }
     const manualActions = checkedManualActions(result.manualActions);
+    const durableResultEvents =
+      checkpointStore?.readAttempt === undefined
+        ? persistedEvents
+        : await checkpointStore.readAttempt(command.attemptId);
+    const durableSubmissionEvidence =
+      submissionEvidenceBoundToCheckpoints(
+        result.submissionEvidence,
+        durableResultEvents,
+      );
     if (result.outcome !== "captured") {
       return {
         terminalReason:
@@ -1542,14 +1556,14 @@ function createWpsAiPptProductAdapterExecutor(
           result.outcome === "authentication"
             ? result.outcome
             : null,
-        submissionEvidence: result.submissionEvidence,
+        submissionEvidence: durableSubmissionEvidence,
         elapsedMs: result.elapsedMs,
         artifactCandidates: [],
         observableEvents: Object.freeze([...persistedEvents]),
         manualActions,
       };
     }
-    if (result.submissionEvidence !== "submitted") {
+    if (durableSubmissionEvidence !== "submitted") {
       throw new Error(
         "WPS captured Artifact requires submitted evidence",
       );
@@ -1567,7 +1581,7 @@ function createWpsAiPptProductAdapterExecutor(
     return {
       terminalReason: "success",
       blockReason: null,
-      submissionEvidence: result.submissionEvidence,
+      submissionEvidence: durableSubmissionEvidence,
       elapsedMs: result.elapsedMs,
       artifactCandidates: [
         {

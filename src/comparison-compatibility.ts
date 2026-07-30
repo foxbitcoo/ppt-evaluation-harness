@@ -7,6 +7,7 @@ import type {
   BakeoffProtocolSnapshot,
   ComparisonCompatibilityFingerprint,
   EvaluationCaseRecord,
+  RenderManifest,
   ScoreDimension,
 } from "./domain.ts";
 
@@ -19,9 +20,64 @@ export const REQUIRED_SCORE_DIMENSIONS = Object.freeze([
   "imagery_chart_and_information_expression",
 ] as const satisfies readonly ScoreDimension[]);
 
+const DEDUCTION_BASES = new Set([
+  "no_deduction",
+  "visible_requirement_or_coverage_gap",
+  "validated_reference_pack_errors",
+  "not_assessable_no_reference_pack",
+  "not_assessable_degraded_render",
+  "visible_narrative_or_audience_gap",
+  "visible_visual_finish_gap",
+  "visible_layout_or_readability_gap",
+  "visible_information_expression_gap",
+]);
+
+const NOT_ASSESSABLE_DEDUCTION_BASES = new Set([
+  "not_assessable_no_reference_pack",
+  "not_assessable_degraded_render",
+]);
+
+const SCORE_DIMENSION_FIELDS = new Set([
+  "dimension",
+  "assessmentStatus",
+  "value",
+  "deductionBasis",
+  "evidencePages",
+  "rationale",
+]);
+
+const OWNED_DEDUCTION_BASIS: Readonly<
+  Record<ScoreDimension, string>
+> = {
+  requirement_understanding_and_content_coverage:
+    "visible_requirement_or_coverage_gap",
+  factual_accuracy_and_content_quality:
+    "validated_reference_pack_errors",
+  narrative_and_audience_fit:
+    "visible_narrative_or_audience_gap",
+  visual_aesthetics_and_professional_finish:
+    "visible_visual_finish_gap",
+  layout_hierarchy_and_readability:
+    "visible_layout_or_readability_gap",
+  imagery_chart_and_information_expression:
+    "visible_information_expression_gap",
+};
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalValue(entry)]),
+    );
+  }
+  return value;
+}
+
 function sha256Json(value: unknown): `sha256:${string}` {
   return `sha256:${createHash("sha256")
-    .update(JSON.stringify(value))
+    .update(JSON.stringify(canonicalValue(value)))
     .digest("hex")}`;
 }
 
@@ -29,6 +85,7 @@ export function expectedComparisonCompatibilityFingerprint(
   scorecard: ArtifactScorecard,
   protocolSnapshot: BakeoffProtocolSnapshot,
   evaluationCase: EvaluationCaseRecord,
+  renderManifest: RenderManifest,
 ): ComparisonCompatibilityFingerprint {
   const judge = scorecard.judgeLineage;
   return Object.freeze({
@@ -70,6 +127,7 @@ export function expectedComparisonCompatibilityFingerprint(
           }),
     renderPipelineHash: sha256Json({
       renderer: scorecard.evaluationInputManifest.renderer,
+      renderPolicy: renderManifest.renderPolicy,
       renderOutcome:
         scorecard.deliveryQualityGates.find(
           ({ gate }) => gate === "sufficient_faithful_visual_input",
@@ -78,6 +136,7 @@ export function expectedComparisonCompatibilityFingerprint(
     designJudgmentSurfaceHash: sha256Json({
       surfaceClass: "canonical",
       renderer: scorecard.evaluationInputManifest.renderer,
+      renderPolicy: renderManifest.renderPolicy,
       compatibilityStatus:
         scorecard.deliveryQualityGates.find(
           ({ gate }) => gate === "sufficient_faithful_visual_input",
@@ -109,6 +168,105 @@ export function assertCompleteScoreDimensions(
   }
 }
 
+function assertScoreDimensionValues(
+  scorecard: ArtifactScorecard,
+  artifactPageCount: number,
+): void {
+  for (const dimension of scorecard.dimensions) {
+    const dimensionFields = Object.keys(dimension);
+    if (
+      dimensionFields.length !== SCORE_DIMENSION_FIELDS.size ||
+      dimensionFields.some(
+        (field) => !SCORE_DIMENSION_FIELDS.has(field),
+      )
+    ) {
+      throw new Error(
+        "Scorecard dimension violates the strict six-dimension schema",
+      );
+    }
+    const validAssessedValue =
+      dimension.assessmentStatus === "ASSESSED" &&
+      Number.isInteger(dimension.value) &&
+      dimension.value !== null &&
+      dimension.value >= 1 &&
+      dimension.value <= 5;
+    const validNotAssessableValue =
+      dimension.assessmentStatus === "NOT_ASSESSABLE" &&
+      dimension.value === null;
+    if (!validAssessedValue && !validNotAssessableValue) {
+      throw new Error(
+        "Scorecard dimension value must be an integer from 1–5 when ASSESSED and null when NOT_ASSESSABLE",
+      );
+    }
+    const deductionIsNotAssessable =
+      NOT_ASSESSABLE_DEDUCTION_BASES.has(
+        dimension.deductionBasis,
+      );
+    if (
+      !DEDUCTION_BASES.has(dimension.deductionBasis) ||
+      (dimension.assessmentStatus === "ASSESSED" &&
+        deductionIsNotAssessable) ||
+      (dimension.assessmentStatus === "NOT_ASSESSABLE" &&
+        !deductionIsNotAssessable)
+    ) {
+      throw new Error(
+        "Scorecard deduction basis does not match its assessment status field combination",
+      );
+    }
+    if (
+      dimension.assessmentStatus === "ASSESSED" &&
+      dimension.deductionBasis !==
+        (dimension.value === 5
+          ? "no_deduction"
+          : OWNED_DEDUCTION_BASIS[dimension.dimension])
+    ) {
+      throw new Error(
+        "Scorecard dimension uses an unowned deduction basis",
+      );
+    }
+    if (
+      !Array.isArray(dimension.evidencePages) ||
+      new Set(dimension.evidencePages).size !==
+        dimension.evidencePages.length
+    ) {
+      throw new Error(
+        "Scorecard dimension evidence pages must be unique",
+      );
+    }
+    if (
+      dimension.evidencePages.some(
+        (pageNumber) =>
+          !Number.isInteger(pageNumber) ||
+          pageNumber < 1 ||
+          pageNumber > artifactPageCount,
+      )
+    ) {
+      throw new Error(
+        "Scorecard dimension evidence page is outside the Artifact page range",
+      );
+    }
+    if (
+      (dimension.assessmentStatus === "ASSESSED" &&
+        dimension.evidencePages.length === 0) ||
+      (dimension.assessmentStatus === "NOT_ASSESSABLE" &&
+        dimension.evidencePages.length !== 0)
+    ) {
+      throw new Error(
+        "Scorecard ASSESSED dimensions require evidence while NOT_ASSESSABLE dimensions must not claim evidence",
+      );
+    }
+    if (
+      typeof dimension.rationale !== "string" ||
+      dimension.rationale.trim().length === 0 ||
+      dimension.rationale.length > 240
+    ) {
+      throw new Error(
+        "Scorecard dimension rationale must be non-empty and at most 240 characters",
+      );
+    }
+  }
+}
+
 export function assertArtifactScoreCompatibility(
   record: ArtifactScoreTableRecord,
   evaluationCase: EvaluationCaseRecord,
@@ -126,10 +284,15 @@ export function assertArtifactScoreCompatibility(
     );
   }
   assertCompleteScoreDimensions(record.scorecard.dimensions);
+  assertScoreDimensionValues(
+    record.scorecard,
+    record.artifact.pageCount,
+  );
   const expected = expectedComparisonCompatibilityFingerprint(
     record.scorecard,
     protocolSnapshot,
     evaluationCase,
+    record.renderManifest,
   );
   if (
     !isDeepStrictEqual(

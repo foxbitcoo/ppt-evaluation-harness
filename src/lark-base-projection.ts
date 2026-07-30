@@ -1,12 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import {
   mkdir,
   lstat,
   mkdtemp,
   readFile,
   readlink,
+  realpath,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
@@ -245,7 +250,7 @@ export interface LarkCommitMarkerAttachment {
 export interface ProductionJobRemoteState {
   readonly state:
     | "absent"
-    | "committed"
+    | "commit_marker_present_unverified"
     | "job_record_present"
     | "vendor_run_present";
   readonly marker: LarkCommitMarker | null;
@@ -254,6 +259,11 @@ export interface ProductionJobRemoteState {
 
 const VERIFIED_LARK_TRANSPORTS =
   new WeakSet<LarkBaseProjectionTransportPort>();
+const VERIFIED_LARK_DESTINATIONS =
+  new WeakMap<
+    LarkBaseProjectionTransportPort,
+    { readonly targetAccount: string; readonly targetRegion: string }
+  >();
 const HARNESS_OWNED_LARK_PROJECTIONS =
   new WeakMap<object, LarkBaseProjectionTransportPort>();
 
@@ -309,6 +319,20 @@ export interface LarkCliProjectionConfiguration {
   readonly reportDocumentExpectedOrigin: string;
   readonly targetAccount: string;
   readonly targetRegion: string;
+  /**
+   * Exact user-scoped `lark-cli whoami` binding. Verified production
+   * preflight fails closed when this is absent or differs from the current
+   * profile/app/user identity.
+   */
+  readonly cliIdentityBinding?: {
+    readonly profile: string;
+    readonly appId: string;
+    readonly brand: "feishu" | "lark";
+    readonly defaultAs: string;
+    readonly identitySource: string;
+    readonly userOpenId: string;
+    readonly tenantKey: string;
+  };
 }
 
 function sha256(value: string | Uint8Array): `sha256:${string}` {
@@ -462,9 +486,9 @@ function larkMutexRoot(
   return root;
 }
 
-function larkBaseConcurrencyIdentity(
+function larkBaseConcurrencyIdentities(
   configuration: LarkCliProjectionConfiguration,
-): string {
+): readonly string[] {
   const baseToken =
     process.env[configuration.baseTokenEnvironmentVariable]?.trim();
   if (baseToken === undefined || baseToken.length === 0) {
@@ -475,11 +499,15 @@ function larkBaseConcurrencyIdentity(
   const tableIds = [
     ...new Set(Object.values(configuration.tables)),
   ].sort();
-  return canonicalPayload({
-    schemaVersion: "lark-base-concurrency-resource-v1",
-    baseToken,
-    tableIds,
-  });
+  return Object.freeze(
+    tableIds.map((tableId) =>
+      canonicalPayload({
+        schemaVersion: "lark-base-table-concurrency-resource-v1",
+        baseToken,
+        tableId,
+      }),
+    ),
+  );
 }
 
 function larkReportDocumentToken(
@@ -817,7 +845,7 @@ async function acquireLarkSingleWorkstationMutex(
   const resourceIdentities =
     options.resourceIdentityForTest === undefined
       ? [
-          larkBaseConcurrencyIdentity(configuration),
+          ...larkBaseConcurrencyIdentities(configuration),
           ...(options.includeReportDocument === true
             ? [larkReportConcurrencyIdentity(configuration)]
             : []),
@@ -2492,6 +2520,17 @@ export function createHarnessOwnedLarkBaseProjection(options: {
       "Production Lark Base projection requires the verified fixed lark-cli transport",
     );
   }
+  const verifiedDestination =
+    VERIFIED_LARK_DESTINATIONS.get(options.transport);
+  if (
+    verifiedDestination === undefined ||
+    options.targetAccount !== verifiedDestination.targetAccount ||
+    options.targetRegion !== verifiedDestination.targetRegion
+  ) {
+    throw new Error(
+      "Production Lark projection destination does not match the verified transport account and region",
+    );
+  }
   const projection = new LarkBaseProjection({
     transport: options.transport,
     targetEnvironment: "production",
@@ -2722,12 +2761,61 @@ function collectRecords(value: unknown): readonly Record<string, unknown>[] {
 
 interface LarkCliRunOptions {
   readonly cwd?: string;
+  readonly stdin?: string | Uint8Array;
 }
 
 type LarkCliJsonRunner = (
   args: readonly string[],
   options?: LarkCliRunOptions,
 ) => Promise<unknown>;
+
+type LarkCliExecutableAttestor = () => Promise<void>;
+
+interface LarkCliInvocationOptions extends LarkCliRunOptions {
+  readonly inputSnapshot?: {
+    readonly filename: string;
+    readonly content: Uint8Array;
+    readonly contentHash: `sha256:${string}`;
+  };
+}
+
+async function invokeLarkCliRunner(
+  runner: LarkCliJsonRunner,
+  args: readonly string[],
+  options: LarkCliInvocationOptions = {},
+): Promise<unknown> {
+  const snapshot = options.inputSnapshot;
+  if (snapshot === undefined) {
+    return await runner(args, options);
+  }
+  if (
+    options.cwd !== undefined ||
+    !/^[a-zA-Z0-9._-]{1,255}$/.test(snapshot.filename) ||
+    sha256(snapshot.content) !== snapshot.contentHash ||
+    !args.includes(snapshot.filename)
+  ) {
+    throw new Error("Lark CLI input snapshot is invalid");
+  }
+  const directory = mkdtempSync(join(tmpdir(), "ppt-lark-input-"));
+  try {
+    writeFileSync(join(directory, snapshot.filename), snapshot.content, {
+      flag: "wx",
+      mode: 0o400,
+    });
+    // Snapshot materialization and runner invocation are deliberately
+    // synchronous. No authorization callback or event-loop continuation can
+    // replace the authorized bytes before the frozen runner is spawned.
+    const pending = runner(args, {
+      cwd: directory,
+      ...(options.stdin === undefined
+        ? {}
+        : { stdin: options.stdin }),
+    });
+    return await pending;
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
 
 async function spawnFrozenLarkCliJson(
   binaryPath: string,
@@ -2736,7 +2824,11 @@ async function spawnFrozenLarkCliJson(
 ): Promise<unknown> {
   const output = await new Promise<string>((resolveOutput, rejectOutput) => {
     const child = spawn(binaryPath, [...args], {
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [
+        options.stdin === undefined ? "ignore" : "pipe",
+        "pipe",
+        "pipe",
+      ],
       ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
       env: {
         PATH: "/usr/bin:/bin",
@@ -2746,6 +2838,23 @@ async function spawnFrozenLarkCliJson(
         LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
       },
     });
+    if (options.stdin !== undefined) {
+      if (child.stdin === null) {
+        child.kill();
+        rejectOutput(
+          new Error("lark-cli stdin pipe was not created"),
+        );
+        return;
+      }
+      child.stdin.end(options.stdin);
+    }
+    if (child.stdout === null || child.stderr === null) {
+      child.kill();
+      rejectOutput(
+        new Error("lark-cli output pipes were not created"),
+      );
+      return;
+    }
     let stdout = "";
     child.stdout.setEncoding("utf8").on("data", (chunk) => {
       stdout += chunk;
@@ -2811,6 +2920,26 @@ async function frozenLarkCliVersion(binaryPath: string): Promise<string> {
   });
 }
 
+async function attestFrozenLarkCliExecutable(
+  binaryPath: string,
+): Promise<void> {
+  const [resolvedPath, metadata, bytes] = await Promise.all([
+    realpath(binaryPath),
+    lstat(binaryPath),
+    readFile(binaryPath),
+  ]);
+  if (
+    resolvedPath !== binaryPath ||
+    metadata.isSymbolicLink() ||
+    !metadata.isFile() ||
+    sha256(Uint8Array.from(bytes)) !== FROZEN_LARK_CLI_SHA256
+  ) {
+    throw new Error(
+      "Frozen lark-cli executable path or bytes drifted before egress",
+    );
+  }
+}
+
 export function assertFrozenLarkCliInstallation(input: {
   readonly nativeHash: `sha256:${string}`;
   readonly nativeVersionOutput: string;
@@ -2850,7 +2979,9 @@ class VerifiedLarkCliTransport
   readonly #clock: ClockPort;
   readonly #runner: LarkCliJsonRunner;
   readonly #executionLease: LarkExecutionLeasePort;
+  readonly #attestExecutable: LarkCliExecutableAttestor;
   #executionLeaseReleased = false;
+  #disposed = false;
 
   constructor(
     binaryPath: string,
@@ -2860,6 +2991,7 @@ class VerifiedLarkCliTransport
     clock: ClockPort = SYSTEM_CLOCK,
     runner?: LarkCliJsonRunner,
     executionLease?: LarkExecutionLeasePort,
+    attestExecutable: LarkCliExecutableAttestor = async () => undefined,
   ) {
     this.#binaryPath = binaryPath;
     this.#egressAuthorization = egressAuthorization;
@@ -2874,9 +3006,17 @@ class VerifiedLarkCliTransport
       createProcessLarkExecutionLease({
         lockRoot: configuration.lockRootPath,
       });
+    this.#attestExecutable = attestExecutable;
     this.#configuration = Object.freeze({
       ...configuration,
       tables: Object.freeze({ ...configuration.tables }),
+      ...(configuration.cliIdentityBinding === undefined
+        ? {}
+        : {
+            cliIdentityBinding: Object.freeze({
+              ...configuration.cliIdentityBinding,
+            }),
+          }),
     });
     this.transportId =
       `lark-cli:${FROZEN_LARK_CLI_SHA256}:${configuration.targetAccount}`;
@@ -2888,9 +3028,18 @@ class VerifiedLarkCliTransport
 
   async #run(
     args: readonly string[],
-    options: LarkCliRunOptions = {},
+    options: LarkCliInvocationOptions = {},
   ): Promise<unknown> {
-    return await this.#runner(args, options);
+    this.#assertActive();
+    await this.#attestExecutable();
+    this.#assertActive();
+    return await invokeLarkCliRunner(this.#runner, args, options);
+  }
+
+  #assertActive(): void {
+    if (this.#disposed) {
+      throw new Error("Lark transport is disposed");
+    }
   }
 
   async #releaseExecutionLease(): Promise<void> {
@@ -2900,6 +3049,7 @@ class VerifiedLarkCliTransport
   }
 
   async dispose(): Promise<void> {
+    this.#disposed = true;
     await this.#releaseExecutionLease();
   }
 
@@ -2908,6 +3058,7 @@ class VerifiedLarkCliTransport
     identity: string,
     operation: () => Promise<T>,
   ): Promise<T> {
+    this.#assertActive();
     const release = await acquireLarkSingleWorkstationMutex(
       this.#configuration,
       larkOperationMutexScope(kind, identity),
@@ -2916,6 +3067,7 @@ class VerifiedLarkCliTransport
       },
     );
     try {
+      this.#assertActive();
       return await operation();
     } finally {
       await release();
@@ -2926,6 +3078,7 @@ class VerifiedLarkCliTransport
     jobId: string,
     operation: () => Promise<T>,
   ): Promise<T> {
+    this.#assertActive();
     nonEmpty(jobId, "Lark projection mutex Job ID");
     const release = await this.acquireProjectionMutex(jobId);
     try {
@@ -2941,8 +3094,9 @@ class VerifiedLarkCliTransport
       readonly requireReportDocument?: boolean;
     } = {},
   ): Promise<() => Promise<void>> {
+    this.#assertActive();
     nonEmpty(jobId, "Lark projection mutex Job ID");
-    return await acquireLarkSingleWorkstationMutex(
+    const release = await acquireLarkSingleWorkstationMutex(
       this.#configuration,
       larkOperationMutexScope("projection", jobId),
       {
@@ -2950,6 +3104,13 @@ class VerifiedLarkCliTransport
           options.requireReportDocument === true,
       },
     );
+    try {
+      this.#assertActive();
+      return release;
+    } catch (error) {
+      await release();
+      throw error;
+    }
   }
 
   async #runMutation(
@@ -2957,8 +3118,9 @@ class VerifiedLarkCliTransport
     payloadHash: `sha256:${string}`,
     parentAuthorization: ApprovedEgressAuthorization,
     args: readonly string[],
-    options: LarkCliRunOptions = {},
+    options: LarkCliInvocationOptions = {},
   ): Promise<unknown> {
+    this.#assertActive();
     assertApprovedEgressAuthorizationCurrent(
       parentAuthorization,
       this.#clock,
@@ -2988,10 +3150,16 @@ class VerifiedLarkCliTransport
     );
     await this.#egressAudit.append(authorization);
     await this.#egressAudit.assertRecorded(authorization);
+    await this.#attestExecutable();
     assertApprovedEgressAuthorizationCurrent(authorization, this.#clock);
+    this.#assertActive();
     // The runner is invoked synchronously after the final currentness check.
     // The production runner synchronously spawns the frozen native binary.
-    const pending = this.#runner(args, options);
+    const pending = invokeLarkCliRunner(
+      this.#runner,
+      args,
+      options,
+    );
     return await pending;
   }
 
@@ -3041,70 +3209,60 @@ class VerifiedLarkCliTransport
     readonly mutationContext: Record<string, unknown>;
   }): Promise<LarkDocumentReadback> {
     const reportToken = this.#reportDocumentToken();
-    const directory = await mkdtemp(join(tmpdir(), "ppt-lark-report-"));
-    const filename = "report.md";
-    try {
-      await writeFile(join(directory, filename), command.content, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      const mutationHash = sha256(
-        canonicalPayload({
-          operation: command.operation,
-          reportToken,
-          expectedRevisionId: command.expectedRevisionId,
-          contentHash: sha256(command.content),
-          ...command.mutationContext,
-        }),
-      );
-      const update = await this.#runMutation(
-        command.operation,
-        mutationHash,
-        command.authorization,
-        [
-          "docs",
-          "+update",
-          "--doc",
-          reportToken,
-          "--command",
-          "overwrite",
-          "--revision-id",
-          String(command.expectedRevisionId),
-          "--doc-format",
-          "markdown",
-          "--content",
-          `@${filename}`,
-          "--format",
-          "json",
-          "--as",
-          "user",
-        ],
-        { cwd: directory },
-      );
-      const updateRevision = parseLarkDocumentUpdateRevision(
-        update,
+    const mutationHash = sha256(
+      canonicalPayload({
+        operation: command.operation,
         reportToken,
-        this.#configuration.reportDocumentExpectedOrigin,
+        expectedRevisionId: command.expectedRevisionId,
+        contentHash: sha256(command.content),
+        ...command.mutationContext,
+      }),
+    );
+    const update = await this.#runMutation(
+      command.operation,
+      mutationHash,
+      command.authorization,
+      [
+        "docs",
+        "+update",
+        "--doc",
+        reportToken,
+        "--command",
+        "overwrite",
+        "--revision-id",
+        String(command.expectedRevisionId),
+        "--doc-format",
+        "markdown",
+        "--content",
+        "-",
+        "--format",
+        "json",
+        "--as",
+        "user",
+      ],
+      { stdin: command.content },
+    );
+    const updateRevision = parseLarkDocumentUpdateRevision(
+      update,
+      reportToken,
+      this.#configuration.reportDocumentExpectedOrigin,
+    );
+    if (updateRevision <= command.expectedRevisionId) {
+      throw new Error(
+        "Lark report update did not advance the expected revision",
       );
-      if (updateRevision <= command.expectedRevisionId) {
-        throw new Error(
-          "Lark report update did not advance the expected revision",
-        );
-      }
-      const readback = await this.#fetchReportDocument();
-      if (
-        readback.revisionId !== updateRevision ||
-        normalizeMarkdown(readback.content) !==
-          normalizeMarkdown(command.content)
-      ) {
-        throw new Error(
-          "Lark report readback content or revision is not bound to the projected report",
-        );
-      }
-      return readback;
-    } finally {
-      await rm(directory, { recursive: true, force: true });
     }
+    const readback = await this.#fetchReportDocument();
+    if (
+      readback.revisionId !== updateRevision ||
+      normalizeMarkdown(readback.content) !==
+        normalizeMarkdown(command.content)
+    ) {
+      throw new Error(
+        "Lark report readback content or revision is not bound to the projected report",
+      );
+    }
+    return readback;
   }
 
   async preflight(
@@ -3112,6 +3270,7 @@ class VerifiedLarkCliTransport
       readonly requireReportDocument?: boolean;
     } = {},
   ): Promise<void> {
+    this.#assertActive();
     const releaseConcurrencyProbe =
       await acquireLarkSingleWorkstationMutex(
         this.#configuration,
@@ -3147,12 +3306,56 @@ class VerifiedLarkCliTransport
       identity !== null && typeof identity === "object"
         ? (identity as Record<string, unknown>)
         : {};
+    const identityBinding = this.#configuration.cliIdentityBinding;
+    const onBehalfOf =
+      identityRecord.onBehalfOf !== null &&
+      typeof identityRecord.onBehalfOf === "object"
+        ? (identityRecord.onBehalfOf as Record<string, unknown>)
+        : {};
+    const expectedRegion =
+      identityBinding?.brand === "feishu"
+        ? "cn"
+        : identityBinding?.brand === "lark"
+          ? "global"
+          : null;
     if (
       identityRecord.available !== true ||
-      identityRecord.identity !== "user"
+      identityRecord.identity !== "user" ||
+      identityBinding === undefined ||
+      identityRecord.profile !== identityBinding.profile ||
+      identityRecord.appId !== identityBinding.appId ||
+      identityRecord.brand !== identityBinding.brand ||
+      identityRecord.defaultAs !== identityBinding.defaultAs ||
+      identityRecord.identitySource !==
+        identityBinding.identitySource ||
+      onBehalfOf.openId !== identityBinding.userOpenId ||
+      this.#configuration.targetAccount !==
+        identityBinding.userOpenId ||
+      this.#configuration.targetRegion !== expectedRegion
     ) {
       throw new Error(
-        "lark-cli production preflight requires a ready user identity",
+        "lark-cli production preflight identity binding does not match the configured user profile, app, account, or region",
+      );
+    }
+    const currentUserEnvelope = await this.#run([
+      "contact",
+      "+get-user",
+      "--format",
+      "json",
+      "--as",
+      "user",
+    ]);
+    const currentUser = collectRecords(currentUserEnvelope).find(
+      (record) =>
+        typeof record.open_id === "string" &&
+        typeof record.tenant_key === "string",
+    );
+    if (
+      currentUser?.open_id !== identityBinding.userOpenId ||
+      currentUser.tenant_key !== identityBinding.tenantKey
+    ) {
+      throw new Error(
+        "lark-cli production preflight user and tenant do not match the configured identity binding",
       );
     }
 
@@ -3323,6 +3526,7 @@ class VerifiedLarkCliTransport
   async verifyRecord(
     command: Parameters<LarkBaseProjectionTransportPort["verifyRecord"]>[0],
   ): Promise<void> {
+    this.#assertActive();
     await this.#verifiedRecordId(command);
   }
 
@@ -3332,6 +3536,7 @@ class VerifiedLarkCliTransport
     readonly remoteRecordId: string;
     readonly recordUrl: string;
   }> {
+    this.#assertActive();
     return await this.#withMutex(
       "stable-record",
       canonicalPayload({
@@ -3446,7 +3651,9 @@ class VerifiedLarkCliTransport
     readonly remoteHash: `sha256:${string}`;
     readonly attachmentUrl: string;
   }> {
-    if (sha256(command.content) !== command.contentHash) {
+    this.#assertActive();
+    const contentSnapshot = Uint8Array.from(command.content);
+    if (sha256(contentSnapshot) !== command.contentHash) {
       throw new Error("Lark Base attachment input hash mismatch");
     }
     const safeOriginalName =
@@ -3492,24 +3699,20 @@ class VerifiedLarkCliTransport
           `${this.pageEvidenceBaseUrl}/attachments/${encodeURIComponent(existingToken)}`,
       };
     }
-    const directory = await mkdtemp(join(tmpdir(), "ppt-lark-upload-"));
-    const path = join(directory, filename);
-    try {
-      await writeFile(path, command.content, { mode: 0o600 });
-      const mutationHash = sha256(canonicalPayload({
-        operation: "record-upload-attachment",
-        tableId: this.#configuration.tables.artifacts,
-        remoteRecordId: command.remoteRecordId,
-        stableId: command.stableId,
-        attachmentRole: command.attachmentRole,
-        filename,
-        contentHash: command.contentHash,
-      }));
-      const response = await this.#runMutation(
-        "record-upload-attachment",
-        mutationHash,
-        command.authorization,
-        [
+    const mutationHash = sha256(canonicalPayload({
+      operation: "record-upload-attachment",
+      tableId: this.#configuration.tables.artifacts,
+      remoteRecordId: command.remoteRecordId,
+      stableId: command.stableId,
+      attachmentRole: command.attachmentRole,
+      filename,
+      contentHash: command.contentHash,
+    }));
+    const response = await this.#runMutation(
+      "record-upload-attachment",
+      mutationHash,
+      command.authorization,
+      [
         "base",
         "+record-upload-attachment",
         "--base-token",
@@ -3526,29 +3729,33 @@ class VerifiedLarkCliTransport
         "json",
         "--as",
         "user",
-        ],
-        { cwd: directory },
-      );
-      const token = collectRecords(response)
-        .map((record) => record.file_token ?? record.fileToken)
-        .find((value): value is string => typeof value === "string");
-      if (token === undefined) {
-        throw new Error("lark-cli attachment upload returned no file token");
-      }
-      return {
-        fileToken: token,
-        remoteHash: sha256(Uint8Array.from(await readFile(path))),
-        attachmentUrl:
-          `${this.pageEvidenceBaseUrl}/attachments/${encodeURIComponent(token)}`,
-      };
-    } finally {
-      await rm(directory, { recursive: true, force: true });
+      ],
+      {
+        inputSnapshot: {
+          filename,
+          content: contentSnapshot,
+          contentHash: command.contentHash,
+        },
+      },
+    );
+    const token = collectRecords(response)
+      .map((record) => record.file_token ?? record.fileToken)
+      .find((value): value is string => typeof value === "string");
+    if (token === undefined) {
+      throw new Error("lark-cli attachment upload returned no file token");
     }
+    return {
+      fileToken: token,
+      remoteHash: command.contentHash,
+      attachmentUrl:
+        `${this.pageEvidenceBaseUrl}/attachments/${encodeURIComponent(token)}`,
+    };
   }
 
   async downloadAttachment(
     command: Parameters<LarkBaseProjectionTransportPort["downloadAttachment"]>[0],
   ): Promise<Uint8Array> {
+    this.#assertActive();
     const record = await this.#findRecord(
       "artifacts",
       command.stableId,
@@ -3621,6 +3828,7 @@ class VerifiedLarkCliTransport
   async createRecordShareLink(
     command: Parameters<LarkBaseProjectionTransportPort["createRecordShareLink"]>[0],
   ): Promise<string> {
+    this.#assertActive();
     const mutationHash = sha256(canonicalPayload({
       operation: "record-share-link-create",
       tableId: this.#configuration.tables[command.tableKey],
@@ -3655,6 +3863,7 @@ class VerifiedLarkCliTransport
   async verifyPageEvidence(
     command: Parameters<LarkBaseProjectionTransportPort["verifyPageEvidence"]>[0],
   ): Promise<void> {
+    this.#assertActive();
     if (
       command.mimeType !== "image/png" ||
       sha256(command.content) !== command.contentHash
@@ -3770,6 +3979,7 @@ class VerifiedLarkCliTransport
     readonly remoteContentHash: `sha256:${string}`;
     readonly revisionId: number;
   }> {
+    this.#assertActive();
     if (command.reports.length === 0) {
       throw new Error("Lark report collection cannot be empty");
     }
@@ -3815,6 +4025,7 @@ class VerifiedLarkCliTransport
   async verifyReportCollection(
     command: Parameters<LarkBaseProjectionTransportPort["verifyReportCollection"]>[0],
   ): Promise<void> {
+    this.#assertActive();
     if (
       command.reports.length === 0 ||
       sha256(canonicalPayload(command.reports)) !==
@@ -3843,6 +4054,7 @@ class VerifiedLarkCliTransport
   async readCommitMarker(
     command: Parameters<LarkBaseProjectionTransportPort["readCommitMarker"]>[0],
   ): Promise<LarkCommitMarker | null> {
+    this.#assertActive();
     const record = await this.#findRecord(
       "commit_markers",
       `commit:${command.jobId}`,
@@ -4081,10 +4293,11 @@ class VerifiedLarkCliTransport
     readonly jobId: string;
     readonly runIds: readonly string[];
   }): Promise<ProductionJobRemoteState> {
+    this.#assertActive();
     const marker = await this.readCommitMarker({ jobId: command.jobId });
     if (marker !== null) {
       return {
-        state: "committed",
+        state: "commit_marker_present_unverified",
         marker,
         observedStableIds: [command.jobId],
       };
@@ -4278,6 +4491,7 @@ class VerifiedLarkCliTransport
     readonly authorization: ApprovedEgressAuthorization;
     readonly claimedAt: string;
   }): Promise<"claimed" | "already_claimed"> {
+    this.#assertActive();
     return await this.#withMutex(
       "claim",
       command.jobId,
@@ -4496,6 +4710,7 @@ class VerifiedLarkCliTransport
     readonly notSubmittedAttemptIds: readonly string[];
     readonly abortedAt: string;
   }): Promise<void> {
+    this.#assertActive();
     await this.#withMutex(
       "claim",
       command.jobId,
@@ -4607,6 +4822,7 @@ class VerifiedLarkCliTransport
   async commitBatch(
     command: Parameters<LarkBaseProjectionTransportPort["commitBatch"]>[0],
   ): Promise<void> {
+    this.#assertActive();
     const { authorization, ...marker } = command;
     const payload = canonicalPayload(marker);
     await this.upsertRecord({
@@ -4697,6 +4913,26 @@ export async function createVerifiedLarkCliTransport(options: {
   })) {
     nonEmpty(value, label);
   }
+  if (options.configuration.cliIdentityBinding !== undefined) {
+    for (const [label, value] of Object.entries(
+      options.configuration.cliIdentityBinding,
+    )) {
+      nonEmpty(value, `cliIdentityBinding.${label}`);
+    }
+    const expectedRegion =
+      options.configuration.cliIdentityBinding.brand === "feishu"
+        ? "cn"
+        : "global";
+    if (
+      options.configuration.targetAccount !==
+        options.configuration.cliIdentityBinding.userOpenId ||
+      options.configuration.targetRegion !== expectedRegion
+    ) {
+      throw new Error(
+        "Lark target account or region does not match the configured CLI identity binding",
+      );
+    }
+  }
   for (const [tableKey, tableId] of Object.entries(
     options.configuration.tables,
   )) {
@@ -4737,8 +4973,15 @@ export async function createVerifiedLarkCliTransport(options: {
     options.egressAuthorization,
     options.egressAudit,
     options.clock ?? SYSTEM_CLOCK,
+    undefined,
+    undefined,
+    async () => await attestFrozenLarkCliExecutable(binaryPath),
   );
   VERIFIED_LARK_TRANSPORTS.add(transport);
+  VERIFIED_LARK_DESTINATIONS.set(transport, {
+    targetAccount: options.configuration.targetAccount,
+    targetRegion: options.configuration.targetRegion,
+  });
   return transport;
 }
 
@@ -4753,6 +4996,7 @@ export function createLarkCliTransportForMutationBoundaryTest(options: {
   readonly clock: ClockPort;
   readonly run: LarkCliJsonRunner;
   readonly claimLeaseForTest?: LarkExecutionLeasePort;
+  readonly attestExecutableForTest?: LarkCliExecutableAttestor;
 }): LarkBaseProjectionTransportPort {
   return new VerifiedLarkCliTransport(
     FROZEN_LARK_CLI_BINARY,
@@ -4762,5 +5006,6 @@ export function createLarkCliTransportForMutationBoundaryTest(options: {
     options.clock,
     options.run,
     options.claimLeaseForTest,
+    options.attestExecutableForTest,
   );
 }

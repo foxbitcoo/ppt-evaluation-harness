@@ -456,6 +456,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       run.artifactId !== record.artifactId ||
       job.provenance !== record.provenance ||
       run.provenance !== record.provenance ||
+      evaluationCase.provenance !== record.provenance ||
       job.environmentOrigin !== record.environmentOrigin ||
       run.environmentOrigin !== record.environmentOrigin ||
       evaluationCase.environmentOrigin !== record.environmentOrigin
@@ -465,6 +466,333 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       );
     }
     return { evaluationCase, job, run };
+  }
+
+  #assertComparisonRelations(record: ComparisonRecord): void {
+    if (
+      record.leftRunId === record.rightRunId ||
+      record.leftScorecardId === record.rightScorecardId
+    ) {
+      throw new Error(
+        "Comparison lineage requires distinct Runs and Scorecards",
+      );
+    }
+    const jobs = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "bakeoff_job" &&
+        candidate.jobId === record.jobId,
+    );
+    const cases = this.#caseTable.filter(
+      ({ caseId }) => caseId === record.caseId,
+    );
+    const leftRuns = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "vendor_run" &&
+        candidate.recordId === record.leftRunId,
+    );
+    const rightRuns = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "vendor_run" &&
+        candidate.recordId === record.rightRunId,
+    );
+    assertArtifactScoreIdentities(this.#artifactScoreTable);
+    const leftScores = this.#artifactScoreTable.filter(
+      ({ scorecard }) =>
+        scorecard.scorecardId === record.leftScorecardId,
+    );
+    const rightScores = this.#artifactScoreTable.filter(
+      ({ scorecard }) =>
+        scorecard.scorecardId === record.rightScorecardId,
+    );
+    const job = jobs[0];
+    const evaluationCase = cases[0];
+    const leftRun = leftRuns[0];
+    const rightRun = rightRuns[0];
+    const leftScore = leftScores[0];
+    const rightScore = rightScores[0];
+    if (
+      jobs.length !== 1 ||
+      cases.length !== 1 ||
+      leftRuns.length !== 1 ||
+      rightRuns.length !== 1 ||
+      leftScores.length !== 1 ||
+      rightScores.length !== 1 ||
+      job === undefined ||
+      evaluationCase === undefined ||
+      leftRun === undefined ||
+      rightRun === undefined ||
+      leftScore === undefined ||
+      rightScore === undefined ||
+      job.caseId !== record.caseId ||
+      evaluationCase.caseId !== job.caseId ||
+      job.selectedRunIds === null ||
+      !job.selectedRunIds.includes(record.leftRunId) ||
+      !job.selectedRunIds.includes(record.rightRunId) ||
+      leftRun.jobId !== record.jobId ||
+      rightRun.jobId !== record.jobId ||
+      leftRun.caseId !== record.caseId ||
+      rightRun.caseId !== record.caseId ||
+      leftRun.parentRecordId !== job.recordId ||
+      rightRun.parentRecordId !== job.recordId ||
+      leftRun.product === null ||
+      rightRun.product === null ||
+      leftScore.jobId !== record.jobId ||
+      rightScore.jobId !== record.jobId ||
+      leftScore.caseId !== record.caseId ||
+      rightScore.caseId !== record.caseId ||
+      leftScore.runId !== record.leftRunId ||
+      rightScore.runId !== record.rightRunId ||
+      leftScore.provenance !== record.provenance ||
+      rightScore.provenance !== record.provenance ||
+      job.provenance !== record.provenance ||
+      leftRun.provenance !== record.provenance ||
+      rightRun.provenance !== record.provenance ||
+      leftScore.environmentOrigin !== record.environmentOrigin ||
+      rightScore.environmentOrigin !== record.environmentOrigin ||
+      job.environmentOrigin !== record.environmentOrigin ||
+      evaluationCase.environmentOrigin !== record.environmentOrigin ||
+      leftRun.environmentOrigin !== record.environmentOrigin ||
+      rightRun.environmentOrigin !== record.environmentOrigin ||
+      !isDeepStrictEqual(
+        leftScore.comparisonCompatibilityFingerprint,
+        rightScore.comparisonCompatibilityFingerprint,
+      )
+    ) {
+      throw new Error(
+        "Comparison lineage does not match one compatible persisted Case, Job, pair of Runs, Captures, and Scorecards",
+      );
+    }
+    const leftRelations = this.#assertArtifactProjectionRelations(
+      leftScore,
+    );
+    const rightRelations = this.#assertArtifactProjectionRelations(
+      rightScore,
+    );
+    assertArtifactScoreCompatibility(
+      leftScore,
+      leftRelations.evaluationCase,
+      leftRelations.job.protocolSnapshot,
+    );
+    assertArtifactScoreCompatibility(
+      rightScore,
+      rightRelations.evaluationCase,
+      rightRelations.job.protocolSnapshot,
+    );
+    assertCaptureScoreBindings(
+      this.#capturedArtifactTable,
+      [leftScore, rightScore],
+    );
+  }
+
+  #assertGapCardRelations(record: ProductGapCardRecord): void {
+    const comparisons = this.#productGapCardTable.filter(
+      (candidate): candidate is ComparisonRecord =>
+        candidate.recordType === "comparison" &&
+        candidate.comparisonId === record.comparisonId,
+    );
+    const comparison = comparisons[0];
+    if (
+      comparisons.length !== 1 ||
+      comparison === undefined ||
+      comparison.caseId !== record.caseId ||
+      comparison.jobId !== record.jobId ||
+      comparison.provenance !== record.provenance ||
+      comparison.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "Gap Card lineage does not match exactly one persisted Comparison",
+      );
+    }
+    this.#assertComparisonRelations(comparison);
+    const scoreFor = (
+      scorecardId: string,
+      side: "left" | "right",
+    ): ArtifactScoreTableRecord => {
+      const scores = this.#artifactScoreTable.filter(
+        ({ scorecard }) =>
+          scorecard.scorecardId === scorecardId,
+      );
+      const score = scores[0];
+      if (scores.length !== 1 || score === undefined) {
+        throw new Error(
+          `Gap Card ${side} evidence does not match one persisted Scorecard`,
+        );
+      }
+      return score;
+    };
+    const leftScore = scoreFor(comparison.leftScorecardId, "left");
+    const rightScore = scoreFor(
+      comparison.rightScorecardId,
+      "right",
+    );
+    const assertEvidence = (
+      side: "left" | "right",
+      evidence: ProductGapCardRecord["leftEvidence"],
+      score: ArtifactScoreTableRecord,
+      expectedRunId: string,
+      keyPages: readonly number[],
+    ) => {
+      const run = this.#runRecordTable.find(
+        (candidate) =>
+          candidate.recordType === "vendor_run" &&
+          candidate.recordId === expectedRunId,
+      );
+      const modelDimension = score.scorecard.dimensions.find(
+        ({ dimension }) => dimension === record.dimension,
+      );
+      const matchingAdjudications = this.#adjudicationEventTable
+        .filter(
+          (event) =>
+            event.scorecardId === score.scorecard.scorecardId &&
+            event.dimension === record.dimension,
+        );
+      const linkedPages = evidence.links.map(
+        ({ pageNumber }) => pageNumber,
+      );
+      const matchesPersistedAssessment =
+        modelDimension !== undefined &&
+        [
+          {
+            assessmentStatus: modelDimension.assessmentStatus,
+            value: modelDimension.value,
+            evidencePages: modelDimension.evidencePages,
+            rationale: modelDimension.rationale,
+          },
+          ...matchingAdjudications.map((event) => ({
+            assessmentStatus:
+              event.humanFinalAssessmentStatus,
+            value: event.humanFinalScore,
+            evidencePages: event.evidencePages,
+            rationale: event.reason,
+          })),
+        ].some(
+          (assessment) =>
+            assessment.assessmentStatus === "ASSESSED" &&
+            assessment.value !== null &&
+            evidence.value === assessment.value &&
+            evidence.rationale === assessment.rationale &&
+            isDeepStrictEqual(
+              linkedPages,
+              assessment.evidencePages.slice(0, 3),
+            ),
+        );
+      if (
+        run === undefined ||
+        run.product === null ||
+        score.runId !== expectedRunId ||
+        evidence.product !== run.product ||
+        evidence.runId !== expectedRunId ||
+        evidence.artifactId !== score.artifactId ||
+        evidence.scorecardId !== score.scorecard.scorecardId ||
+        modelDimension === undefined ||
+        !matchesPersistedAssessment ||
+        !isDeepStrictEqual(keyPages, linkedPages) ||
+        evidence.links.some(
+          ({ url }) =>
+            typeof url !== "string" || url.trim().length === 0,
+        )
+      ) {
+        throw new Error(
+          `Gap Card ${side} evidence contains inconsistent Scorecard lineage`,
+        );
+      }
+    };
+    assertEvidence(
+      "left",
+      record.leftEvidence,
+      leftScore,
+      comparison.leftRunId,
+      record.keyPages.left,
+    );
+    assertEvidence(
+      "right",
+      record.rightEvidence,
+      rightScore,
+      comparison.rightRunId,
+      record.keyPages.right,
+    );
+    if (record.leftEvidence.value === record.rightEvidence.value) {
+      throw new Error(
+        "Gap Card requires a non-zero difference between its Comparison sides",
+      );
+    }
+  }
+
+  #assertReportRelations(
+    report: FeishuReportDraft | FeishuReport,
+  ): void {
+    const jobs = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "bakeoff_job" &&
+        candidate.jobId === report.jobId,
+    );
+    const job = jobs[0];
+    const evaluationCases =
+      job === undefined
+        ? []
+        : this.#caseTable.filter(
+            ({ caseId }) => caseId === job.caseId,
+          );
+    const evaluationCase = evaluationCases[0];
+    const selectedRunIds = job?.selectedRunIds;
+    const reportRunIds = new Set(report.runIds);
+    const expectedRunIds = new Set(selectedRunIds ?? []);
+    const capturedArtifacts = this.#capturedArtifactTable.filter(
+      ({ jobId }) => jobId === report.jobId,
+    );
+    const reportArtifactIds = new Set(report.artifactIds);
+    const expectedArtifactIds = new Set(
+      capturedArtifacts.map(({ artifactId }) => artifactId),
+    );
+    const runIdsMatch =
+      selectedRunIds !== null &&
+      selectedRunIds !== undefined &&
+      reportRunIds.size === report.runIds.length &&
+      expectedRunIds.size === selectedRunIds.length &&
+      reportRunIds.size === expectedRunIds.size &&
+      [...reportRunIds].every((runId) =>
+        expectedRunIds.has(runId),
+      );
+    const artifactIdsMatch =
+      reportArtifactIds.size === report.artifactIds.length &&
+      reportArtifactIds.size === expectedArtifactIds.size &&
+      [...reportArtifactIds].every((artifactId) =>
+        expectedArtifactIds.has(artifactId),
+      );
+    const vendorRuns = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "vendor_run" &&
+        candidate.jobId === report.jobId,
+    );
+    if (
+      jobs.length !== 1 ||
+      evaluationCases.length !== 1 ||
+      job === undefined ||
+      evaluationCase === undefined ||
+      job.provenance !== report.provenance ||
+      evaluationCase.provenance !== report.provenance ||
+      job.environmentOrigin !== report.environmentOrigin ||
+      evaluationCase.environmentOrigin !==
+        report.environmentOrigin ||
+      !runIdsMatch ||
+      !artifactIdsMatch ||
+      vendorRuns.length !== expectedRunIds.size ||
+      vendorRuns.some(
+        (run) =>
+          !expectedRunIds.has(run.recordId) ||
+          run.caseId !== job.caseId ||
+          run.parentRecordId !== job.recordId ||
+          run.provenance !== report.provenance ||
+          run.environmentOrigin !== report.environmentOrigin,
+      )
+    ) {
+      throw new Error(
+        "Report lineage does not match exactly one persisted Case, Job, selected Run collection, and captured Artifact collection",
+      );
+    }
+    for (const capture of capturedArtifacts) {
+      this.#assertArtifactProjectionRelations(capture);
+    }
   }
 
   async #runProjectionExclusive<T>(
@@ -535,12 +863,25 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     reportUrl: string,
     role: "primary" | "auxiliary" = "primary",
   ): Promise<void> {
+    this.#assertJobActive(jobId);
     const parentIndex = this.#runRecordTable.findIndex(
       (record) => record.recordType === "bakeoff_job" && record.jobId === jobId,
     );
     const parentRecord = this.#runRecordTable[parentIndex];
     if (parentIndex === -1 || parentRecord === undefined) {
       throw new Error(`Bakeoff Job record not found: ${jobId}`);
+    }
+    const ownedReports = this.#reports.filter(
+      (report) =>
+        report.url === reportUrl && report.jobId === jobId,
+    );
+    if (ownedReports.length === 0) {
+      throw new Error(
+        `Report ownership does not match Bakeoff Job: ${jobId}`,
+      );
+    }
+    for (const report of ownedReports) {
+      this.#assertReportRelations(report);
     }
     this.#runRecordTable[parentIndex] = {
       ...parentRecord,
@@ -872,6 +1213,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async appendComparison(record: ComparisonRecord): Promise<void> {
     this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Comparison");
+    this.#assertComparisonRelations(record);
     const existing = this.#productGapCardTable.find(
       (candidate) =>
         candidate.recordType === "comparison" &&
@@ -892,6 +1234,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async appendProductGapCard(record: ProductGapCardRecord): Promise<void> {
     this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Product gap comparison");
+    this.#assertGapCardRelations(record);
     const existing = this.#productGapCardTable.find(
       (candidate) =>
         candidate.recordType === "gap_card" &&
@@ -1155,6 +1498,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async createReport(draft: FeishuReportDraft): Promise<FeishuReport> {
     this.#assertJobActive(draft.jobId);
     this.#assertAllowed(draft.environmentOrigin, "Report");
+    this.#assertReportRelations(draft);
     const suppliedUrl = (draft as FeishuReport).url;
     const report = {
       ...draft,
@@ -1312,6 +1656,78 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     };
   }
 
+  async #assertSnapshotRelationalIntegrity(
+    snapshot: FeishuProjectionSnapshot,
+  ): Promise<void> {
+    const validation = new InMemoryFeishuProjection({
+      targetEnvironment: this.targetEnvironment,
+      egressDestination: this.egressDestination,
+      clock: this.#clock,
+    });
+    for (const record of snapshot.caseTable) {
+      await validation.upsertCase(record);
+    }
+    for (const record of snapshot.runRecordTable) {
+      await validation.appendRunRecord(record);
+    }
+    for (const record of snapshot.capturedArtifactTable) {
+      await validation.appendCapturedArtifact(record);
+    }
+    for (const record of snapshot.artifactScoreTable) {
+      await validation.appendArtifactScore(record);
+    }
+    for (const record of snapshot.adjudicationEventTable) {
+      await validation.appendAdjudicationEvent(record);
+    }
+    for (const record of snapshot.reviewEventTable) {
+      await validation.appendReviewEvent(record);
+    }
+    for (const record of snapshot.productGapCardTable) {
+      if (record.recordType === "comparison") {
+        await validation.appendComparison(record);
+      }
+    }
+    for (const record of snapshot.productGapCardTable) {
+      if (record.recordType === "gap_card") {
+        await validation.appendProductGapCard(record);
+      }
+    }
+    for (const record of snapshot.gapCardWorkflowEventTable) {
+      await validation.appendProductGapCardWorkflowEvent(record);
+    }
+    for (const record of snapshot.githubIssueDeliveryReservationTable) {
+      await validation.reserveGitHubIssueDelivery(record);
+    }
+    for (const record of snapshot.githubIssueLinkEventTable) {
+      await validation.appendGitHubIssueLinkEvent(record);
+    }
+    for (const report of snapshot.reports) {
+      const created = await validation.createReport(report);
+      if (!isDeepStrictEqual(created, report)) {
+        throw new Error(
+          `Operational ledger projection report mismatch: ${report.reportId}`,
+        );
+      }
+    }
+    for (const record of snapshot.runRecordTable) {
+      if (record.recordType !== "bakeoff_job") continue;
+      if (record.reportUrl !== null) {
+        await validation.linkReportToBakeoffJob(
+          record.jobId,
+          record.reportUrl,
+          "primary",
+        );
+      }
+      for (const reportUrl of record.auxiliaryReportUrls ?? []) {
+        await validation.linkReportToBakeoffJob(
+          record.jobId,
+          reportUrl,
+          "auxiliary",
+        );
+      }
+    }
+  }
+
   async commitAuthorizedSnapshot(
     snapshot: FeishuProjectionSnapshot,
     authorization: ApprovedEgressAuthorization,
@@ -1422,12 +1838,24 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         authorization,
         this.#clock,
       );
+      await this.#assertSnapshotRelationalIntegrity(snapshot);
+      assertApprovedEgressAuthorizationCurrent(
+        authorization,
+        this.#clock,
+      );
       const materializedSnapshot =
         await this.materializeAuthorizedSnapshot(
           snapshot,
           authorization,
           baseline,
         );
+      await this.#assertSnapshotRelationalIntegrity(
+        materializedSnapshot,
+      );
+      assertApprovedEgressAuthorizationCurrent(
+        authorization,
+        this.#clock,
+      );
       const stableMaterializationView = (
         candidate: FeishuProjectionSnapshot,
       ) => {
@@ -1665,7 +2093,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         for (const record of materializedSnapshot.productGapCardTable) {
           if (record.recordType === "comparison") {
             await working.appendComparison(record);
-          } else {
+          }
+        }
+        for (const record of materializedSnapshot.productGapCardTable) {
+          if (record.recordType === "gap_card") {
             await working.appendProductGapCard(record);
           }
         }

@@ -1,5 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rm } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 
 export interface BrowserProfileLockPort {
@@ -51,7 +52,6 @@ export class FileSystemBrowserProfileLock
   readonly isolation = "cross_process" as const;
   readonly lockId: string;
   readonly #rootPath: string;
-  readonly #retryMs: number;
   readonly #timeoutMs: number;
 
   constructor(input: {
@@ -68,8 +68,16 @@ export class FileSystemBrowserProfileLock
     if (this.#rootPath === sep) {
       throw new Error("Browser profile lock root must be narrowly scoped");
     }
-    this.#retryMs = input.retryMs ?? 25;
+    if (
+      input.retryMs !== undefined &&
+      (!Number.isFinite(input.retryMs) || input.retryMs <= 0)
+    ) {
+      throw new Error("Browser profile lock retry interval is invalid");
+    }
     this.#timeoutMs = input.timeoutMs ?? 30 * 60 * 1_000;
+    if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) {
+      throw new Error("Browser profile lock timeout is invalid");
+    }
   }
 
   async runExclusive<T>(
@@ -81,47 +89,95 @@ export class FileSystemBrowserProfileLock
       .update(profileDigest)
       .digest("hex");
     const path = resolve(this.#rootPath, `${digest}.lock`);
-    const owner = randomUUID();
-    const deadline = Date.now() + this.#timeoutMs;
-    for (;;) {
-      try {
-        const handle = await open(path, "wx", 0o600);
-        try {
-          await handle.writeFile(owner);
-          await handle.sync();
-        } finally {
-          await handle.close();
+    const handshake = "ppt-browser-profile-lock-acquired-v1\n";
+    const releaseCommand = "release\n";
+    const holderScript = [
+      'let input = "";',
+      'process.stdin.setEncoding("utf8");',
+      'process.stdin.on("data", (value) => { input += value; });',
+      'process.stdin.on("end", () => {',
+      `  process.exit(input === "" || input === ${JSON.stringify(releaseCommand)} ? 0 : 64);`,
+      "});",
+      `process.stdout.write(${JSON.stringify(handshake)});`,
+      "process.stdin.resume();",
+    ].join("\n");
+    const child = spawn(
+      "/usr/bin/lockf",
+      [
+        "-t",
+        String(this.#timeoutMs / 1_000),
+        path,
+        process.execPath,
+        "--input-type=module",
+        "-e",
+        holderScript,
+      ],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { PATH: "/usr/bin:/bin" },
+      },
+    );
+    await new Promise<void>((resolveAcquired, rejectAcquired) => {
+      let settled = false;
+      let stdout = "";
+      let stderr = "";
+      const reject = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        rejectAcquired(error);
+      };
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (value: string) => {
+        if (settled) return;
+        stdout += value;
+        if (Buffer.byteLength(stdout, "utf8") > 256) {
+          child.kill("SIGKILL");
+          reject(new Error("Browser profile lock handshake exceeded its bound"));
+          return;
         }
-        break;
-      } catch (error) {
-        if (
-          !(error instanceof Error) ||
-          !("code" in error) ||
-          error.code !== "EEXIST"
-        ) {
-          throw error;
+        if (stdout === handshake) {
+          settled = true;
+          resolveAcquired();
         }
-        if (Date.now() >= deadline) {
-          throw new Error("Timed out acquiring WPS browser profile lock");
+      });
+      child.stderr.on("data", (value: string) => {
+        stderr += value;
+        if (Buffer.byteLength(stderr, "utf8") > 4_096) {
+          child.kill("SIGKILL");
+          reject(new Error("Browser profile lock error output exceeded its bound"));
         }
-        await new Promise<void>((resolveDelay) => {
-          setTimeout(resolveDelay, this.#retryMs);
-        });
-      }
-    }
+      });
+      child.once("error", (error) => reject(error));
+      child.once("close", () => {
+        reject(
+          new Error(
+            stderr.trim().length === 0
+              ? "Timed out acquiring WPS browser profile lock"
+              : `Timed out acquiring WPS browser profile lock: ${stderr.trim()}`,
+          ),
+        );
+      });
+    });
     try {
       return await operation();
     } finally {
-      let currentOwner: string | null = null;
-      try {
-        currentOwner = await readFile(path, "utf8");
-      } catch {
-        // A missing lock is handled as an ownership failure below.
-      }
-      if (currentOwner !== owner) {
-        throw new Error("WPS browser profile lock ownership was lost");
-      }
-      await rm(path, { force: true });
+      const closed = new Promise<void>((resolveClosed, rejectClosed) => {
+        child.once("error", rejectClosed);
+        child.once("close", (code, signal) => {
+          if (code === 0 && signal === null) {
+            resolveClosed();
+            return;
+          }
+          rejectClosed(
+            new Error(
+              `Browser profile lock holder exited unexpectedly: ${code}/${signal}`,
+            ),
+          );
+        });
+      });
+      child.stdin.end(releaseCommand);
+      await closed;
     }
   }
 }

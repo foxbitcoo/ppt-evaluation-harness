@@ -270,9 +270,14 @@ export function createProviderSubmissionIntentCheckpoint(
   command: ProductRunCommand,
   adapterVersion: string,
   observedAt = new Date().toISOString(),
+  submissionEpoch = 1,
 ): ObservableAttemptEvent {
+  if (!Number.isSafeInteger(submissionEpoch) || submissionEpoch < 1) {
+    throw new Error("Provider submission intent epoch is invalid");
+  }
+  const epochSuffix = submissionEpoch === 1 ? "" : `-${submissionEpoch}`;
   return Object.freeze({
-    eventId: `${command.attemptId}-submission-intent`,
+    eventId: `${command.attemptId}-submission-intent${epochSuffix}`,
     jobId: command.jobId,
     caseId: command.evaluationCase.caseId,
     runId: command.runId,
@@ -283,7 +288,7 @@ export function createProviderSubmissionIntentCheckpoint(
     observedAt,
     writerId: adapterVersion,
     evidenceRef:
-      `harness://${command.jobId}/${command.attemptId}/submission-intent`,
+      `harness://${command.jobId}/${command.attemptId}/submission-intent${epochSuffix}`,
     sourceUrl: null,
     submissionEvidenceAtCheckpoint: "unknown",
     vendorTaskId: null,
@@ -291,6 +296,91 @@ export function createProviderSubmissionIntentCheckpoint(
     adapterVersion,
     artifactId: null,
   });
+}
+
+function providerSubmissionIntentEpoch(
+  event: ObservableAttemptEvent,
+  attemptId: string,
+): number {
+  const match = new RegExp(
+    `^${attemptId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-submission-intent(?:-([1-9]\\d*))?$`,
+  ).exec(event.eventId);
+  if (match === null) {
+    throw new Error(
+      `Provider submission intent identity is invalid: ${event.eventId}`,
+    );
+  }
+  return match[1] === undefined ? 1 : Number(match[1]);
+}
+
+export async function appendProviderSubmissionIntentCheckpoint(
+  checkpointStore: AttemptCheckpointPort,
+  command: ProductRunCommand,
+  adapterVersion: string,
+  observedAt = new Date().toISOString(),
+): Promise<ObservableAttemptEvent> {
+  if (checkpointStore.readAttempt === undefined) {
+    throw new Error(
+      "Provider submission intent requires durable checkpoint readback",
+    );
+  }
+  const recovered = await checkpointStore.readAttempt(command.attemptId);
+  const intents = recovered.filter(
+    ({ eventType }) => eventType === PROVIDER_SUBMISSION_INTENT_EVENT_TYPE,
+  );
+  for (const event of intents) {
+    if (
+      event.jobId !== command.jobId ||
+      event.caseId !== command.evaluationCase.caseId ||
+      event.runId !== command.runId ||
+      event.attemptId !== command.attemptId ||
+      event.attemptSeq !== command.attemptSeq ||
+      event.writerId !== adapterVersion ||
+      event.adapterVersion !== adapterVersion ||
+      !isUnresolvedProviderSubmissionIntent(event)
+    ) {
+      throw new Error(
+        "Recovered provider submission intent lineage does not match the Attempt",
+      );
+    }
+  }
+  const epochs = intents.map((event) =>
+    providerSubmissionIntentEpoch(event, command.attemptId),
+  );
+  if (
+    epochs.some((epoch, index) => epoch !== index + 1) ||
+    new Set(epochs).size !== epochs.length
+  ) {
+    throw new Error(
+      "Provider submission intent epochs must be contiguous and ordered",
+    );
+  }
+  const submissionState = attemptSubmissionState(recovered);
+  if (submissionState === "submitted") {
+    throw new Error(
+      "Provider submission intent cannot follow submitted Attempt state",
+    );
+  }
+  if (submissionState === "unknown" && intents.length > 0) {
+    return Object.freeze(
+      structuredClone(intents[intents.length - 1]!),
+    );
+  }
+  if (submissionState !== "not_submitted") {
+    throw new Error(
+      "Provider submission intent requires proven non-submission",
+    );
+  }
+  const nextEpoch =
+    (epochs.at(-1) ?? 0) + 1;
+  const intent = createProviderSubmissionIntentCheckpoint(
+    command,
+    adapterVersion,
+    observedAt,
+    nextEpoch,
+  );
+  await checkpointStore.append(intent);
+  return intent;
 }
 
 export function isUnresolvedProviderSubmissionIntent(
@@ -370,16 +460,39 @@ export function attemptSubmissionState(
     }
     if (observed === "not_submitted") {
       if (
-        event.eventType !==
-          HARNESS_PROVIDER_EXECUTION_NOT_STARTED_EVENT_TYPE &&
+        event.eventType === "query_not_submitted" &&
         event.adapterVersion !== undefined &&
-        event.writerId === event.adapterVersion
+        event.writerId === event.adapterVersion &&
+        (event.vendorTaskId === null ||
+          event.vendorTaskId === undefined) &&
+        /^not_submitted@[1-9]\d*$/.test(
+          event.taskStateVersion ?? "",
+        )
       ) {
         state = "not_submitted";
       }
     }
   }
   return state;
+}
+
+export function submissionEvidenceBoundToCheckpoints(
+  reported: SubmissionEvidence,
+  events: readonly ObservableAttemptEvent[],
+): SubmissionEvidence {
+  const durable = attemptSubmissionState(events);
+  if (reported === "submitted") {
+    if (durable !== "submitted") {
+      throw new Error(
+        "Submitted Attempt result is not backed by durable checkpoints",
+      );
+    }
+    return "submitted";
+  }
+  if (reported === "unknown") {
+    return durable === "submitted" ? "submitted" : "unknown";
+  }
+  return durable;
 }
 
 export class InMemoryAttemptCheckpointStore

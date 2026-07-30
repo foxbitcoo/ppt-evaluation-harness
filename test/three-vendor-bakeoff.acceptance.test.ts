@@ -81,6 +81,7 @@ test("ordered submission state resolves explicit non-submission but never downgr
     eventId: `${control.attemptId}-not-submitted`,
     eventType: "query_not_submitted",
     submissionEvidenceAtCheckpoint: "not_submitted",
+    taskStateVersion: "not_submitted@1",
   };
   const submitted: ObservableAttemptEvent = {
     ...intent,

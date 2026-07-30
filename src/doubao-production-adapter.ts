@@ -7,8 +7,8 @@ import type {
   ObservableAttemptEvent,
 } from "./domain.ts";
 import {
+  appendProviderSubmissionIntentCheckpoint,
   attemptSubmissionState,
-  createProviderSubmissionIntentCheckpoint,
   isHarnessProviderExecutionNotStartedCheckpoint,
   isUnresolvedProviderSubmissionIntent,
 } from "./product-adapter.ts";
@@ -879,7 +879,9 @@ function materializeObservableEvents(
         vendorTaskId: eventVendorTaskId ?? null,
         taskStateVersion:
           eventVendorTaskId === undefined
-            ? null
+            ? event.eventType === "query_not_submitted"
+              ? `not_submitted@${index + 1}`
+              : null
             : `${event.eventType}@${index + 1}`,
         artifactId:
           event.eventType === "artifact_exported"
@@ -1218,11 +1220,15 @@ export function resolveDoubaoProductionExecutor(
       });
     }
     if (executionMode === "live") {
-      await checkpointStore?.append(
-        createProviderSubmissionIntentCheckpoint(
-          command,
-          DOUBAO_PRODUCTION_ADAPTER_VERSION,
-        ),
+      if (checkpointStore === undefined) {
+        throw new Error(
+          "Doubao live provider submission requires durable checkpoints",
+        );
+      }
+      await appendProviderSubmissionIntentCheckpoint(
+        checkpointStore,
+        command,
+        DOUBAO_PRODUCTION_ADAPTER_VERSION,
       );
     }
     const submission = await activeDriver.submitFrozenQuery({

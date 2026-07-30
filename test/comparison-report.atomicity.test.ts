@@ -73,6 +73,51 @@ class HttpsMaterializingProjection extends InMemoryFeishuProjection {
   }
 }
 
+class ObservedMaterializingProjection extends
+  HttpsMaterializingProjection {
+  materializationCalls = 0;
+
+  protected override async materializeAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+  ): Promise<FeishuProjectionSnapshot> {
+    this.materializationCalls += 1;
+    return super.materializeAuthorizedSnapshot(snapshot);
+  }
+}
+
+class CrossWiredReportMaterializingProjection extends
+  HttpsMaterializingProjection {
+  #crossWireNextMaterialization = false;
+
+  crossWireNextMaterialization(): void {
+    this.#crossWireNextMaterialization = true;
+  }
+
+  protected override async materializeAuthorizedSnapshot(
+    snapshot: FeishuProjectionSnapshot,
+  ): Promise<FeishuProjectionSnapshot> {
+    const materialized =
+      await super.materializeAuthorizedSnapshot(snapshot);
+    if (!this.#crossWireNextMaterialization) {
+      return materialized;
+    }
+    this.#crossWireNextMaterialization = false;
+    return {
+      ...materialized,
+      runRecordTable: materialized.runRecordTable.map((record) =>
+        record.recordType === "bakeoff_job" &&
+        record.reportUrl !== null
+          ? {
+              ...record,
+              reportUrl:
+                "https://example.test/docx/cross-wired-report",
+            }
+          : record,
+      ),
+    };
+  }
+}
+
 class ResponseLossAfterMaterializationProjection extends
   HttpsMaterializingProjection {
   #loseNextResponse = false;
@@ -315,11 +360,21 @@ async function threeVendorProductionSeed(): Promise<FeishuProjectionSnapshot> {
           scorecard,
           protocolSnapshot,
           evaluationCase,
+          capture.renderManifest,
         ),
     };
   });
   const safelyMaterializedSeed: FeishuProjectionSnapshot = {
     ...seed,
+    runRecordTable: seed.runRecordTable.map((record) =>
+      record.recordType === "bakeoff_job"
+        ? {
+            ...record,
+            reportUrl: null,
+            auxiliaryReportUrls: null,
+          }
+        : record,
+    ),
     capturedArtifactTable,
     artifactScoreTable,
   };
@@ -370,6 +425,80 @@ const dynamicPair = [
     rightRunId: "MOCK-run-doubao-volcano-v1",
   },
 ] as const;
+
+test("authorized snapshot validation rejects cross-table lineage before materialization", async () => {
+  const projection = new ObservedMaterializingProjection();
+  await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = projection.snapshot();
+  const comparisonIndex = snapshot.productGapCardTable.findIndex(
+    (record) => record.recordType === "comparison",
+  );
+  const comparison = snapshot.productGapCardTable[comparisonIndex];
+  assert.ok(comparison?.recordType === "comparison");
+  const invalidSnapshot: FeishuProjectionSnapshot = {
+    ...snapshot,
+    productGapCardTable: snapshot.productGapCardTable.map(
+      (record, index) =>
+        index !== comparisonIndex
+          ? record
+          : {
+              ...comparison,
+              leftRunId: comparison.rightRunId,
+              leftScorecardId: comparison.rightScorecardId,
+            },
+    ),
+  };
+  const materializationCallsBeforeInvalidCommit =
+    projection.materializationCalls;
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      invalidSnapshot,
+      await authorizeSnapshot(projection, invalidSnapshot),
+    ),
+    /Comparison.*lineage|distinct Runs|Scorecard/i,
+  );
+  assert.equal(
+    projection.materializationCalls,
+    materializationCallsBeforeInvalidCommit,
+  );
+});
+
+test("authorized snapshot validation rejects materialized report-link drift", async () => {
+  const projection =
+    new CrossWiredReportMaterializingProjection();
+  await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = projection.snapshot();
+  projection.crossWireNextMaterialization();
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      snapshot,
+      await authorizeSnapshot(projection, snapshot),
+    ),
+    /Report ownership does not match Bakeoff Job/i,
+  );
+});
 
 test("a successful materialized commit converges local Job report links and reports to the committed HTTPS snapshot", async () => {
   const projection = new HttpsMaterializingProjection();

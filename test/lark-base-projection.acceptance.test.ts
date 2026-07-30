@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { lstat, readFile, readlink } from "node:fs/promises";
 import test from "node:test";
 
@@ -1673,6 +1672,24 @@ test("verified Lark configuration maps seven logical record kinds onto four phys
       targetRegion: "cn",
     }),
   );
+  assert.throws(
+    () =>
+      createHarnessOwnedLarkBaseProjection({
+        transport,
+        targetAccount: "different-account",
+        targetRegion: "cn",
+      }),
+    /destination.*verified transport account and region/i,
+  );
+  assert.throws(
+    () =>
+      createHarnessOwnedLarkBaseProjection({
+        transport,
+        targetAccount: "test-account",
+        targetRegion: "global",
+      }),
+    /destination.*verified transport account and region/i,
+  );
 });
 
 test("a delayed Lark record search that expires authorization makes zero mutation command calls", async () => {
@@ -1806,11 +1823,11 @@ test("a production Job claim resumes after the Doc owner CAS succeeds but the Ba
       if (service === "docs" && command === "+update") {
         documentUpdateCount += 1;
         reportRevision += 1;
-        const contentReference = args[args.indexOf("--content") + 1]!;
-        reportContent = readFileSync(
-          `${options?.cwd}/${contentReference.slice(1)}`,
-          "utf8",
-        );
+        assert.equal(args[args.indexOf("--content") + 1], "-");
+        reportContent =
+          typeof options?.stdin === "string"
+            ? options.stdin
+            : new TextDecoder().decode(options?.stdin);
         return {
           ok: true,
           data: {
@@ -1974,11 +1991,11 @@ test("a production Job claim treats a lost Base mutation response as success onl
       if (service === "docs" && command === "+update") {
         documentUpdateCount += 1;
         reportRevision += 1;
-        const contentReference = args[args.indexOf("--content") + 1]!;
-        reportContent = readFileSync(
-          `${options?.cwd}/${contentReference.slice(1)}`,
-          "utf8",
-        );
+        assert.equal(args[args.indexOf("--content") + 1], "-");
+        reportContent =
+          typeof options?.stdin === "string"
+            ? options.stdin
+            : new TextDecoder().decode(options?.stdin);
         return {
           ok: true,
           data: {
@@ -2157,12 +2174,11 @@ test("concurrent production Job claims have exactly one winner", async (context)
         documentUpdateCount += 1;
         reportRevision += 1;
         const claimedRevision = reportRevision;
-        const contentReference = args[args.indexOf("--content") + 1]!;
-        assert.ok(contentReference.startsWith("@"));
-        const claimedContent = readFileSync(
-          `${options?.cwd}/${contentReference.slice(1)}`,
-          "utf8",
-        );
+        assert.equal(args[args.indexOf("--content") + 1], "-");
+        const claimedContent =
+          typeof options?.stdin === "string"
+            ? options.stdin
+            : new TextDecoder().decode(options?.stdin);
         if (reportRevision === claimedRevision) {
           reportContent = claimedContent;
         }

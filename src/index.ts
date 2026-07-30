@@ -252,11 +252,14 @@ export {
   type MockAdapterScenario,
 } from "./mock-wps.ts";
 export {
+  appendProviderSubmissionIntentCheckpoint,
   attemptSubmissionState,
   createHarnessProviderExecutionNotStartedCheckpoint,
+  createProviderSubmissionIntentCheckpoint,
   InMemoryAttemptCheckpointStore,
   isHarnessProviderExecutionNotStartedCheckpoint,
   parseAdapterExecutionConfiguration,
+  submissionEvidenceBoundToCheckpoints,
   type AttemptCheckpointPort,
   type ArtifactCandidate,
   type ProductAdapterExecutionConfiguration,
@@ -277,6 +280,18 @@ export {
   type SafeRasterRendererPort,
   type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
+export {
+  validateWpsProductionRecoveryPayloads,
+  type WpsProductionRecoveryCommand,
+  type WpsProductionRecoveryPayloads,
+  type WpsProductionRecoveryResult,
+  type WpsVerifiedBuildIdentity,
+} from "./wps-production-recovery.ts";
+export {
+  trustedWpsRecoveryCheckpoint,
+  type TrustedWpsRecoveryCheckpoint,
+  type WpsRecoverySha256,
+} from "./wps-recovery-checkpoints.ts";
 export {
   DOUBAO_PRODUCTION_ADAPTER_KIND,
   DOUBAO_PRODUCTION_ADAPTER_VERSION,

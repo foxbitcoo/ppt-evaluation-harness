@@ -45,11 +45,14 @@ the owner process immediately fail-stops; it cannot continue a critical
 section after another worker can acquire the OS lock.
 
 Lock names do not depend on caller labels such as `targetAccount` or on a raw
-URL spelling. The Base resource identity binds the configured Base token and
-sorted unique physical table IDs. Claim and report-bearing projection locks
-also acquire a deterministically ordered Docx resource lock bound to the exact
-document token and canonical Feishu origin. Production rejects Base URLs with
-a trailing slash, query, fragment, non-canonical spelling, or an origin alias.
+URL spelling. The Base resource boundary acquires one deterministic lock for
+each configured Base-token/physical-table-ID pair, in sorted order. Two
+configurations with only a partially overlapping table mapping therefore still
+serialize on every shared physical table. Claim and report-bearing projection
+locks also acquire a deterministically ordered Docx resource lock bound to the
+exact document token and canonical Feishu origin. Production rejects Base URLs
+with a trailing slash, query, fragment, non-canonical spelling, or an origin
+alias.
 It covers each stable-ID search, create, and readback; an
 already-corrupt duplicate set fails closed and is never “repaired” by deleting
 a record another process may already use. The same boundary covers a complete
@@ -100,7 +103,9 @@ must not be reused for a new Job without explicit external reprovisioning.
 
 Both the owner claim and report delivery use
 `docs +update --command overwrite --revision-id <exact-read-revision>
---doc-format markdown`, then a full Markdown `docs +fetch`. Success requires:
+--doc-format markdown --content -`; the authorized immutable Markdown is sent
+over the spawned process stdin and is never exposed through a pre-authorization
+temporary file. A full Markdown `docs +fetch` follows. Success requires:
 
 - update success with no warnings and the exact configured origin/token;
 - a revision that advances the exact compared revision;
@@ -194,7 +199,10 @@ Production spawns the 43 MB native binary directly. It never executes the
 `bin/lark-cli` symlink or its download-capable JavaScript wrapper and never
 runs `lark-cli update`. Native hash, exact `--version` output, symlink target,
 and wrapper-script hash must all match the reviewed installation; any drift
-fails closed.
+fails closed. Immediately before every read or mutation egress, the native
+path is resolved again, must remain a regular non-symlink file at the reviewed
+canonical path, and its complete bytes are rehashed. A path or byte drift
+prevents that command from executing.
 
 The Artifact renderer runs each fixed LibreOffice or Poppler command under a
 deny-default Seatbelt profile. The profile grants no network operation,
@@ -290,6 +298,21 @@ bound to the exact target account/region, mutation kind, and canonical mutation
 payload hash, is audited, and is checked for currentness again with no await
 between the final check and runner invocation.
 
+Attachment authorization hashes a cloned immutable byte snapshot; only after
+the final authorization and executable attestation does the transport
+materialize that snapshot in a private read-only invocation directory and
+synchronously spawn the runner. Docx writes use the equally bound stdin path.
+Transport disposal is irreversible: it releases the execution lease once and
+all later reads, mutex acquisition, claims, commits, and other egress fail
+closed.
+
+Production preflight also binds `whoami` to the configured CLI profile,
+application ID, Feishu/Lark brand, identity source, and user Open ID. The
+current-user contact read must return that same Open ID and the configured
+tenant key. The projection destination must exactly match that verified user
+account and the brand-derived region (`feishu`/`cn` or `lark`/`global`);
+caller labels cannot retarget a verified transport.
+
 Acceptance coverage advances the clock during `record-search` until the parent
 authorization expires and proves that no `record-upsert` command is invoked.
 
@@ -311,8 +334,29 @@ explicit durable `not_submitted` observation may resolve a prior `unknown`
 control state. Replay consumes retained evidence and never writes a live
 submission intent.
 
-A matching completed marker is never accepted on self-reported marker payload
-alone: every Case, Run, Artifact, Score, Comparison, Gap, and workflow row is
+Only a terminal `query_not_submitted` checkpoint with an ordered
+`not_submitted@N` state and matching writer/adapter identity is such an
+observation. A WPS `configuration_observed` event remains non-terminal even if
+its legacy payload says `not_submitted`; it cannot authorize Attempt 2. If a
+confirmed non-submission does permit re-entry, all three adapters persist a new
+explicit submission epoch and idempotently reuse it on repeated recovery.
+
+The WPS production recovery CLI is bound to one harness-owned trusted
+checkpoint, not to identities supplied by the bundle being recovered. It
+authenticates the complete canonical Artifact, Render manifest, Run
+Specification, and checkpoint payloads; verifies every retained derivative and
+the safe 16-slide PPTX; and cross-binds job, Case, Run, Attempt, local Artifact,
+provider Artifact reference, task, adapter, driver, renderer, and ordering. It
+also independently recomputes the capture receipt's event Trace, retained-page
+digest, derivative-set digest, and browser-package identity. The evaluated
+historical runner identity and the current embedded-verified verifier identity
+are reported separately. Any missing payload, extra field, reordered
+checkpoint, digest drift, or lineage mismatch fails closed.
+
+A marker-only recovery read reports
+`commit_marker_present_unverified`, never `committed`. A matching completed
+marker is accepted only after every Case, Run, Artifact, Score, Comparison,
+Gap, and workflow row is
 searched by its namespaced stable ID and must match the exact payload and
 payload hash; page records and the exact-revision Doc collection are also
 revalidated against their remote objects. Every `record-upsert` result is

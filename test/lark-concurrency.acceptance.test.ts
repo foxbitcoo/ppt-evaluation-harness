@@ -4,7 +4,13 @@ import { execFileSync, spawn } from "node:child_process";
 import {
   readFileSync,
 } from "node:fs";
-import { mkdtemp, open, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  open,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -691,10 +697,20 @@ test("a durably committed marker releases its execution lease", async (context) 
     1,
     "the durable terminal marker must release the lease holder",
   );
+  const publicState = await transport.readProductionJobState!({
+    jobId: "job-commit-release",
+    runIds: [],
+  });
+  assert.equal(
+    publicState.state,
+    "commit_marker_present_unverified",
+    "a marker alone is not public proof that every committed artifact and report still verifies",
+  );
 });
 
-test("disposing a transport releases its execution lease", async () => {
+test("disposing a transport is terminal for every later read and write", async () => {
   let releaseCount = 0;
+  let runnerCalls = 0;
   const transport =
     createLarkCliTransportForMutationBoundaryTest({
       configuration: LARK_TEST_CONFIGURATION,
@@ -716,7 +732,8 @@ test("disposing a transport releases its execution lease", async () => {
         },
       },
       async run() {
-        throw new Error("dispose must not invoke lark-cli");
+        runnerCalls += 1;
+        throw new Error("disposed transport must not invoke lark-cli");
       },
     });
   assert.equal(
@@ -726,6 +743,438 @@ test("disposing a transport releases its execution lease", async () => {
   );
   await transport.dispose!();
   assert.equal(releaseCount, 1);
+  await transport.dispose!();
+  assert.equal(releaseCount, 1, "dispose remains idempotent");
+  const payload = "{}";
+  const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "disposed-transport-parent",
+      jobId: "job-disposed-transport",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["case_table"],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    {
+      clockId: "transport-dispose-clock",
+      now: () => FIXED_TIME,
+    },
+  );
+  const operations = [
+    () => transport.preflight(),
+    () => transport.acquireProjectionMutex!("job-disposed-transport"),
+    () =>
+      transport.verifyRecord({
+        tableKey: "cases",
+        stableId: "case:disposed",
+        payload,
+        payloadHash,
+      }),
+    () =>
+      transport.upsertRecord({
+        tableKey: "cases",
+        stableId: "case:disposed",
+        payload,
+        payloadHash,
+        idempotencyKey: "disposed-upsert",
+        authorization,
+      }),
+    () =>
+      transport.readProductionJobState!({
+        jobId: "job-disposed-transport",
+        runIds: ["run-disposed"],
+      }),
+    () =>
+      transport.claimProductionJob!({
+        jobId: "job-disposed-transport",
+        runIds: ["run-disposed"],
+        claimHash: payloadHash,
+        claimantId: "claimant-disposed",
+        claimAttemptId: "claim-attempt-disposed",
+        authorization,
+        claimedAt: FIXED_TIME,
+      }),
+  ];
+  for (const operation of operations) {
+    await assert.rejects(operation, /disposed/i);
+  }
+  assert.equal(runnerCalls, 0);
+});
+
+test("every Lark egress re-attests the frozen executable before invocation", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_CLI_REATTEST_BASE";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basCliReattest";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+  });
+  const clock = {
+    clockId: "cli-reattest-clock",
+    now: () => FIXED_TIME,
+  };
+  let attestationCount = 0;
+  let mutationRunnerCalls = 0;
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock,
+      async attestExecutableForTest() {
+        attestationCount += 1;
+        if (attestationCount >= 2) {
+          throw new Error("frozen lark-cli executable drifted");
+        }
+      },
+      async run(args) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") {
+          return {
+            ok: true,
+            data: {
+              data: [],
+              field_id_list: ["fldStable", "fldPayload", "fldHash"],
+              fields: ["稳定ID", "载荷", "载荷哈希"],
+              has_more: false,
+              record_id_list: [],
+            },
+          };
+        }
+        if (command === "+record-upsert") {
+          mutationRunnerCalls += 1;
+          return {
+            ok: true,
+            data: {
+              created: true,
+              record: { record_id: "recCliReattest" },
+            },
+          };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const payload = '{"caseId":"cli-reattest"}';
+  const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "cli-reattest-parent",
+      jobId: "job-cli-reattest",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["case_table"],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+
+  await assert.rejects(
+    transport.upsertRecord({
+      tableKey: "cases",
+      stableId: "case:cli-reattest",
+      payload,
+      payloadHash,
+      idempotencyKey: "cli-reattest-upsert",
+      authorization,
+    }),
+    /executable drifted/i,
+  );
+  assert.ok(attestationCount >= 2);
+  assert.equal(
+    mutationRunnerCalls,
+    0,
+    "no mutation may execute after path or byte drift",
+  );
+});
+
+test("attachment authorization binds the immutable bytes read by the runner", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_ATTACHMENT_SNAPSHOT_BASE";
+  const reportTokenVariable = "PPT_EVAL_ATTACHMENT_SNAPSHOT_DOC";
+  const previousBaseToken = process.env[baseTokenVariable];
+  const previousReportToken = process.env[reportTokenVariable];
+  process.env[baseTokenVariable] = "basAttachmentSnapshot";
+  process.env[reportTokenVariable] = "docAttachmentSnapshot";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    if (previousReportToken === undefined) {
+      delete process.env[reportTokenVariable];
+    } else {
+      process.env[reportTokenVariable] = previousReportToken;
+    }
+  });
+  const clock = {
+    clockId: "attachment-snapshot-clock",
+    now: () => FIXED_TIME,
+  };
+  const original = new TextEncoder().encode("AUTHORIZED-ATTACHMENT-BYTES");
+  const originalHash = sha256Bytes(original);
+  const filename =
+    `original-${originalHash.slice("sha256:".length, "sha256:".length + 16)}-artifact.pptx`;
+  const tamperingAuthorization = {
+    async authorize(request) {
+      for (const directory of await readdir(tmpdir())) {
+        if (!directory.startsWith("ppt-lark-upload-")) continue;
+        const candidate = join(tmpdir(), directory, filename);
+        await writeFile(candidate, "TAMPERED-AFTER-AUTHORIZATION").catch(
+          () => undefined,
+        );
+      }
+      return await allowLarkMutation.authorize(request);
+    },
+  } satisfies EgressAuthorizationPort;
+  let runnerBytes = "";
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+        reportDocumentTokenEnvironmentVariable:
+          reportTokenVariable,
+      },
+      egressAuthorization: tamperingAuthorization,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock,
+      async run(args, options) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") {
+          return {
+            ok: true,
+            data: {
+              data: [[
+                "artifact:snapshot",
+                "{}",
+                sha256Bytes(new TextEncoder().encode("{}")),
+                [],
+              ]],
+              field_id_list: [
+                "fldStable",
+                "fldPayload",
+                "fldHash",
+                "fldAttachment",
+              ],
+              fields: ["稳定ID", "载荷", "载荷哈希", "产物附件"],
+              has_more: false,
+              record_id_list: ["recAttachmentSnapshot"],
+            },
+          };
+        }
+        if (command === "+record-upload-attachment") {
+          assert.ok(options?.cwd);
+          runnerBytes = readFileSync(
+            join(options.cwd, args[args.indexOf("--file") + 1]!),
+            "utf8",
+          );
+          return {
+            ok: true,
+            data: { file_token: "fileAttachmentSnapshot" },
+          };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const parentAuthorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "attachment-snapshot-parent",
+      jobId: "job-attachment-snapshot",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["captured_artifact_table"],
+      payloadHash: originalHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+
+  const uploaded = await transport.uploadAttachment({
+    tableKey: "artifacts",
+    remoteRecordId: "recAttachmentSnapshot",
+    stableId: "artifact:snapshot",
+    attachmentRole: "original",
+    filename: "artifact.pptx",
+    content: original,
+    contentHash: originalHash,
+    idempotencyKey: "attachment-snapshot",
+    authorization: parentAuthorization,
+  });
+
+  assert.equal(runnerBytes, "AUTHORIZED-ATTACHMENT-BYTES");
+  assert.equal(uploaded.remoteHash, originalHash);
+});
+
+test("Docx authorization binds the immutable Markdown read by the runner", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_DOCX_SNAPSHOT_BASE";
+  const reportTokenVariable = "PPT_EVAL_DOCX_SNAPSHOT_DOC";
+  const previousBaseToken = process.env[baseTokenVariable];
+  const previousReportToken = process.env[reportTokenVariable];
+  process.env[baseTokenVariable] = "basDocxSnapshot";
+  process.env[reportTokenVariable] = "DocDocxSnapshot";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    if (previousReportToken === undefined) {
+      delete process.env[reportTokenVariable];
+    } else {
+      process.env[reportTokenVariable] = previousReportToken;
+    }
+  });
+  const clock = {
+    clockId: "docx-snapshot-clock",
+    now: () => FIXED_TIME,
+  };
+  const tamperingAuthorization = {
+    async authorize(request) {
+      for (const directory of await readdir(tmpdir())) {
+        if (!directory.startsWith("ppt-lark-report-")) continue;
+        await writeFile(
+          join(tmpdir(), directory, "report.md"),
+          "# TAMPERED-AFTER-AUTHORIZATION",
+        ).catch(() => undefined);
+      }
+      return await allowLarkMutation.authorize(request);
+    },
+  } satisfies EgressAuthorizationPort;
+  let reportRevision = 1;
+  let reportContent =
+    "# Claimed report\n\n" +
+    "Owner schema: `lark-report-owner-v1`\n\n" +
+    "Owner Job: `job-docx-snapshot`\n";
+  let runnerBytes = "";
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+        reportDocumentTokenEnvironmentVariable:
+          reportTokenVariable,
+      },
+      egressAuthorization: tamperingAuthorization,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock,
+      async run(args, options) {
+        const command = args[1] ?? "";
+        if (command === "+fetch") {
+          return {
+            ok: true,
+            data: {
+              document: {
+                document_id: "DocDocxSnapshot",
+                revision_id: reportRevision,
+                content: reportContent,
+                url: "https://example.feishu.cn/docx/DocDocxSnapshot",
+              },
+            },
+          };
+        }
+        if (command === "+update") {
+          const contentReference =
+            args[args.indexOf("--content") + 1]!;
+          assert.equal(contentReference, "-");
+          runnerBytes =
+            typeof options?.stdin === "string"
+              ? options.stdin
+              : new TextDecoder().decode(options?.stdin);
+          reportContent = runnerBytes;
+          reportRevision += 1;
+          return {
+            ok: true,
+            data: {
+              result: "success",
+              warnings: [],
+              document: {
+                revision_id: reportRevision,
+                url:
+                  "https://example.feishu.cn/docx/DocDocxSnapshot",
+              },
+            },
+          };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const reports = [{
+    reportId: "report-docx-snapshot",
+    title: "Docx Snapshot",
+    markdown: "# Docx Snapshot\n\nAuthorized report body.",
+    payloadHash:
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
+  }];
+  const collectionHash = sha256Bytes(canonicalJsonBytes(reports));
+  const parentAuthorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "docx-snapshot-parent",
+      jobId: "job-docx-snapshot",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["reports"],
+      payloadHash: collectionHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+
+  const projected = await transport.upsertReportCollection({
+    jobId: "job-docx-snapshot",
+    reports,
+    collectionHash,
+    idempotencyKey: `docx-snapshot:${collectionHash}`,
+    authorization: parentAuthorization,
+  });
+
+  assert.match(runnerBytes, /Authorized report body/);
+  assert.doesNotMatch(runnerBytes, /TAMPERED/);
+  assert.equal(projected.revisionId, 2);
 });
 
 test("verified Lark production rejects a configuration without one fixed machine lock root", async () => {
@@ -764,6 +1213,98 @@ test("verified Lark production rejects non-canonical or aliased Base URLs", asyn
       baseWebUrl,
     );
   }
+});
+
+test("preflight binds the configured account and region to the actual lark-cli identity", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_IDENTITY_BOUND_BASE";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basIdentityBound";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+  });
+  let fieldListCalls = 0;
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+        baseWebUrl:
+          "https://example.feishu.cn/base/basIdentityBound",
+        targetAccount: "ou_expected_user",
+        targetRegion: "cn",
+        cliIdentityBinding: {
+          profile: "production-profile",
+          appId: "cli_app_expected",
+          brand: "feishu",
+          defaultAs: "auto",
+          identitySource: "auto_detect",
+          userOpenId: "ou_expected_user",
+          tenantKey: "tenant_expected",
+        },
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock: {
+        clockId: "identity-bound-clock",
+        now: () => FIXED_TIME,
+      },
+      async run(args) {
+        if (args[0] === "whoami") {
+          return {
+            profile: "production-profile",
+            appId: "cli_app_expected",
+            brand: "feishu",
+            defaultAs: "auto",
+            identity: "user",
+            identitySource: "auto_detect",
+            available: true,
+            tokenStatus: "ready",
+            onBehalfOf: {
+              userName: "test",
+              openId: "ou_expected_user",
+            },
+          };
+        }
+        if (args[0] === "contact" && args[1] === "+get-user") {
+          return {
+            ok: true,
+            data: {
+              user: {
+                open_id: "ou_expected_user",
+                tenant_key: "tenant_different",
+              },
+            },
+          };
+        }
+        if (args[1] === "+field-list") {
+          fieldListCalls += 1;
+          return {
+            ok: true,
+            data: [
+              { field_id: "稳定ID" },
+              { field_id: "载荷" },
+              { field_id: "载荷哈希" },
+              { field_id: "产物附件" },
+            ],
+          };
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+
+  await assert.rejects(
+    transport.preflight(),
+    /user and tenant.*identity binding/i,
+  );
+  assert.equal(
+    fieldListCalls,
+    0,
+    "identity mismatch must stop before touching the configured Base",
+  );
 });
 
 test("workers with different TMPDIR values still share the configured machine lock root", async () => {
@@ -984,6 +1525,130 @@ test("equivalent Base URL spellings cannot split one stable-record mutex", async
     enteredBeforeRelease,
     ["first"],
     "the equivalent remote Base must still have one critical section",
+  );
+  assert.deepEqual(entered, ["first", "second"]);
+});
+
+test("partially overlapping physical table mappings share the table mutex", async (context) => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-overlapping-table-scope-test-"),
+  );
+  const baseTokenVariable =
+    "PPT_EVAL_OVERLAPPING_TABLE_SCOPE_BASE_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  process.env[baseTokenVariable] = "basOverlappingTableScope";
+  context.after(async () => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    await rm(lockRoot, { recursive: true, force: true });
+  });
+  const clock = {
+    clockId: "overlapping-table-scope-clock",
+    now: () => FIXED_TIME,
+  };
+  const audit = new InMemoryEgressAuthorizationAudit();
+  const payload = '{"caseId":"overlapping-table-case"}';
+  const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
+  const entered: string[] = [];
+  let finishMutations!: () => void;
+  const mutationFinish = new Promise<void>((resolveFinish) => {
+    finishMutations = resolveFinish;
+  });
+  const emptySearch = {
+    ok: true,
+    data: {
+      data: [],
+      field_id_list: ["fldStable", "fldPayload", "fldHash"],
+      fields: ["稳定ID", "载荷", "载荷哈希"],
+      has_more: false,
+      record_id_list: [],
+    },
+  };
+  const createTransport = (
+    caller: "first" | "second",
+    scoresTableId: string,
+  ) =>
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        lockRootPath: lockRoot,
+        baseTokenEnvironmentVariable: baseTokenVariable,
+        tables: {
+          ...LARK_TEST_CONFIGURATION.tables,
+          scores: scoresTableId,
+        },
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: audit,
+      clock,
+      async run(args) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") return emptySearch;
+        if (command === "+record-upsert") {
+          entered.push(caller);
+          await mutationFinish;
+          throw new Error(`intentional-${caller}`);
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "overlapping-table-scope-parent",
+      jobId: "job-overlapping-table-scope",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["case_table"],
+      payloadHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  const command = {
+    tableKey: "cases" as const,
+    stableId: "case:overlapping-table-case",
+    payload,
+    payloadHash,
+    idempotencyKey: "overlapping-table-upsert",
+    authorization,
+  };
+  const first = createTransport(
+    "first",
+    "tblScoresOnlyA",
+  ).upsertRecord(command);
+  const firstDeadline = Date.now() + 3_000;
+  while (!entered.includes("first") && Date.now() < firstDeadline) {
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, 10);
+    });
+  }
+  assert.deepEqual(entered, ["first"]);
+  const second = createTransport(
+    "second",
+    "tblScoresOnlyB",
+  ).upsertRecord(command);
+  await new Promise<void>((resolveWait) => {
+    setTimeout(resolveWait, 150);
+  });
+  const enteredBeforeRelease = [...entered];
+  finishMutations();
+  await Promise.allSettled([first, second]);
+  assert.deepEqual(
+    enteredBeforeRelease,
+    ["first"],
+    "the shared physical cases table must have one critical section",
   );
   assert.deepEqual(entered, ["first", "second"]);
 });
@@ -1220,7 +1885,10 @@ test("a concurrent recovery during the Docx-owner-only window has exactly one ru
   };
   const run = async (
     args: readonly string[],
-    options?: { readonly cwd?: string },
+    options?: {
+      readonly cwd?: string;
+      readonly stdin?: string | Uint8Array;
+    },
   ): Promise<unknown> => {
     const service = args[0] ?? "";
     const command = args[1] ?? "";
@@ -1246,12 +1914,11 @@ test("a concurrent recovery during the Docx-owner-only window has exactly one ru
         throw new Error("document revision conflict");
       }
       reportRevision += 1;
-      const contentReference = args[args.indexOf("--content") + 1]!;
-      assert.ok(options?.cwd);
-      reportContent = readFileSync(
-        `${options.cwd}/${contentReference.slice(1)}`,
-        "utf8",
-      );
+      assert.equal(args[args.indexOf("--content") + 1], "-");
+      reportContent =
+        typeof options?.stdin === "string"
+          ? options.stdin
+          : new TextDecoder().decode(options?.stdin);
       return {
         ok: true,
         data: {
@@ -1424,7 +2091,10 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
   };
   const run = async (
     args: readonly string[],
-    options?: { readonly cwd?: string },
+    options?: {
+      readonly cwd?: string;
+      readonly stdin?: string | Uint8Array;
+    },
   ): Promise<unknown> => {
     const service = args[0] ?? "";
     const command = args[1] ?? "";
@@ -1449,12 +2119,11 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
         throw new Error("document revision conflict");
       }
       reportRevision += 1;
-      const contentReference = args[args.indexOf("--content") + 1]!;
-      assert.ok(options?.cwd);
-      reportContent = readFileSync(
-        `${options.cwd}/${contentReference.slice(1)}`,
-        "utf8",
-      );
+      assert.equal(args[args.indexOf("--content") + 1], "-");
+      reportContent =
+        typeof options?.stdin === "string"
+          ? options.stdin
+          : new TextDecoder().decode(options?.stdin);
       return {
         ok: true,
         data: {
@@ -1726,7 +2395,10 @@ test("a late rev1 marker cannot overwrite a concurrent rev2 Docx projection", as
         };
   const run = async (
     args: readonly string[],
-    options?: { readonly cwd?: string },
+    options?: {
+      readonly cwd?: string;
+      readonly stdin?: string | Uint8Array;
+    },
   ): Promise<unknown> => {
     const service = args[0] ?? "";
     const command = args[1] ?? "";
@@ -1751,12 +2423,11 @@ test("a late rev1 marker cannot overwrite a concurrent rev2 Docx projection", as
         throw new Error("document revision conflict");
       }
       reportRevision += 1;
-      const contentReference = args[args.indexOf("--content") + 1]!;
-      assert.ok(options?.cwd);
-      reportContent = readFileSync(
-        `${options.cwd}/${contentReference.slice(1)}`,
-        "utf8",
-      );
+      assert.equal(args[args.indexOf("--content") + 1], "-");
+      reportContent =
+        typeof options?.stdin === "string"
+          ? options.stdin
+          : new TextDecoder().decode(options?.stdin);
       return {
         ok: true,
         data: {

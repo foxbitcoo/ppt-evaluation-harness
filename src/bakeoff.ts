@@ -2984,6 +2984,7 @@ export function createBakeoffHarness({
                 result.scorecard,
                 protocolSnapshot,
                 context.evaluationCase,
+                result.renderManifest,
               ),
           });
         }

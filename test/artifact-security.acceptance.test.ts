@@ -1411,6 +1411,36 @@ test("Bakeoff freezes a content-addressed Run specification and authorized dual-
 
 test("Feishu projection commits one authorized canonical batch without rewriting unrelated history", async () => {
   const feishu = new InMemoryFeishuProjection();
+  const unrelatedSeedProjection = new InMemoryFeishuProjection();
+  await createBakeoffHarness({
+    feishu: unrelatedSeedProjection,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const unrelatedSeed = unrelatedSeedProjection.snapshot();
+  const seedCase = unrelatedSeed.caseTable[0];
+  const seedJob = unrelatedSeed.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  assert.ok(seedCase);
+  assert.ok(seedJob);
+  await feishu.upsertCase({
+    ...seedCase,
+    recordId: "unrelated-case-record",
+    caseId: "unrelated-case",
+    title: "Unrelated Case",
+  });
+  await feishu.appendRunRecord({
+    ...seedJob,
+    recordId: "unrelated-job-record",
+    jobId: "unrelated-job",
+    caseId: "unrelated-case",
+    selectedRunIds: [],
+    reportUrl: null,
+    auxiliaryReportUrls: null,
+  });
   await feishu.createReport({
     reportId: "unrelated-report",
     provenance: "MOCK",
@@ -1542,6 +1572,8 @@ test("a Job B projection commit cannot restore Job A rows scrubbed by a concurre
     jobId: "job-b",
     caseId: caseB.caseId,
     selectedRunIds: [],
+    reportUrl: null,
+    auxiliaryReportUrls: null,
   };
   const snapshotB = {
     caseTable: [caseB],
@@ -1648,9 +1680,8 @@ test("an authorized projection commit preserves a concurrent public ledger mutat
   const { url: _discardedUrl, ...draft } = existingReport;
   await target.createReport({
     ...draft,
-    reportId: "concurrent-report-other-job",
-    jobId: "other-job",
-    title: "Concurrent report from another Job",
+    reportId: "concurrent-report-same-job",
+    title: "Concurrent report for the same Job",
   });
   await pendingCommit;
 
@@ -1659,7 +1690,7 @@ test("an authorized projection commit preserves a concurrent public ledger mutat
       .snapshot()
       .reports.some(
         ({ reportId }) =>
-          reportId === "concurrent-report-other-job",
+          reportId === "concurrent-report-same-job",
       ),
     true,
   );

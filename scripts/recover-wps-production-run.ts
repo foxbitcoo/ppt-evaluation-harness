@@ -1,11 +1,28 @@
-import { createHash } from "node:crypto";
-
+import { BUILD_IDENTITY } from "../src/build-identity.ts";
 import {
-  FileSystemAttemptCheckpointStore,
-  FileSystemImmutableBlobStore,
   loadDurableRootRegistry,
   resolveDurableRoot,
-} from "../src/index.ts";
+} from "../src/durable-root-registry.ts";
+import {
+  FileSystemImmutableBlobStore,
+} from "../src/file-system-blob-store.ts";
+import {
+  FileSystemAttemptCheckpointStore,
+} from "../src/file-system-checkpoint-store.ts";
+import {
+  validateWpsProductionRecoveryPayloads,
+  type WpsProductionRecoveryCommand,
+} from "../src/wps-production-recovery.ts";
+import {
+  trustedWpsRecoveryCheckpoint,
+} from "../src/wps-recovery-checkpoints.ts";
+
+const values = process.argv.slice(2);
+if (values.length !== 11 || values.some((value) => value.length === 0)) {
+  throw new Error(
+    "Recovery command requires exactly 11 non-empty arguments",
+  );
+}
 
 const [
   registryId,
@@ -19,47 +36,54 @@ const [
   runSpecificationKey,
   checkpointStoreId,
   attemptId,
-] = process.argv.slice(2);
-if (
-  registryId === undefined ||
-  artifactRecoveryRootReference === undefined ||
-  runSpecificationRootReference === undefined ||
-  checkpointRootReference === undefined ||
-  artifactStoreId === undefined ||
-  manifestKey === undefined ||
-  originalKey === undefined ||
-  runSpecificationStoreId === undefined ||
-  runSpecificationKey === undefined ||
-  checkpointStoreId === undefined ||
-  attemptId === undefined
-) {
-  throw new Error("Recovery command arguments are incomplete");
-}
-const registry = await loadDurableRootRegistry(registryId);
-const artifactRecoveryRoot = resolveDurableRoot(
-  registry,
+] = values as [
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+  string,
+];
+
+const command: WpsProductionRecoveryCommand = Object.freeze({
+  registryId,
   artifactRecoveryRootReference,
-);
-const runSpecificationRoot = resolveDurableRoot(
-  registry,
   runSpecificationRootReference,
-);
-const checkpointRoot = resolveDurableRoot(
-  registry,
   checkpointRootReference,
-);
+  artifactStoreId,
+  manifestKey,
+  originalKey,
+  runSpecificationStoreId,
+  runSpecificationKey,
+  checkpointStoreId,
+  attemptId,
+});
+const trustedCheckpoint = trustedWpsRecoveryCheckpoint(registryId);
+const registry = await loadDurableRootRegistry(registryId);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
-  rootPath: artifactRecoveryRoot,
+  rootPath: resolveDurableRoot(
+    registry,
+    artifactRecoveryRootReference,
+  ),
 });
 const runSpecificationStore = new FileSystemImmutableBlobStore({
   storeId: runSpecificationStoreId,
-  rootPath: runSpecificationRoot,
+  rootPath: resolveDurableRoot(
+    registry,
+    runSpecificationRootReference,
+  ),
 });
 const checkpointStore = new FileSystemAttemptCheckpointStore({
   checkpointStoreId,
-  rootPath: checkpointRoot,
+  rootPath: resolveDurableRoot(registry, checkpointRootReference),
 });
+
 const [manifest, original, runSpecification, checkpoints] =
   await Promise.all([
     artifactStore.read(manifestKey),
@@ -73,45 +97,19 @@ if (
   runSpecification === null ||
   checkpoints.length === 0
 ) {
-  throw new Error("Durable recovery payload is incomplete");
+  throw new Error("Durable WPS recovery payload is incomplete");
 }
-const hash = (content: Uint8Array) =>
-  `sha256:${createHash("sha256").update(content).digest("hex")}`;
-const originalHash = hash(original);
-const manifestIdentity = JSON.parse(
-  new TextDecoder("utf-8", { fatal: true }).decode(manifest),
-) as {
-  readonly artifact?: { readonly contentHash?: string };
-};
-const runSpecificationBundle = JSON.parse(
-  new TextDecoder("utf-8", { fatal: true }).decode(runSpecification),
-) as {
-  readonly evaluationCase?: { readonly provenance?: string };
-};
-if (
-  manifestIdentity.artifact?.contentHash !== originalHash ||
-  runSpecificationBundle.evaluationCase?.provenance !== "PRODUCTION" ||
-  checkpoints.some(
-    ({ taskStateVersion }) =>
-      taskStateVersion !== null &&
-      taskStateVersion !== undefined &&
-      !/@\d+$/.test(taskStateVersion),
-  )
-) {
-  throw new Error("Durable recovery lineage validation failed");
-}
-process.stdout.write(
-  `${JSON.stringify({
-    registryId,
-    registryHash: registry.registryHash,
-    rootReferences: {
-      artifactRecovery: artifactRecoveryRootReference,
-      runSpecification: runSpecificationRootReference,
-      checkpoint: checkpointRootReference,
-    },
-    manifestHash: hash(manifest),
-    originalHash,
-    runSpecificationHash: hash(runSpecification),
-    checkpointCount: checkpoints.length,
-  })}\n`,
-);
+
+const result = await validateWpsProductionRecoveryPayloads({
+  command,
+  registryHash: registry.registryHash,
+  manifest,
+  original,
+  runSpecification,
+  checkpoints,
+  readArtifactPayload: (key) => artifactStore.read(key),
+  trustedCheckpoint,
+  verifierBuildIdentity: BUILD_IDENTITY,
+});
+
+process.stdout.write(`${JSON.stringify(result)}\n`);
