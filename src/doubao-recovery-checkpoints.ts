@@ -81,9 +81,9 @@ const TRUSTED_CHECKPOINTS = Object.freeze<
     packageId: "doubao-web-ppt-real-provider-replay-v1",
     adapterVersion: "doubao-web-ppt@1",
     adapterImplementationDigest:
-      "sha256:ded8bd1cbfbee51ae5a4bf9a0429c5075d39470eff70ec19e04a7970786aa3ae",
+      "sha256:2317479ba1044dba3f3989b33445924bb5f6456b11d11dc56c0525403e1b7c6a",
     executionEntrypointDigest:
-      "sha256:6535ea0103cec7f348239cf567107d1ff6effdac238b2ff3a47b8cd7fd774957",
+      "sha256:981d718e15bfa3edfdc636672d96f70f3b169e302625d8b790283c1d13072429",
     executionConfigurationDigest:
       "sha256:e8c192eb9e1213aba734425bd93f8f04526d8b3495b07b26cd2febac0a50f43e",
     driverId: "doubao-real-provider-replay",
@@ -91,7 +91,7 @@ const TRUSTED_CHECKPOINTS = Object.freeze<
     browserProfileDigest:
       "sha256:c6e451e70a930e80e799843cd8b1576d2bcaf47eb59c33ea1767e009fd599222",
     driverImplementationDigest:
-      "sha256:ded8bd1cbfbee51ae5a4bf9a0429c5075d39470eff70ec19e04a7970786aa3ae",
+      "sha256:2317479ba1044dba3f3989b33445924bb5f6456b11d11dc56c0525403e1b7c6a",
     driverConfigurationDigest:
       "sha256:b79c9b95ad7e8180ee67ff1cc5554f604ec748871e71cc8da2b3334cd5310f7b",
     vendorTaskId: "task_38435879568317954",
