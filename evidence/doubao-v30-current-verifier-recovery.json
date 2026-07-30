@@ -18,12 +18,12 @@
   },
   "verifierBuildIdentity": {
     "schemaVersion": "ppt-evaluation-build-identity-v1",
-    "specCommitSha": "fdf8282913f9d0fef592e213746f15ccdc6b1a25",
+    "specCommitSha": "49ffa12d1720040ddf9b0a9f35d4a6095d152235",
     "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-    "sourceArchiveDigest": "sha256:3d99240b4ca9ac83a5ebe5e5d44f6b4e88fa87a5859ad5c5e50aabc12e88ee47",
-    "sourceArchiveEntryCount": 50,
-    "embeddedManifestHash": "sha256:45a484a68ee3de480ee24e9b90e941cc330d698974b31b4a492d54a7c3943c87",
-    "manifestHash": "sha256:7b94481f16979381e490facf4cd669cbaa72dbce956acb0230c21a651060059b"
+    "sourceArchiveDigest": "sha256:3224cf21860c7b393574b1ce57b2d1c7b7e0b074b8fe1c8888d528718db0f6f2",
+    "sourceArchiveEntryCount": 52,
+    "embeddedManifestHash": "sha256:88e5ad660633cb644b43315b5440069adb252ab186566ed1f6af8a17ffb04452",
+    "manifestHash": "sha256:77de1c3552f0ac05f90125387763a0c4c0547e7bc22177005db8b2a30b2f28ba"
   },
   "rendererAuthorizationEvidence": {
     "decisionId": "doubao-replay:b7b30a5f6730e1de522c6164",
@@ -46,27 +46,27 @@
     "schemaVersion": "doubao-recovery-cli-evidence-v1",
     "rawResultReference": "evidence/doubao-v30-final-recovery-cli-result.json",
     "rawResultHashScope": "exact_stdout_bytes_including_terminal_lf",
-    "rawResultHash": "sha256:634e76e7a78c64afec1323b3e9330e0103ba7a3142298d1aec48f6dddb6bede2",
+    "rawResultHash": "sha256:305b6ca8e329a3a0b1fb6430f679fabb69b963a58d681a4d11f0ac5553e3fcdc",
     "rawResultVerifierBuildIdentity": {
       "schemaVersion": "ppt-evaluation-build-identity-v1",
-      "specCommitSha": "fdf8282913f9d0fef592e213746f15ccdc6b1a25",
+      "specCommitSha": "49ffa12d1720040ddf9b0a9f35d4a6095d152235",
       "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-      "sourceArchiveDigest": "sha256:3d99240b4ca9ac83a5ebe5e5d44f6b4e88fa87a5859ad5c5e50aabc12e88ee47",
-      "sourceArchiveEntryCount": 50,
-      "embeddedManifestHash": "sha256:45a484a68ee3de480ee24e9b90e941cc330d698974b31b4a492d54a7c3943c87",
-      "manifestHash": "sha256:7b94481f16979381e490facf4cd669cbaa72dbce956acb0230c21a651060059b"
+      "sourceArchiveDigest": "sha256:3224cf21860c7b393574b1ce57b2d1c7b7e0b074b8fe1c8888d528718db0f6f2",
+      "sourceArchiveEntryCount": 52,
+      "embeddedManifestHash": "sha256:88e5ad660633cb644b43315b5440069adb252ab186566ed1f6af8a17ffb04452",
+      "manifestHash": "sha256:77de1c3552f0ac05f90125387763a0c4c0547e7bc22177005db8b2a30b2f28ba"
     },
     "attestedResultSchemaVersion": "doubao-recovery-result-attestation-v1",
     "attestedResultHash": "sha256:2dd62b501ad029f1ef5def7c7e403957586789953dbe96b762a8890627ce825b",
     "attestedResultVerifierBuildIdentity": {
       "schemaVersion": "ppt-evaluation-build-identity-v1",
-      "specCommitSha": "fdf8282913f9d0fef592e213746f15ccdc6b1a25",
+      "specCommitSha": "49ffa12d1720040ddf9b0a9f35d4a6095d152235",
       "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-      "sourceArchiveDigest": "sha256:3d99240b4ca9ac83a5ebe5e5d44f6b4e88fa87a5859ad5c5e50aabc12e88ee47",
-      "sourceArchiveEntryCount": 50,
-      "embeddedManifestHash": "sha256:45a484a68ee3de480ee24e9b90e941cc330d698974b31b4a492d54a7c3943c87",
-      "manifestHash": "sha256:7b94481f16979381e490facf4cd669cbaa72dbce956acb0230c21a651060059b"
+      "sourceArchiveDigest": "sha256:3224cf21860c7b393574b1ce57b2d1c7b7e0b074b8fe1c8888d528718db0f6f2",
+      "sourceArchiveEntryCount": 52,
+      "embeddedManifestHash": "sha256:88e5ad660633cb644b43315b5440069adb252ab186566ed1f6af8a17ffb04452",
+      "manifestHash": "sha256:77de1c3552f0ac05f90125387763a0c4c0547e7bc22177005db8b2a30b2f28ba"
     }
   },
-  "resultHash": "sha256:b9896902a6fa4e19b08ceac6bd9f19ea148a900104bad8217374fecc430a5dbc"
+  "resultHash": "sha256:7eca5b1fa9c52bd024d411e9af9ccb62cbafb6f63f3eebf3e90f8b4acb3256b7"
 }
