@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "doubao-current-verifier-trusted-recovery-evidence-v1",
+  "status": "recovery_succeeded",
+  "recordedAt": "2026-07-31T00:00:00.000+08:00",
+  "registryId": "doubao-real-provider-20260730-t09-v30",
+  "checkpointId": "doubao-volcano-20260727-real-provider-v1",
+  "artifactContentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+  "artifactManifestHash": "sha256:1697e0128db2880c3bf7de7dc7fc03d376582d0bc16b3e293fbe68229c12a53a",
+  "renderManifestHash": "sha256:6daf8702f7007148336931dca858f1b01dc288832545f9ae5bf534a3be2c32f0",
+  "runSpecificationHash": "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b",
+  "checkpointTraceHash": "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
+  "evaluatedRunIdentity": {
+    "specCommitSha": "fb08a1096bad8e63f33c27bd6add40e0ee6c792c",
+    "buildIdentitySource": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    "runnerCodeDigest": "sha256:ba691d59c346eb96f2cd68ba5d54bde341ffe0f2f4486aa3f765056d60732b18",
+    "runSpecificationCanonicalHash": "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b"
+  },
+  "verifierBuildIdentity": {
+    "schemaVersion": "ppt-evaluation-build-identity-v1",
+    "specCommitSha": "3abc7971f4f56e437130efc04c85002afd24c872",
+    "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    "sourceArchiveDigest": "sha256:a321db2714e35eff5026ea18a9e092de2d58da7761d6701d7195df149e40e5dc",
+    "sourceArchiveEntryCount": 44,
+    "embeddedManifestHash": "sha256:c9945d95fbe4a8a0d1bfb5592a1e7230bb1a4654644da02bad446e783222701e",
+    "manifestHash": "sha256:2bd1f5db6a959cf8cb2382f9035a75f9549274d985149097095713da8d36a696"
+  },
+  "rendererAuthorizationEvidence": {
+    "decisionId": "doubao-replay:b7b30a5f6730e1de522c6164",
+    "authorizationAuditDigest": "sha256:1ed43314b7d5a8c0c99a05cd300fc388b56de95a36347563839e77d470317315",
+    "requestId": "artifact-rendering:artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4",
+    "targetService": "isolated-offline-png-rasterizer",
+    "targetAccount": "local-sandbox",
+    "targetRegion": "local",
+    "payloadHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    "policyVersion": "doubao-real-provider-replay-ingest-v1",
+    "approvedAt": "2026-07-30T15:40:45.090Z",
+    "expiresAt": "2099-01-01T00:00:00.000Z"
+  },
+  "binaryValidation": {
+    "pptxSlideCount": 16,
+    "staticPngCount": 16,
+    "contactSheetPngCount": 1
+  },
+  "recoveryCliResultHash": "sha256:4c1013c84dcc01dba070bfc52975bff7233f72b22312e2682353351765d81ff2",
+  "resultHash": "sha256:fa8a24c850bb5591605b675b98b3ccdf749b9fafeec45c7d67f7471259a51d61"
+}

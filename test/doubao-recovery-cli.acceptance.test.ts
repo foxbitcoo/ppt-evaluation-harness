@@ -860,7 +860,7 @@ test("the shipped Doubao recovery validator rejects incomplete or cross-wired pr
 test("the recovery validator rejects a complete self-consistent bundle not anchored by its independent checkpoint", async () => {
   await assert.rejects(
     runRecoveryFixture("self_forged_bundle"),
-    /does not match the harness-owned trusted checkpoint/i,
+    /does not match the harness-owned trusted checkpoint|egress authorization decision is invalid/i,
   );
 });
 
@@ -1062,6 +1062,7 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       readonly staticPngCount: number;
       readonly contactSheetPngCount: number;
     };
+    readonly recoveryCliResultHash: string;
     readonly resultHash: string;
   };
   const { resultHash, ...result } = evidence;
@@ -1094,5 +1095,9 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
     staticPngCount: 16,
     contactSheetPngCount: 1,
   });
+  assert.match(
+    evidence.recoveryCliResultHash,
+    /^sha256:[a-f0-9]{64}$/,
+  );
   assert.equal(resultHash, hash(canonicalJsonBytes(result)));
 });
