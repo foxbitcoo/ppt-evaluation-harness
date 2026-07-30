@@ -115,6 +115,15 @@ export interface ProductionDriverExecutionEvidence {
   readonly artifactContentHash: `sha256:${string}`;
   readonly traceHash: `sha256:${string}`;
   readonly liveBridgeTranscriptHash?: `sha256:${string}`;
+  readonly captureReceipt?: RealProviderCaptureReceiptEvidence;
+}
+
+export interface RealProviderCaptureReceiptEvidence {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}`;
+  readonly traceDigest: `sha256:${string}`;
+  readonly retainedPageDigest: `sha256:${string}`;
+  readonly renderDigest: `sha256:${string}`;
 }
 
 export interface TrustedBrowserDriverEvidence {

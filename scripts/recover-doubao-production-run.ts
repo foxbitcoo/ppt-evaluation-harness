@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   FileSystemAttemptCheckpointStore,
   FileSystemImmutableBlobStore,
+  calculateArtifactDerivativeSetHash,
   loadDurableRootRegistry,
   resolveDurableRoot,
 } from "../src/index.ts";
@@ -38,7 +39,7 @@ if (
 }
 
 const hash = (content: Uint8Array) =>
-  `sha256:${createHash("sha256").update(content).digest("hex")}`;
+  `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
 const registry = await loadDurableRootRegistry(registryId);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
@@ -84,12 +85,13 @@ const manifestIdentity = JSON.parse(
   readonly renderManifestHash?: string;
   readonly derivatives?: readonly {
     readonly derivativeId?: string;
+    readonly sourceArtifactId?: string;
     readonly derivativeType?:
       | "static_slide"
       | "extracted_text"
       | "contact_sheet";
     readonly pageNumber?: number | null;
-    readonly contentHash?: string;
+    readonly contentHash?: `sha256:${string}`;
   }[];
   readonly productionExecutionEvidence?: {
     readonly executionMode?: string;
@@ -122,6 +124,128 @@ if (
 }
 const renderManifestKey =
   `artifacts/${artifactId}/render-manifest`;
+const renderManifest = await artifactStore.read(renderManifestKey);
+if (
+  renderManifest === null ||
+  hash(renderManifest) !== manifestIdentity.renderManifestHash
+) {
+  throw new Error("Durable Doubao recovery render manifest hash mismatch");
+}
+const renderManifestIdentity = JSON.parse(
+  new TextDecoder("utf-8", { fatal: true }).decode(renderManifest),
+) as {
+  readonly schemaVersion?: string;
+  readonly artifactHash?: string;
+  readonly artifactId?: string;
+  readonly pageCount?: number;
+  readonly slides?: readonly {
+    readonly pageNumber?: number;
+    readonly contentHash?: `sha256:${string}`;
+    readonly extractedTextHash?: `sha256:${string}`;
+  }[];
+  readonly contactSheet?: {
+    readonly contentHash?: `sha256:${string}`;
+  };
+};
+const renderSlides = renderManifestIdentity.slides;
+if (
+  renderManifestIdentity.schemaVersion !== "render-manifest-v1" ||
+  renderManifestIdentity.artifactId !== artifactId ||
+  renderManifestIdentity.artifactHash !==
+    manifestIdentity.artifact?.contentHash ||
+  renderManifestIdentity.pageCount !== 16 ||
+  renderSlides === undefined ||
+  renderSlides.length !== 16 ||
+  renderManifestIdentity.contactSheet?.contentHash === undefined
+) {
+  throw new Error(
+    "Durable Doubao recovery render manifest lineage is invalid",
+  );
+}
+const slideByPage = new Map(
+  renderSlides.map((slide) => [slide.pageNumber, slide]),
+);
+if (
+  slideByPage.size !== 16 ||
+  Array.from({ length: 16 }, (_, index) => index + 1).some(
+    (pageNumber) => {
+      const slide = slideByPage.get(pageNumber);
+      return (
+        slide?.contentHash === undefined ||
+        slide.extractedTextHash === undefined
+      );
+    },
+  )
+) {
+  throw new Error(
+    "Durable Doubao recovery render manifest page lineage is incomplete",
+  );
+}
+const derivativeIds = new Set(
+  derivatives.map(({ derivativeId }) => derivativeId),
+);
+if (
+  derivativeIds.size !== 33 ||
+  derivativeIds.has(undefined)
+) {
+  throw new Error(
+    "Durable Doubao recovery derivative IDs are incomplete or duplicated",
+  );
+}
+const expectedDerivative = (
+  derivativeType: "static_slide" | "extracted_text",
+  pageNumber: number,
+) => {
+  const matches = derivatives.filter(
+    (lineage) =>
+      lineage.derivativeType === derivativeType &&
+      lineage.pageNumber === pageNumber,
+  );
+  const slide = slideByPage.get(pageNumber)!;
+  const expectedId =
+    derivativeType === "static_slide"
+      ? `${artifactId}:static-slide:${pageNumber}`
+      : `${artifactId}:extracted-text:${pageNumber}`;
+  const expectedHash =
+    derivativeType === "static_slide"
+      ? slide.contentHash
+      : slide.extractedTextHash;
+  if (
+    matches.length !== 1 ||
+    matches[0]?.derivativeId !== expectedId ||
+    matches[0].sourceArtifactId !== artifactId ||
+    matches[0].contentHash !== expectedHash
+  ) {
+    throw new Error(
+      `Durable Doubao recovery derivative lineage mismatch: ${derivativeType}:${pageNumber}`,
+    );
+  }
+  return matches[0];
+};
+const validatedDerivatives = Array.from(
+  { length: 16 },
+  (_, index) => index + 1,
+).flatMap((pageNumber) => [
+  expectedDerivative("static_slide", pageNumber),
+  expectedDerivative("extracted_text", pageNumber),
+]);
+const contactSheetDerivatives = derivatives.filter(
+  ({ derivativeType }) => derivativeType === "contact_sheet",
+);
+if (
+  contactSheetDerivatives.length !== 1 ||
+  contactSheetDerivatives[0]?.derivativeId !==
+    `${artifactId}:contact-sheet` ||
+  contactSheetDerivatives[0].sourceArtifactId !== artifactId ||
+  contactSheetDerivatives[0].pageNumber !== null ||
+  contactSheetDerivatives[0].contentHash !==
+    renderManifestIdentity.contactSheet.contentHash
+) {
+  throw new Error(
+    "Durable Doubao recovery contact-sheet derivative lineage mismatch",
+  );
+}
+validatedDerivatives.push(contactSheetDerivatives[0]);
 const derivativeLocations = derivatives.map((lineage) => {
   let suffix: string;
   if (
@@ -154,22 +278,13 @@ const derivativeLocations = derivatives.map((lineage) => {
     key: `artifacts/${artifactId}/derivatives/${suffix}`,
   };
 });
-const [renderManifest, recoveredDerivatives] = await Promise.all([
-  artifactStore.read(renderManifestKey),
-  Promise.all(
-    derivativeLocations.map(async ({ lineage, key }) => ({
-      derivativeId: lineage.derivativeId!,
-      expectedHash: lineage.contentHash!,
-      content: await artifactStore.read(key),
-    })),
-  ),
-]);
-if (
-  renderManifest === null ||
-  hash(renderManifest) !== manifestIdentity.renderManifestHash
-) {
-  throw new Error("Durable Doubao recovery render manifest hash mismatch");
-}
+const recoveredDerivatives = await Promise.all(
+  derivativeLocations.map(async ({ lineage, key }) => ({
+    derivativeId: lineage.derivativeId!,
+    expectedHash: lineage.contentHash!,
+    content: await artifactStore.read(key),
+  })),
+);
 for (const derivative of recoveredDerivatives) {
   if (
     derivative.content === null ||
@@ -213,19 +328,11 @@ process.stdout.write(
     renderManifestHash: hash(renderManifest),
     derivativeCount: derivatives.length,
     recoveredDerivativeCount: recoveredDerivatives.length,
-    derivativeSetHash: hash(
-      new TextEncoder().encode(
-        JSON.stringify(
-          recoveredDerivatives
-            .map(({ derivativeId, expectedHash }) => ({
-              derivativeId,
-              contentHash: expectedHash,
-            }))
-            .sort((left, right) =>
-              left.derivativeId.localeCompare(right.derivativeId),
-            ),
-        ),
-      ),
+    derivativeSetHash: calculateArtifactDerivativeSetHash(
+      validatedDerivatives.map(({ derivativeId, contentHash }) => ({
+        derivativeId: derivativeId!,
+        contentHash: contentHash!,
+      })),
     ),
     runSpecificationHash: hash(runSpecification),
     checkpointCount: checkpoints.length,

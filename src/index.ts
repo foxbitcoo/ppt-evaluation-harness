@@ -38,6 +38,7 @@ export {
 export {
   InMemoryImmutableBlobStore,
   InMemoryArtifactCaptureJournal,
+  calculateArtifactDerivativeSetHash,
   createArtifactVault,
   type ArtifactDerivativeLineage,
   type ArtifactCaptureJournalEvent,
