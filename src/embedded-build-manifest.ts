@@ -5,7 +5,7 @@
  */
 export const EMBEDDED_BUILD_MANIFEST = Object.freeze({
   schemaVersion: "ppt-evaluation-build-manifest-v1" as const,
-  specCommitSha: "0855b28d2c0522422306910cb0673f8e876a9d09",
+  specCommitSha: "fc7a38740db9ac24e54d6ef2007069f5746df1f0",
   sourceArchiveSchemaVersion: "runner-source-archive-v1" as const,
   trustedWpsLiveBridgeExecutableHash: null,
   sourceArchiveDigest:
