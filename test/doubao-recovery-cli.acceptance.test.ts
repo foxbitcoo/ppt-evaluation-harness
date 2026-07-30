@@ -26,7 +26,9 @@ import {
   approvedEgressAuthorizationHash,
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
+  currentVerifierRecoveryEvidenceAttestedView,
   parseAdapterExecutionConfiguration,
+  parseDoubaoCurrentVerifierRecoveryEvidence,
   registerDurableRoots,
   resolveHarnessProductAdapterExecutor,
   trustedDoubaoRecoveryCheckpoint,
@@ -1031,73 +1033,131 @@ test("the production CLI rejects the offline fixture checkpoint before reading r
 });
 
 test("checked-in evidence records a successful allowlisted v30 replay under the current verifier", async () => {
-  const evidence = JSON.parse(
-    await readFile(
-      new URL(
-        "../evidence/doubao-v30-current-verifier-recovery.json",
-        import.meta.url,
-      ),
-      "utf8",
+  const evidenceSource = await readFile(
+    new URL(
+      "../evidence/doubao-v30-current-verifier-recovery.json",
+      import.meta.url,
     ),
-  ) as {
-    readonly schemaVersion: string;
-    readonly status: string;
-    readonly registryId: string;
-    readonly checkpointId: string;
-    readonly artifactContentHash: string;
-    readonly runSpecificationHash: string;
-    readonly checkpointTraceHash: string;
-    readonly evaluatedRunIdentity: {
-      readonly specCommitSha: string;
-      readonly runnerCodeDigest: string;
-    };
-    readonly verifierBuildIdentity: typeof import("../src/index.ts").BUILD_IDENTITY;
-    readonly rendererAuthorizationEvidence: {
-      readonly decisionId: string;
-      readonly authorizationAuditDigest: string;
-      readonly payloadHash: string;
-    };
-    readonly binaryValidation: {
-      readonly pptxSlideCount: number;
-      readonly staticPngCount: number;
-      readonly contactSheetPngCount: number;
-    };
-    readonly recoveryCliResultHash: string;
-    readonly resultHash: string;
-  };
-  const { resultHash, ...result } = evidence;
-  assert.equal(
-    evidence.schemaVersion,
-    "doubao-current-verifier-trusted-recovery-evidence-v1",
+    "utf8",
   );
-  assert.equal(evidence.status, "recovery_succeeded");
-  assert.equal(
-    evidence.checkpointId,
+  const evidence =
+    parseDoubaoCurrentVerifierRecoveryEvidence(evidenceSource);
+  const trustedCheckpoint = trustedDoubaoRecoveryCheckpoint(
     DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   );
-  assert.equal(
-    evidence.evaluatedRunIdentity.specCommitSha,
-    trustedDoubaoRecoveryCheckpoint(
-      DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
-    ).evaluatedSpecCommitSha,
-  );
+
+  assert.deepEqual(evidence, {
+    schemaVersion:
+      "doubao-current-verifier-trusted-recovery-evidence-v1",
+    status: "recovery_succeeded",
+    recordedOn: "2026-07-31",
+    timingBasis: "date_only_unobserved_exact_time",
+    registryId: "doubao-real-provider-20260730-t09-v30",
+    checkpointId: DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+    artifactContentHash:
+      "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    artifactManifestHash:
+      "sha256:1697e0128db2880c3bf7de7dc7fc03d376582d0bc16b3e293fbe68229c12a53a",
+    renderManifestHash:
+      "sha256:6daf8702f7007148336931dca858f1b01dc288832545f9ae5bf534a3be2c32f0",
+    runSpecificationHash:
+      "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b",
+    checkpointTraceHash:
+      "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
+    evaluatedRunIdentity: {
+      specCommitSha: trustedCheckpoint.evaluatedSpecCommitSha,
+      buildIdentitySource:
+        trustedCheckpoint.evaluatedBuildIdentitySource,
+      runnerCodeDigest: trustedCheckpoint.runnerCodeDigest,
+      runSpecificationCanonicalHash:
+        trustedCheckpoint.runSpecificationCanonicalHash,
+    },
+    verifierBuildIdentity: BUILD_IDENTITY,
+    rendererAuthorizationEvidence: {
+      decisionId:
+        trustedCheckpoint.rendererAuthorizationDecision.decisionId,
+      authorizationAuditDigest:
+        trustedCheckpoint.rendererAuthorizationAuditDigest,
+      requestId:
+        trustedCheckpoint.rendererAuthorizationDecision.request
+          .requestId,
+      targetService:
+        trustedCheckpoint.rendererAuthorizationDecision.request
+          .targetService,
+      targetAccount:
+        trustedCheckpoint.rendererAuthorizationDecision.request
+          .targetAccount,
+      targetRegion:
+        trustedCheckpoint.rendererAuthorizationDecision.request
+          .targetRegion,
+      payloadHash:
+        trustedCheckpoint.rendererAuthorizationDecision.request
+          .payloadHash,
+      policyVersion:
+        trustedCheckpoint.rendererAuthorizationDecision.policyVersion,
+      approvedAt:
+        trustedCheckpoint.rendererAuthorizationDecision.approvedAt,
+      expiresAt:
+        trustedCheckpoint.rendererAuthorizationDecision.expiresAt,
+    },
+    binaryValidation: {
+      pptxSlideCount: 16,
+      staticPngCount: 16,
+      contactSheetPngCount: 1,
+    },
+    recoveryCliResultHash:
+      "sha256:4c1013c84dcc01dba070bfc52975bff7233f72b22312e2682353351765d81ff2",
+    resultHash:
+      "sha256:REPLACE_AFTER_CURRENT_VERIFIER_FREEZE",
+  });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
     evidence.verifierBuildIdentity.specCommitSha,
   );
-  assert.deepEqual(evidence.verifierBuildIdentity, BUILD_IDENTITY);
   assert.equal(
-    evidence.rendererAuthorizationEvidence.payloadHash,
-    evidence.artifactContentHash,
+    evidence.resultHash,
+    hash(
+      canonicalJsonBytes(
+        currentVerifierRecoveryEvidenceAttestedView(evidence),
+      ),
+    ),
   );
-  assert.deepEqual(evidence.binaryValidation, {
-    pptxSlideCount: 16,
-    staticPngCount: 16,
-    contactSheetPngCount: 1,
-  });
-  assert.match(
-    evidence.recoveryCliResultHash,
-    /^sha256:[a-f0-9]{64}$/,
+});
+
+test("current-verifier recovery evidence rejects duplicate and unknown authenticated fields", async () => {
+  const evidenceSource = await readFile(
+    new URL(
+      "../evidence/doubao-v30-current-verifier-recovery.json",
+      import.meta.url,
+    ),
+    "utf8",
   );
-  assert.equal(resultHash, hash(canonicalJsonBytes(result)));
+  const duplicateRootKey = evidenceSource.replace(
+    "{",
+    '{\n  "status": "recovery_succeeded",',
+  );
+  const unknownRootField = evidenceSource.replace(
+    "{",
+    '{\n  "unexpectedRoot": "untrusted",',
+  );
+  const unknownNestedField = evidenceSource.replace(
+    '"evaluatedRunIdentity": {',
+    '"evaluatedRunIdentity": {\n    "unexpectedNested": "untrusted",',
+  );
+
+  assert.throws(
+    () =>
+      parseDoubaoCurrentVerifierRecoveryEvidence(duplicateRootKey),
+    /duplicate object key "status"/i,
+  );
+  assert.throws(
+    () =>
+      parseDoubaoCurrentVerifierRecoveryEvidence(unknownRootField),
+    /unexpected field "unexpectedRoot".*recovery evidence/i,
+  );
+  assert.throws(
+    () =>
+      parseDoubaoCurrentVerifierRecoveryEvidence(unknownNestedField),
+    /unexpected field "unexpectedNested".*evaluatedRunIdentity/i,
+  );
 });

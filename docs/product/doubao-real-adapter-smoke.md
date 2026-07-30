@@ -47,7 +47,13 @@ through the public `DoubaoProductionReplayAdapter` as
   degraded-fidelity notes. Submit count is 1 and retry count is 0.
 
 Machine-readable evidence:
-`docs/smoke/doubao-real-provider-replay-2026-07-28.json`.
+`docs/smoke/doubao-real-provider-replay-2026-07-28.json`. The later
+current-verifier recovery attestation is retained as
+`evidence/doubao-v30-current-verifier-recovery.json`. Its `recordedOn` value is
+date-only and its `timingBasis` is
+`date_only_unobserved_exact_time`: the successful CLI result was retained, but
+no independently trustworthy exact CLI-completion timestamp was observed, so
+the evidence does not manufacture a midnight timestamp.
 
 ## Fixed protocol
 

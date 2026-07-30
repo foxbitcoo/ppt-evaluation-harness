@@ -1,7 +1,8 @@
 {
   "schemaVersion": "doubao-current-verifier-trusted-recovery-evidence-v1",
   "status": "recovery_succeeded",
-  "recordedAt": "2026-07-31T00:00:00.000+08:00",
+  "recordedOn": "2026-07-31",
+  "timingBasis": "date_only_unobserved_exact_time",
   "registryId": "doubao-real-provider-20260730-t09-v30",
   "checkpointId": "doubao-volcano-20260727-real-provider-v1",
   "artifactContentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",

@@ -6,6 +6,12 @@ export {
 } from "./file-system-checkpoint-store.ts";
 export { parseStrictJson } from "./strict-json.ts";
 export {
+  currentVerifierRecoveryEvidenceAttestedView,
+  parseDoubaoCurrentVerifierRecoveryEvidence,
+  type DoubaoCurrentVerifierRecoveryEvidence,
+  type DoubaoCurrentVerifierRecoveryEvidenceAttestedView,
+} from "./doubao-current-verifier-evidence.ts";
+export {
   FileSystemBrowserProfileLock,
   InProcessBrowserProfileLock,
   type BrowserProfileLockPort,
