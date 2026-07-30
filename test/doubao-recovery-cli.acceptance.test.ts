@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  mkdtemp,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
 import {
-  FileSystemAttemptCheckpointStore,
   FileSystemImmutableBlobStore,
+  calculateArtifactDerivativeSetHash,
   registerDurableRoots,
 } from "../src/index.ts";
 
@@ -17,194 +21,40 @@ const execFileAsync = promisify(execFile);
 const encoder = new TextEncoder();
 const hash = (content: Uint8Array) =>
   `sha256:${createHash("sha256").update(content).digest("hex")}` as const;
-
-test("the shipped Doubao recovery CLI rejects a missing retained derivative instead of validating only the original", async () => {
-  const root = await mkdtemp(
-    join(tmpdir(), "doubao-recovery-cli-missing-derivative-"),
-  );
-  const registryId =
-    `doubao-recovery-cli-${process.pid}-${Date.now()}`;
-  const artifactRoot = join(root, "artifact");
-  const specificationRoot = join(root, "specification");
-  const checkpointRoot = join(root, "checkpoint");
-  const artifactStoreId = "doubao-cli-artifact-store";
-  const specificationStoreId = "doubao-cli-specification-store";
-  const checkpointStoreId = "doubao-cli-checkpoint-store";
-  const manifestKey = "artifacts/test/manifest";
-  const originalKey = "artifacts/test/original";
-  const artifactId = "artifact-test";
-  const renderManifestKey =
-    `artifacts/${artifactId}/render-manifest`;
-  const specificationKey = "run-specifications/test";
-  const attemptId = "attempt-doubao-cli-missing-derivative";
-
-  try {
-    await registerDurableRoots({
-      registryId,
-      roots: [
-        {
-          rootReference: "root:artifact",
-          absolutePath: artifactRoot,
-        },
-        {
-          rootReference: "root:specification",
-          absolutePath: specificationRoot,
-        },
-        {
-          rootReference: "root:checkpoint",
-          absolutePath: checkpointRoot,
-        },
-      ],
-    });
-    const artifactStore = new FileSystemImmutableBlobStore({
-      storeId: artifactStoreId,
-      rootPath: artifactRoot,
-    });
-    const specificationStore = new FileSystemImmutableBlobStore({
-      storeId: specificationStoreId,
-      rootPath: specificationRoot,
-    });
-    const checkpointStore = new FileSystemAttemptCheckpointStore({
-      checkpointStoreId,
-      rootPath: checkpointRoot,
-    });
-    const put = async (
-      store: FileSystemImmutableBlobStore,
-      key: string,
-      content: Uint8Array,
-    ) =>
-      store.putImmutable(key, content, {
-        jobId: "job-doubao-cli",
-        contentHash: hash(content),
-        writeAttemptId: `fixture:${key}`,
-        assertWriteAuthorized() {},
-      });
-    const original = encoder.encode("registered-original");
-    const renderManifest = encoder.encode("registered-render-manifest");
-    const derivativePayloads = Array.from(
-      { length: 33 },
-      (_, index) => encoder.encode(`registered-derivative-${index + 1}`),
-    );
-    const derivatives = derivativePayloads.map((content, index) => {
-      const derivativeType =
-        index < 16
-          ? "static_slide" as const
-          : index < 32
-            ? "extracted_text" as const
-            : "contact_sheet" as const;
-      const pageNumber =
-        index < 16 ? index + 1 : index < 32 ? index - 15 : null;
-      const suffix =
-        derivativeType === "static_slide"
-          ? `static-slide-${pageNumber}`
-          : derivativeType === "extracted_text"
-            ? `extracted-text-${pageNumber}`
-            : "contact-sheet";
-      return {
-        derivativeId: `derivative-${index + 1}`,
-        derivativeType,
-        pageNumber,
-        contentHash: hash(content),
-        key: `artifacts/${artifactId}/derivatives/${suffix}`,
-      };
-    });
-    const payloadLocations = [
-      {
-        storeId: artifactStoreId,
-        key: renderManifestKey,
-        contentHash: hash(renderManifest),
-        copyRole: "secondary",
-      },
-      ...derivatives.map(({ contentHash, key }) => ({
-        storeId: artifactStoreId,
-        key,
-        contentHash,
-        copyRole: "secondary",
-      })),
-    ];
-    const manifest = encoder.encode(
-      JSON.stringify({
-        artifact: {
-          artifactId,
-          contentHash: hash(original),
-          provenance: "PRODUCTION_REPLAY",
-        },
-        renderManifestHash: hash(renderManifest),
-        derivatives,
-        payloadLocations,
-        productionExecutionEvidence: {
-          executionMode: "PRODUCTION_REPLAY",
-          captureSource: "REAL_PROVIDER_CAPTURE",
-        },
-      }),
-    );
-    const specification = encoder.encode(
-      JSON.stringify({
-        evaluationCase: { provenance: "PRODUCTION" },
-        adapterSpecification: {
-          browserDriverEvidence: {
-            driverId: "doubao-real-provider-replay",
-            provenance: "PRODUCTION_REPLAY",
-          },
-        },
-      }),
-    );
-    await Promise.all([
-      put(artifactStore, manifestKey, manifest),
-      put(artifactStore, originalKey, original),
-      put(artifactStore, renderManifestKey, renderManifest),
-      ...derivativePayloads.slice(0, 32).map((content, index) =>
-          put(
-            artifactStore,
-            derivatives[index]!.key,
-            content,
-          ),
-      ),
-      put(specificationStore, specificationKey, specification),
-      checkpointStore.append({
-        eventId: "event-doubao-cli-1",
-        attemptId,
-        taskStateVersion: "query_submitted@1",
-      } as never),
-    ]);
-
-    await assert.rejects(
-      execFileAsync(
-        process.execPath,
-        [
-          "--import",
-          "tsx",
-          "scripts/recover-doubao-production-run.ts",
-          registryId,
-          "root:artifact",
-          "root:specification",
-          "root:checkpoint",
-          artifactStoreId,
-          manifestKey,
-          originalKey,
-          specificationStoreId,
-          specificationKey,
-          checkpointStoreId,
-          attemptId,
-        ],
-        { cwd: new URL("..", import.meta.url).pathname },
-      ),
-      /derivative.*missing|missing.*derivative/i,
-    );
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+const HASH_A =
+  "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
+const HASH_B =
+  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
 
 type MalformedLineageCase =
+  | "valid"
+  | "missing_derivative"
   | "duplicate_id"
   | "missing_page"
   | "wrong_kind"
-  | "cross_hash_mismatch";
+  | "cross_hash_mismatch"
+  | "wrong_run_spec"
+  | "wrong_attempt"
+  | "wrong_artifact"
+  | "receipt_digest_mismatch"
+  | "provenance";
 
-async function runMalformedLineageRecovery(
-  malformedCase: MalformedLineageCase,
-) {
+interface FixtureDerivative {
+  derivativeId: string;
+  sourceArtifactId: string;
+  derivativeType:
+    | "static_slide"
+    | "extracted_text"
+    | "contact_sheet";
+  pageNumber: number | null;
+  filename: string;
+  mimeType: string;
+  byteSize: number;
+  contentHash: `sha256:${string}`;
+  pipelineVersion: string;
+}
+
+async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
   const root = await mkdtemp(
     join(tmpdir(), `doubao-recovery-cli-${malformedCase}-`),
   );
@@ -216,13 +66,22 @@ async function runMalformedLineageRecovery(
   const artifactStoreId = `artifact-store-${malformedCase}`;
   const specificationStoreId = `specification-store-${malformedCase}`;
   const checkpointStoreId = `checkpoint-store-${malformedCase}`;
+  const jobId = "job-doubao-lineage";
+  const runId = "run-doubao-lineage";
+  const caseId = "volcano-query-v1";
+  const attemptId = "attempt-doubao-lineage-1";
   const artifactId = "artifact-doubao-lineage";
+  const rawVendorTaskId = "38435879568317954";
+  const productionVendorTaskId =
+    `task_${createHash("sha256")
+      .update(rawVendorTaskId)
+      .digest("hex")
+      .slice(0, 32)}`;
+  const adapterVersion = "doubao-web-ppt@1";
   const manifestKey = `artifacts/${artifactId}/manifest`;
   const originalKey = `artifacts/${artifactId}/original`;
   const renderManifestKey =
     `artifacts/${artifactId}/render-manifest`;
-  const specificationKey = "run-specifications/doubao-lineage";
-  const attemptId = `attempt-${malformedCase}`;
 
   try {
     await registerDurableRoots({
@@ -250,22 +109,19 @@ async function runMalformedLineageRecovery(
       storeId: specificationStoreId,
       rootPath: specificationRoot,
     });
-    const checkpointStore = new FileSystemAttemptCheckpointStore({
-      checkpointStoreId,
-      rootPath: checkpointRoot,
-    });
     const put = async (
       store: FileSystemImmutableBlobStore,
       key: string,
       content: Uint8Array,
     ) =>
       store.putImmutable(key, content, {
-        jobId: "job-doubao-lineage",
+        jobId,
         contentHash: hash(content),
         writeAttemptId: `fixture:${key}`,
         assertWriteAuthorized() {},
       });
-    const original = encoder.encode("registered-original");
+
+    const original = encoder.encode("registered-original-pptx");
     const staticPayloads = Array.from(
       { length: 16 },
       (_, index) => encoder.encode(`static-page-${index + 1}`),
@@ -278,6 +134,7 @@ async function runMalformedLineageRecovery(
     const renderManifest = encoder.encode(
       JSON.stringify({
         schemaVersion: "render-manifest-v1",
+        renderManifestId: `${artifactId}-render`,
         artifactHash: hash(original),
         artifactId,
         pageCount: 16,
@@ -295,14 +152,18 @@ async function runMalformedLineageRecovery(
         })),
       }),
     );
-    const derivatives = [
+    const derivatives: FixtureDerivative[] = [
       ...staticPayloads.map((content, index) => ({
         derivativeId:
           `${artifactId}:static-slide:${index + 1}`,
         sourceArtifactId: artifactId,
         derivativeType: "static_slide" as const,
         pageNumber: index + 1,
+        filename: `slide-${index + 1}.png`,
+        mimeType: "image/png",
+        byteSize: content.byteLength,
         contentHash: hash(content),
+        pipelineVersion: "fixture-renderer-v1",
       })),
       ...textPayloads.map((content, index) => ({
         derivativeId:
@@ -310,16 +171,37 @@ async function runMalformedLineageRecovery(
         sourceArtifactId: artifactId,
         derivativeType: "extracted_text" as const,
         pageNumber: index + 1,
+        filename: `slide-${index + 1}.txt`,
+        mimeType: "text/plain; charset=utf-8",
+        byteSize: content.byteLength,
         contentHash: hash(content),
+        pipelineVersion: "fixture-renderer-v1",
       })),
       {
         derivativeId: `${artifactId}:contact-sheet`,
         sourceArtifactId: artifactId,
         derivativeType: "contact_sheet" as const,
         pageNumber: null,
+        filename: "contact-sheet.png",
+        mimeType: "image/png",
+        byteSize: contactPayload.byteLength,
         contentHash: hash(contactPayload),
+        pipelineVersion: "fixture-renderer-v1",
       },
     ];
+    const derivativeSetHash = calculateArtifactDerivativeSetHash(
+      derivatives.map(({ derivativeId, contentHash }) => ({
+        derivativeId,
+        contentHash,
+      })),
+    );
+    const receipt = {
+      captureId: "doubao-volcano-fixture",
+      artifactContentHash: hash(original),
+      traceDigest: HASH_A,
+      retainedPageDigest: HASH_B,
+      renderDigest: derivativeSetHash,
+    };
     if (malformedCase === "duplicate_id") {
       derivatives[15] = {
         ...derivatives[15]!,
@@ -327,81 +209,210 @@ async function runMalformedLineageRecovery(
       };
     } else if (malformedCase === "missing_page") {
       derivatives[15] = {
-        ...derivatives[0]!,
-        derivativeId: `${artifactId}:static-slide:duplicate-page`,
+        ...derivatives[15]!,
+        pageNumber: 15,
       };
     } else if (malformedCase === "wrong_kind") {
       derivatives[15] = {
-        ...derivatives[31]!,
-        derivativeId: `${artifactId}:wrong-kind:16`,
+        ...derivatives[15]!,
+        derivativeType: "extracted_text",
       };
-    } else {
+    } else if (malformedCase === "cross_hash_mismatch") {
       const adversarial = encoder.encode("cross-hash-adversarial");
       derivatives[0] = {
         ...derivatives[0]!,
         contentHash: hash(adversarial),
+        byteSize: adversarial.byteLength,
       };
       staticPayloads[0] = adversarial;
     }
-    const derivativeKey = (
-      derivative: typeof derivatives[number],
-    ) =>
-      derivative.derivativeType === "static_slide"
-        ? `artifacts/${artifactId}/derivatives/static-slide-${derivative.pageNumber}`
-        : derivative.derivativeType === "extracted_text"
-          ? `artifacts/${artifactId}/derivatives/extracted-text-${derivative.pageNumber}`
-          : `artifacts/${artifactId}/derivatives/contact-sheet`;
+    const manifestReceipt =
+      malformedCase === "receipt_digest_mismatch"
+        ? { ...receipt, renderDigest: HASH_A }
+        : receipt;
     const manifest = encoder.encode(
       JSON.stringify({
+        schemaVersion: "artifact-package-identity-v1",
+        jobId,
         artifact: {
           artifactId,
+          runId,
           contentHash: hash(original),
           provenance: "PRODUCTION_REPLAY",
+          mimeType:
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          byteSize: original.byteLength,
+          pageCount: 16,
+          capturedAt: "2026-07-27T10:45:58.000Z",
+          filename: "doubao-volcano-16.pptx",
         },
+        renderManifestId: `${artifactId}-render`,
         renderManifestHash: hash(renderManifest),
+        renderOutcome: "degraded",
         derivatives,
         productionExecutionEvidence: {
           executionMode: "PRODUCTION_REPLAY",
           captureSource: "REAL_PROVIDER_CAPTURE",
+          adapterVersion,
+          vendorTaskId: productionVendorTaskId,
+          taskStateVersion: "artifact_exported@4",
+          artifactContentHash: hash(original),
+          rasterManifestHash: hash(renderManifest),
+          captureReceipt: manifestReceipt,
         },
       }),
     );
-    const specification = encoder.encode(
+    const runSpecification = encoder.encode(
       JSON.stringify({
-        evaluationCase: { provenance: "PRODUCTION" },
+        schemaVersion: "run-specification-bundle-v1",
+        jobId,
+        runId:
+          malformedCase === "wrong_run_spec"
+            ? "run-doubao-wrong"
+            : runId,
+        specCommitSha: "fixture-spec-commit",
+        evaluationCase: {
+          caseId,
+          provenance: "PRODUCTION",
+          targetPageCount: 16,
+          track: "query_generation",
+        },
+        productPackage: {
+          packageId: "doubao-web-ppt-real-provider-replay-v1",
+          vendorId: "doubao",
+          adapterVersion,
+          provenance: "PRODUCTION_REPLAY",
+        },
         adapterSpecification: {
+          packageId: "doubao-web-ppt-real-provider-replay-v1",
+          vendorId: "doubao",
+          adapterVersion,
+          implementationDigest: HASH_A,
+          executionEntrypointDigest: HASH_A,
+          executionConfigurationDigest: HASH_A,
           browserDriverEvidence: {
             driverId: "doubao-real-provider-replay",
-            provenance: "PRODUCTION_REPLAY",
+            provenance:
+              malformedCase === "provenance"
+                ? "TEST_FAKE"
+                : "PRODUCTION_REPLAY",
+            captureSource: "REAL_PROVIDER_CAPTURE",
+            driverVersion: "doubao-harness-browser-bridge@2",
+            browserProfileDigest: HASH_A,
+            implementationDigest: HASH_A,
+            configurationDigest: HASH_A,
+            captureReceipt: receipt,
           },
         },
       }),
     );
-    const payloadByKey = new Map<string, Uint8Array>();
-    derivatives.forEach((derivative) => {
-      const content =
-        derivative.derivativeType === "static_slide"
-          ? staticPayloads[(derivative.pageNumber ?? 1) - 1]!
-          : derivative.derivativeType === "extracted_text"
-            ? textPayloads[(derivative.pageNumber ?? 1) - 1]!
-            : contactPayload;
-      payloadByKey.set(derivativeKey(derivative), content);
+    const runSpecificationHash = hash(runSpecification);
+    const specificationKey =
+      `run-specifications/${runSpecificationHash.slice("sha256:".length)}`;
+    const derivativePayloadByKey = new Map<string, Uint8Array>();
+    staticPayloads.forEach((content, index) => {
+      derivativePayloadByKey.set(
+        `artifacts/${artifactId}/derivatives/static-slide-${index + 1}`,
+        content,
+      );
     });
+    textPayloads.forEach((content, index) => {
+      derivativePayloadByKey.set(
+        `artifacts/${artifactId}/derivatives/extracted-text-${index + 1}`,
+        content,
+      );
+    });
+    derivativePayloadByKey.set(
+      `artifacts/${artifactId}/derivatives/contact-sheet`,
+      contactPayload,
+    );
+    if (malformedCase === "missing_derivative") {
+      derivativePayloadByKey.delete(
+        `artifacts/${artifactId}/derivatives/contact-sheet`,
+      );
+    }
     await Promise.all([
       put(artifactStore, manifestKey, manifest),
       put(artifactStore, originalKey, original),
       put(artifactStore, renderManifestKey, renderManifest),
-      ...[...payloadByKey].map(([key, content]) =>
+      ...[...derivativePayloadByKey].map(([key, content]) =>
         put(artifactStore, key, content),
       ),
-      put(specificationStore, specificationKey, specification),
-      checkpointStore.append({
-        eventId: `event-${malformedCase}`,
-        attemptId,
-        taskStateVersion: "query_submitted@1",
-      } as never),
+      put(
+        specificationStore,
+        specificationKey,
+        runSpecification,
+      ),
     ]);
-    return await execFileAsync(
+
+    const events = [
+      {
+        eventType: "preflight_observed",
+        observedAt: "2026-07-27T10:34:46.000Z",
+        submissionEvidenceAtCheckpoint: "not_submitted",
+        vendorTaskId: null,
+        taskStateVersion: null,
+        artifactId: null,
+      },
+      {
+        eventType: "query_submitted",
+        observedAt: "2026-07-27T10:34:46.000Z",
+        submissionEvidenceAtCheckpoint: "submitted",
+        vendorTaskId: rawVendorTaskId,
+        taskStateVersion: "query_submitted@2",
+        artifactId: null,
+      },
+      {
+        eventType: "generation_ready",
+        observedAt: "2026-07-27T10:45:58.000Z",
+        submissionEvidenceAtCheckpoint: "submitted",
+        vendorTaskId: rawVendorTaskId,
+        taskStateVersion: "generation_ready@3",
+        artifactId: null,
+      },
+      {
+        eventType: "artifact_exported",
+        observedAt: "2026-07-27T10:45:58.000Z",
+        submissionEvidenceAtCheckpoint: "submitted",
+        vendorTaskId: rawVendorTaskId,
+        taskStateVersion: "artifact_exported@4",
+        artifactId:
+          malformedCase === "wrong_artifact"
+            ? "artifact-doubao-wrong"
+            : artifactId,
+      },
+    ].map((event, index) => ({
+      eventId: `${attemptId}-event-${index + 1}`,
+      jobId,
+      caseId,
+      runId,
+      attemptId:
+        malformedCase === "wrong_attempt" && index === 2
+          ? "attempt-doubao-wrong"
+          : attemptId,
+      attemptSeq: 1,
+      eventType: event.eventType,
+      sourceAt: event.observedAt,
+      observedAt: event.observedAt,
+      writerId: adapterVersion,
+      evidenceRef: `ui://doubao/event-${index + 1}-audit-anchor`,
+      adapterVersion,
+      sourceUrl: "https://www.doubao.com/",
+      submissionEvidenceAtCheckpoint:
+        event.submissionEvidenceAtCheckpoint,
+      vendorTaskId: event.vendorTaskId,
+      taskStateVersion: event.taskStateVersion,
+      artifactId: event.artifactId,
+    }));
+    const checkpointFilename =
+      `${createHash("sha256").update(attemptId).digest("hex")}.jsonl`;
+    await writeFile(
+      join(checkpointRoot, checkpointFilename),
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+
+    const result = await execFileAsync(
       process.execPath,
       [
         "--import",
@@ -421,22 +432,66 @@ async function runMalformedLineageRecovery(
       ],
       { cwd: new URL("..", import.meta.url).pathname },
     );
+    return JSON.parse(result.stdout) as {
+      readonly jobId: string;
+      readonly runId: string;
+      readonly caseId: string;
+      readonly attemptId: string;
+      readonly artifactId: string;
+      readonly derivativeCount: number;
+      readonly recoveredDerivativeCount: number;
+      readonly derivativeSetHash: string;
+      readonly checkpointCount: number;
+    };
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 }
 
-test("the shipped Doubao recovery CLI rejects malformed 33-item derivative lineages", async (context) => {
+test("the shipped Doubao recovery CLI validates complete cross-store lineage", async () => {
+  const result = await runRecoveryFixture("valid");
+  assert.deepEqual(
+    {
+      jobId: result.jobId,
+      runId: result.runId,
+      caseId: result.caseId,
+      attemptId: result.attemptId,
+      artifactId: result.artifactId,
+      derivativeCount: result.derivativeCount,
+      recoveredDerivativeCount: result.recoveredDerivativeCount,
+      checkpointCount: result.checkpointCount,
+    },
+    {
+      jobId: "job-doubao-lineage",
+      runId: "run-doubao-lineage",
+      caseId: "volcano-query-v1",
+      attemptId: "attempt-doubao-lineage-1",
+      artifactId: "artifact-doubao-lineage",
+      derivativeCount: 33,
+      recoveredDerivativeCount: 33,
+      checkpointCount: 4,
+    },
+  );
+  assert.match(result.derivativeSetHash, /^sha256:[a-f0-9]{64}$/);
+});
+
+test("the shipped Doubao recovery CLI rejects incomplete or cross-wired production lineage", async (context) => {
   for (const malformedCase of [
+    "missing_derivative",
     "duplicate_id",
     "missing_page",
     "wrong_kind",
     "cross_hash_mismatch",
+    "wrong_run_spec",
+    "wrong_attempt",
+    "wrong_artifact",
+    "receipt_digest_mismatch",
+    "provenance",
   ] as const) {
     await context.test(malformedCase, async () => {
       await assert.rejects(
-        runMalformedLineageRecovery(malformedCase),
-        /derivative|render manifest|lineage/i,
+        runRecoveryFixture(malformedCase),
+        /artifact|derivative|render|run specification|checkpoint|receipt|provenance|lineage/i,
       );
     });
   }

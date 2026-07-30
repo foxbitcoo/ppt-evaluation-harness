@@ -462,24 +462,38 @@ test("a failed raster manifest keeps original Artifact lineage and marks fidelit
   );
   const artifact = result.artifactCandidates[0]?.artifact;
   assert.ok(artifact);
-  const manifest = createFailedSafeRasterManifest({
-    artifact,
-    renderer: "authorized-safe-raster@1",
-    rendererAuthorizationDecisionId: "decision-render-failed",
-    failure: new Error(
+  for (const failure of [
+    new Error(
       "render input missing under /Users/redacted/private-file",
     ),
-    renderManifestId: `${artifact.artifactId}-render`,
-  });
+    new Error("OPENAI_API_KEY=sk-live-super-secret-value"),
+    new Error(
+      "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZWNyZXQifQ.signature",
+    ),
+    new Error(
+      "renderer stderr: password=hunter2; cookie=session-secret",
+    ),
+  ]) {
+    const manifest = createFailedSafeRasterManifest({
+      artifact,
+      renderer: "authorized-safe-raster@1",
+      rendererAuthorizationDecisionId: "decision-render-failed",
+      failure,
+      renderManifestId: `${artifact.artifactId}-render`,
+    });
 
-  assert.equal(manifest.artifactId, artifact.artifactId);
-  assert.equal(manifest.renderOutcome, "failed");
-  assert.deepEqual(manifest.slides, []);
-  assert.equal(manifest.fidelity.status, "unknown");
-  assert.doesNotMatch(
-    JSON.stringify(manifest),
-    /\/Users\/|private-file/,
-  );
+    assert.equal(manifest.artifactId, artifact.artifactId);
+    assert.equal(manifest.renderOutcome, "failed");
+    assert.deepEqual(manifest.slides, []);
+    assert.equal(manifest.fidelity.status, "unknown");
+    assert.deepEqual(manifest.fidelity.notes, [
+      "RASTERIZATION_FAILED: static rendering failed; inspect the authorized operator diagnostic channel",
+    ]);
+    assert.doesNotMatch(
+      JSON.stringify(manifest),
+      /\/Users\/|private-file|sk-live|eyJhbGci|hunter2|session-secret|stderr/i,
+    );
+  }
 });
 
 test("a generated preview page deviation remains task success and proceeds to export", async () => {
@@ -789,6 +803,15 @@ test("the exact-current public Doubao replay fixture records durable recovery an
       readonly executionMode: string;
       readonly captureSource: string;
     };
+    readonly trace: {
+      readonly timestampGranularity: string;
+      readonly conversationUrl: string;
+      readonly vendorTaskId: string;
+      readonly attemptStartedAt: string;
+      readonly artifactCapturedAt: string;
+      readonly vendorReportedElapsed: string;
+      readonly manualActions: readonly string[];
+    };
     readonly buildIdentity: {
       readonly source: string;
       readonly specCommitSha: string;
@@ -856,7 +879,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
       specCommitSha:
         "fc7a38740db9ac24e54d6ef2007069f5746df1f0",
       sourceArchiveDigest:
-        "sha256:dfcd975b700ec20e484ab2ccc38cc12f0f111c61e720a94bbd130856e0c3bab9",
+        "sha256:60beb2d15f78ae985ceda483de19f67c50f25919dbbffa42ef5f23854c271a05",
       sourceArchiveEntryCount: 38,
     },
   );
@@ -867,6 +890,40 @@ test("the exact-current public Doubao replay fixture records durable recovery an
     pageCount: 16,
     provenance: "PRODUCTION_REPLAY",
   });
+  assert.deepEqual(
+    {
+      conversationUrl: fixture.trace.conversationUrl,
+      vendorTaskId: fixture.trace.vendorTaskId,
+      attemptStartedAt: fixture.trace.attemptStartedAt,
+      artifactCapturedAt: fixture.trace.artifactCapturedAt,
+      vendorReportedElapsed: fixture.trace.vendorReportedElapsed,
+    },
+    {
+      conversationUrl:
+        "https://www.doubao.com/chat/38435879568317954",
+      vendorTaskId: "task_38435879568317954",
+      attemptStartedAt: "2026-07-27T10:34:46.000Z",
+      artifactCapturedAt: "2026-07-27T10:45:58.000Z",
+      vendorReportedElapsed: "9m 31s",
+    },
+  );
+  assert.match(
+    fixture.trace.timestampGranularity,
+    /conservative upper bound.*not converted into an invented milestone timestamp/i,
+  );
+  assert.deepEqual(fixture.trace.manualActions, [
+    "open a new Doubao task",
+    "select PPT mode",
+    "select detailed length",
+    "retain intelligent matching",
+    "enter the frozen 16-page Volcano prompt",
+    "submit exactly once",
+    "observe vendor completion label: 9m 31s",
+    "observe completed 16-page editor and enabled Download control",
+    "choose Download -> PPTX exactly once",
+    "validate the one retained PPTX after the download listener timed out",
+    "do not click export again; do not retry",
+  ]);
   assert.equal(fixture.render.staticSlideHashes.length, 16);
   assert.match(
     fixture.render.contactSheetHash,
@@ -881,7 +938,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
   assert.equal(fixture.recovery.recoveredDerivativeCount, 33);
   assert.equal(
     fixture.recovery.cliArtifactIdentityHash,
-    "sha256:b1c851ee72f013a55ac61ea1b681eac1b807ad56d3fe145a5ba547a5638dfb54",
+    "sha256:ef62c87fb56856964e97fa5ed731e9560a23e9ad7bdd40b32d159e9774ee595f",
   );
   assert.equal(fixture.recovery.cliDerivativeCount, 33);
   assert.equal(
@@ -890,7 +947,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
   );
   assert.equal(
     fixture.recovery.cliRenderManifestHash,
-    "sha256:5b8aae36c5bb1b705df19be4d3100c0d318b8c6819599a0a0d2a6fe035c49863",
+    "sha256:137086066f28f3445e638bb0fc7fac4458e4de9c968a0e2b23dac43e58851d64",
   );
   assert.equal(
     fixture.recovery.cliDerivativeSetHash,
@@ -909,7 +966,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
       retainedPageDigest:
         "sha256:8f9453b0cf3b88525d2ad69d7f0d854efd24cc7e86108fcafb82727912b46c3f",
       traceDigest:
-        "sha256:088d839e1a4abecd326622fbe334e640ef93996c27e59ccfecec3588216c0226",
+        "sha256:594d9b94d81d98e4b8a1986db7353f6852ac17201076d85e5d6f64df505d40ad",
     },
     captureSource: "REAL_PROVIDER_CAPTURE",
     configurationDigest:
@@ -917,7 +974,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
     driverId: "doubao-real-provider-replay",
     driverVersion: "doubao-harness-browser-bridge@2",
     implementationDigest:
-      "sha256:ea581531ce262cd828cc498ba59ced57d25184aed4e5c803dfddea9e1a3cf6d1",
+      "sha256:2955c7083ebfb19e9cd17600eb8e4c1c1feafc0c6f1ae238d849fdc9d078f9a4",
     provenance: "PRODUCTION_REPLAY",
   });
   assert.equal(fixture.recovery.recoveryCliExecuted, true);

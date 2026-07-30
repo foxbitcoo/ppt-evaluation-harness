@@ -145,9 +145,9 @@ const capabilities = createHarnessOwnedProductionCapabilities({
 
 const capture: DoubaoRealProviderCapture = {
   packageObservation: {
-    observedAt: "2026-07-27T10:45:00.000Z",
+    observedAt: "2026-07-27T10:34:46.000Z",
     sourceUrl:
-      "https://www.doubao.com/chat/ppt-retained#redacted-task-fragment",
+      "https://www.doubao.com/chat/38435879568317954",
     accountEvidence: "current_account_signed_in",
     planName: "not_visibly_exposed",
     modelName: "unknown",
@@ -156,37 +156,50 @@ const capture: DoubaoRealProviderCapture = {
     requestedPageCount: 16,
     bestAvailableForCurrentAccount: true,
     incrementalChargeRequired: false,
-    evidenceRef: "screenshot://doubao/preflight-retained-redacted",
+    evidenceRef: "ui://doubao/preflight-audit-anchor",
     manualActions: [
-      "ingested retained REAL_PROVIDER_CAPTURE without browser rerun",
+      "open a new Doubao task",
+      "select PPT mode",
+      "select detailed length",
+      "retain intelligent matching",
     ],
   },
   submission: {
     status: "submitted",
-    vendorTaskId: "task_doubao_volcano_20260727",
-    observedAt: "2026-07-27T10:45:10.000Z",
-    evidenceRef: "screenshot://doubao/submitted-retained-redacted",
-    manualActions: [],
+    vendorTaskId: "task_38435879568317954",
+    observedAt: "2026-07-27T10:34:46.000Z",
+    evidenceRef: "ui://doubao/submitted-audit-anchor",
+    manualActions: [
+      "enter the frozen 16-page Volcano prompt",
+      "submit exactly once",
+    ],
   },
   generation: {
     status: "generated",
-    observedAt: "2026-07-27T10:54:11.000Z",
+    observedAt: "2026-07-27T10:45:58.000Z",
     completionUrl:
-      "https://www.doubao.com/chat/ppt-retained#redacted-result-fragment",
+      "https://www.doubao.com/chat/38435879568317954",
     previewPageCount: 16,
-    evidenceRef: "screenshot://doubao/generated-retained-redacted",
-    manualActions: [],
+    evidenceRef: "ui://doubao/generated-audit-anchor",
+    manualActions: [
+      "observe vendor completion label: 9m 31s",
+      "observe completed 16-page editor and enabled Download control",
+    ],
   },
   artifact: {
     status: "exported",
-    observedAt: "2026-07-27T10:54:31.000Z",
+    observedAt: "2026-07-27T10:45:58.000Z",
     filename: "doubao-volcano-16.pptx",
     mimeType:
       "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     pageCount: 16,
     content: pptx,
     evidenceRef: "download://doubao/doubao-volcano-16.pptx",
-    manualActions: ["one retained provider export; no retry"],
+    manualActions: [
+      "choose Download -> PPTX exactly once",
+      "validate the one retained PPTX after the download listener timed out",
+      "do not click export again; do not retry",
+    ],
   },
 };
 
@@ -364,6 +377,22 @@ process.stdout.write(
       executionMode: "PRODUCTION_REPLAY",
       submitCount: 1,
       retryCount: 0,
+    },
+    trace: {
+      timestampGranularity:
+        "Attempt start/submission share the first confirmed observation; generation-ready uses the artifact-capture observation as a conservative upper bound. The vendor-reported 9m 31s is retained as a label, not converted into an invented milestone timestamp.",
+      conversationUrl:
+        "https://www.doubao.com/chat/38435879568317954",
+      vendorTaskId: "task_38435879568317954",
+      attemptStartedAt: "2026-07-27T10:34:46.000Z",
+      artifactCapturedAt: "2026-07-27T10:45:58.000Z",
+      vendorReportedElapsed: "9m 31s",
+      manualActions: [
+        ...capture.packageObservation.manualActions,
+        ...capture.submission.manualActions,
+        ...capture.generation.manualActions,
+        ...capture.artifact.manualActions,
+      ],
     },
     buildIdentity: BUILD_IDENTITY,
     artifact: {
