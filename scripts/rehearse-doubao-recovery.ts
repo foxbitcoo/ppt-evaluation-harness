@@ -8,6 +8,7 @@ import sharp from "sharp";
 
 import {
   BUILD_IDENTITY,
+  DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   DOUBAO_VOLCANO_REAL_CAPTURE_ID,
   DoubaoProductionReplayAdapter,
   InMemoryEgressAuthorizationAudit,
@@ -315,6 +316,7 @@ const recoveryArguments = [
   specLocation.key,
   capabilities.attemptCheckpointStore.checkpointStoreId,
   attempt.recordId,
+  DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
 ];
 const recovery = await execFileAsync(
   process.execPath,
@@ -338,6 +340,16 @@ const parsedRecoveryResult = JSON.parse(recoveryResult) as {
   readonly runSpecificationHash: `sha256:${string}`;
   readonly checkpointCount: number;
   readonly browserDriverId: string;
+  readonly trustedRecoveryCheckpoint: {
+    readonly checkpointId: string;
+    readonly purpose: string;
+    readonly schemaVersion: string;
+  };
+  readonly binaryValidation: {
+    readonly pptxSlideCount: number;
+    readonly staticPngCount: number;
+    readonly contactSheetPngCount: number;
+  };
 };
 if (
   parsedRecoveryResult.registryId !== registryId ||
@@ -352,7 +364,14 @@ if (
     specReference.contentHash ||
   parsedRecoveryResult.checkpointCount !== checkpoints.length ||
   parsedRecoveryResult.browserDriverId !==
-    "doubao-real-provider-replay"
+    "doubao-real-provider-replay" ||
+  parsedRecoveryResult.trustedRecoveryCheckpoint.checkpointId !==
+    DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID ||
+  parsedRecoveryResult.trustedRecoveryCheckpoint.purpose !==
+    "real_provider_recovery" ||
+  parsedRecoveryResult.binaryValidation.pptxSlideCount !== 16 ||
+  parsedRecoveryResult.binaryValidation.staticPngCount !== 16 ||
+  parsedRecoveryResult.binaryValidation.contactSheetPngCount !== 1
 ) {
   throw new Error("Doubao recovery CLI result failed exact lineage verification");
 }
@@ -439,6 +458,9 @@ process.stdout.write(
       browserDriverEvidence:
         recoveredSpec.adapterSpecification.browserDriverEvidence,
       checkpointCount: checkpoints.length,
+      trustedRecoveryCheckpoint:
+        parsedRecoveryResult.trustedRecoveryCheckpoint,
+      binaryValidation: parsedRecoveryResult.binaryValidation,
       profileLock: capabilities.evidence.profileLock,
       recoveryCommand:
         `node --import tsx scripts/recover-doubao-production-run.ts ${recoveryArguments.join(" ")}`,

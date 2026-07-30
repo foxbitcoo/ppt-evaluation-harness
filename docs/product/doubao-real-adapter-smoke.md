@@ -32,6 +32,15 @@ through the public `DoubaoProductionReplayAdapter` as
 - The `RunSpecification` retained the allowlisted Doubao driver runtime,
   configuration digest, browser-profile digest, replay provenance, and capture
   source.
+- Recovery is additionally anchored to the harness-owned, versioned checkpoint
+  `doubao-volcano-20260727-real-provider-v1`. The recovered bundle cannot
+  nominate its own trusted driver, build, renderer, Artifact hash, or replay
+  receipt, and the production CLI rejects the offline validation fixture
+  checkpoint before opening any recovery store.
+- The recovery CLI reparses the retained original as a safe 16-slide OPC/PPTX
+  package. It also verifies each of the 16 slide derivatives and the contact
+  sheet as decoded PNG bytes with bounded dimensions before accepting their
+  hashes; text with self-consistent hashes cannot stand in for either format.
 - Four durable Attempt checkpoints were recovered. The cross-process profile
   lock and the recovery CLI were both exercised.
 - The retained slide 9 clipping and slides 2–16 overflow warnings remain

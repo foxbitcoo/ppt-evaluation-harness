@@ -230,6 +230,13 @@ export {
   type DoubaoTaskReconciliationEvidence,
   type DoubaoTaskReconciliationQuery,
 } from "./doubao-production-adapter.ts";
+export {
+  DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+  trustedDoubaoRecoveryCheckpoint,
+  type DoubaoRecoverySha256,
+  type TrustedDoubaoRecoveryCheckpoint,
+  type TrustedDoubaoRecoveryReceipt,
+} from "./doubao-recovery-checkpoints.ts";
 export { resolveHarnessProductAdapterExecutor } from "./mock-wps.ts";
 export {
   WPS_AIPPT_ADAPTER_VERSION,

@@ -11,11 +11,26 @@ import { join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import sharp from "sharp";
+
 import {
+  BUILD_SPEC_COMMIT_SHA,
+  DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   FileSystemImmutableBlobStore,
+  MockDoubaoProductAdapter,
+  MockWpsProductAdapter,
+  VENDOR_GENERATION_TIMEOUT_MS,
+  VOLCANO_EVALUATION_CASE,
   calculateArtifactDerivativeSetHash,
+  parseAdapterExecutionConfiguration,
   registerDurableRoots,
+  resolveHarnessProductAdapterExecutor,
+  trustedDoubaoRecoveryCheckpoint,
+  type TrustedDoubaoRecoveryCheckpoint,
 } from "../src/index.ts";
+import {
+  validateDoubaoRecoveryStoresAgainstCheckpoint,
+} from "../scripts/recover-doubao-production-run.ts";
 
 const execFileAsync = promisify(execFile);
 const encoder = new TextEncoder();
@@ -25,6 +40,43 @@ const HASH_A =
   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
 const HASH_B =
   "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
+const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT_ID =
+  "doubao-offline-recovery-fixture-v1";
+const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
+  Object.freeze<TrustedDoubaoRecoveryCheckpoint>({
+    schemaVersion: "doubao-recovery-checkpoint-v1",
+    checkpointId: OFFLINE_RECOVERY_FIXTURE_CHECKPOINT_ID,
+    purpose: "offline_validation_fixture",
+    artifactContentHash:
+      "sha256:fadcc2150e1d5262efa0ba3364c0665b59efd1fd0b536fa65fdc19b7b4613942",
+    pageCount: 16,
+    packageId: "doubao-web-ppt-real-provider-replay-v1",
+    adapterVersion: "doubao-web-ppt@1",
+    adapterImplementationDigest: HASH_A,
+    executionEntrypointDigest: HASH_A,
+    executionConfigurationDigest: HASH_A,
+    driverId: "doubao-real-provider-replay",
+    driverVersion: "doubao-harness-browser-bridge@2",
+    browserProfileDigest: HASH_A,
+    driverImplementationDigest: HASH_A,
+    driverConfigurationDigest: HASH_A,
+    vendorTaskId:
+      "task_573b17d014bb4759472bda54192ef536",
+    taskStateVersion: "artifact_exported@4",
+    captureReceipt: Object.freeze({
+      captureId: "doubao-volcano-fixture",
+      artifactContentHash:
+        "sha256:fadcc2150e1d5262efa0ba3364c0665b59efd1fd0b536fa65fdc19b7b4613942",
+      traceDigest: HASH_A,
+      retainedPageDigest: HASH_B,
+      renderDigest:
+        "sha256:9ec8a554ad2b9c63f678230b18fab5d907d9e1494774113b8aa062bd3ef362ad",
+    }),
+    rendererId: "fixture-renderer-v1",
+    derivativePipelineVersion: "fixture-renderer-v1",
+    slideDimensions: Object.freeze({ width: 1, height: 1 }),
+    contactSheetDimensions: Object.freeze({ width: 1, height: 1 }),
+  });
 
 type MalformedLineageCase =
   | "valid"
@@ -37,7 +89,12 @@ type MalformedLineageCase =
   | "wrong_attempt"
   | "wrong_artifact"
   | "receipt_digest_mismatch"
-  | "provenance";
+  | "provenance"
+  | "self_forged_bundle"
+  | "wrong_checkpoint"
+  | "fake_pptx_signature"
+  | "fake_png_signature"
+  | "wrong_png_dimensions";
 
 interface FixtureDerivative {
   derivativeId: string;
@@ -52,6 +109,40 @@ interface FixtureDerivative {
   byteSize: number;
   contentHash: `sha256:${string}`;
   pipelineVersion: string;
+}
+
+async function realMinimalPptx(
+  variant: "trusted" | "forged",
+): Promise<Uint8Array> {
+  const adapter =
+    variant === "trusted"
+      ? new MockWpsProductAdapter()
+      : new MockDoubaoProductAdapter();
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+  );
+  const artifact = await execute({
+    jobId: "fixture-job",
+    runId: "fixture-run",
+    attemptId: "fixture-attempt",
+    attemptSeq: 1,
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  });
+  if ("content" in artifact) {
+    return Uint8Array.from(artifact.content);
+  }
+  assert.ok(
+    artifact.artifactCandidates !== undefined &&
+      artifact.artifactCandidates.length === 1,
+  );
+  return Uint8Array.from(
+    artifact.artifactCandidates[0]!.artifact.content,
+  );
 }
 
 async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
@@ -121,16 +212,46 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         assertWriteAuthorized() {},
       });
 
-    const original = encoder.encode("registered-original-pptx");
-    const staticPayloads = Array.from(
-      { length: 16 },
-      (_, index) => encoder.encode(`static-page-${index + 1}`),
+    let original = await realMinimalPptx(
+      malformedCase === "self_forged_bundle"
+        ? "forged"
+        : "trusted",
     );
+    if (malformedCase === "fake_pptx_signature") {
+      original = Uint8Array.from(original);
+      original[0] = 0x00;
+    }
+    const minimalPng =
+      malformedCase === "wrong_png_dimensions"
+        ? Uint8Array.from(
+            await sharp({
+              create: {
+                width: 2,
+                height: 1,
+                channels: 4,
+                background: "#000000",
+              },
+            })
+              .png()
+              .toBuffer(),
+          )
+        : Uint8Array.from(
+            Buffer.from(
+              "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+              "base64",
+            ),
+          );
+    const staticPayloads = Array.from({ length: 16 }, () =>
+      Uint8Array.from(minimalPng),
+    );
+    if (malformedCase === "fake_png_signature") {
+      staticPayloads[0]![0] = 0x00;
+    }
     const textPayloads = Array.from(
       { length: 16 },
       (_, index) => encoder.encode(`text-page-${index + 1}`),
     );
-    const contactPayload = encoder.encode("contact-sheet");
+    const contactPayload = Uint8Array.from(minimalPng);
     const renderManifest = encoder.encode(
       JSON.stringify({
         schemaVersion: "render-manifest-v1",
@@ -138,6 +259,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         artifactHash: hash(original),
         artifactId,
         pageCount: 16,
+        renderer: "fixture-renderer-v1",
         contactSheet: {
           contentHash: hash(contactPayload),
           filename: "contact-sheet.png",
@@ -195,11 +317,19 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         contentHash,
       })),
     );
+    const selfForged =
+      malformedCase === "self_forged_bundle";
     const receipt = {
-      captureId: "doubao-volcano-fixture",
+      captureId: selfForged
+        ? "doubao-self-forged-fixture"
+        : "doubao-volcano-fixture",
       artifactContentHash: hash(original),
-      traceDigest: HASH_A,
-      retainedPageDigest: HASH_B,
+      traceDigest: selfForged
+        ? hash(encoder.encode("self-forged-trace"))
+        : HASH_A,
+      retainedPageDigest: selfForged
+        ? hash(encoder.encode("self-forged-pages"))
+        : HASH_B,
       renderDigest: derivativeSetHash,
     };
     if (malformedCase === "duplicate_id") {
@@ -270,7 +400,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
           malformedCase === "wrong_run_spec"
             ? "run-doubao-wrong"
             : runId,
-        specCommitSha: "fixture-spec-commit",
+        specCommitSha: BUILD_SPEC_COMMIT_SHA,
         evaluationCase: {
           caseId,
           provenance: "PRODUCTION",
@@ -412,27 +542,28 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
       { mode: 0o600 },
     );
 
-    const result = await execFileAsync(
-      process.execPath,
-      [
-        "--import",
-        "tsx",
-        "scripts/recover-doubao-production-run.ts",
-        registryId,
-        "root:artifact",
-        "root:specification",
-        "root:checkpoint",
-        artifactStoreId,
-        manifestKey,
-        originalKey,
-        specificationStoreId,
-        specificationKey,
-        checkpointStoreId,
-        attemptId,
-      ],
-      { cwd: new URL("..", import.meta.url).pathname },
-    );
-    return JSON.parse(result.stdout) as {
+    const result =
+      await validateDoubaoRecoveryStoresAgainstCheckpoint(
+        {
+          registryId,
+          artifactRecoveryRootReference: "root:artifact",
+          runSpecificationRootReference: "root:specification",
+          checkpointRootReference: "root:checkpoint",
+          artifactStoreId,
+          manifestKey,
+          originalKey,
+          runSpecificationStoreId: specificationStoreId,
+          runSpecificationKey: specificationKey,
+          checkpointStoreId,
+          attemptId,
+        },
+        malformedCase === "wrong_checkpoint"
+          ? trustedDoubaoRecoveryCheckpoint(
+              DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
+            )
+          : OFFLINE_RECOVERY_FIXTURE_CHECKPOINT,
+      );
+    return result as {
       readonly jobId: string;
       readonly runId: string;
       readonly caseId: string;
@@ -448,7 +579,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
   }
 }
 
-test("the shipped Doubao recovery CLI validates complete cross-store lineage", async () => {
+test("the shipped Doubao recovery validator accepts a real minimal binary fixture through an injected trusted checkpoint", async () => {
   const result = await runRecoveryFixture("valid");
   assert.deepEqual(
     {
@@ -475,7 +606,7 @@ test("the shipped Doubao recovery CLI validates complete cross-store lineage", a
   assert.match(result.derivativeSetHash, /^sha256:[a-f0-9]{64}$/);
 });
 
-test("the shipped Doubao recovery CLI rejects incomplete or cross-wired production lineage", async (context) => {
+test("the shipped Doubao recovery validator rejects incomplete or cross-wired production lineage", async (context) => {
   for (const malformedCase of [
     "missing_derivative",
     "duplicate_id",
@@ -491,8 +622,70 @@ test("the shipped Doubao recovery CLI rejects incomplete or cross-wired producti
     await context.test(malformedCase, async () => {
       await assert.rejects(
         runRecoveryFixture(malformedCase),
-        /artifact|derivative|render|run specification|checkpoint|receipt|provenance|lineage/i,
+        /artifact|derivative|render|run specification|checkpoint|receipt|provenance|lineage|PPTX|PNG/i,
       );
     });
   }
+});
+
+test("the recovery validator rejects a complete self-consistent bundle not anchored by its independent checkpoint", async () => {
+  await assert.rejects(
+    runRecoveryFixture("self_forged_bundle"),
+    /does not match the harness-owned trusted checkpoint/i,
+  );
+});
+
+test("the recovery validator rejects a valid bundle presented under the wrong trusted checkpoint", async () => {
+  await assert.rejects(
+    runRecoveryFixture("wrong_checkpoint"),
+    /trusted checkpoint|not allowlisted/i,
+  );
+});
+
+test("the recovery validator rejects a self-hashed payload with a fake PPTX signature", async () => {
+  await assert.rejects(
+    runRecoveryFixture("fake_pptx_signature"),
+    /OPC|ZIP|PPTX|Artifact/i,
+  );
+});
+
+test("the recovery validator rejects a self-hashed render with a fake PNG signature", async () => {
+  await assert.rejects(
+    runRecoveryFixture("fake_png_signature"),
+    /must be a decoded, safe PNG raster/i,
+  );
+});
+
+test("the recovery validator rejects decoded PNG dimensions outside the trusted render checkpoint", async () => {
+  await assert.rejects(
+    runRecoveryFixture("wrong_png_dimensions"),
+    /PNG dimensions do not match the trusted checkpoint/i,
+  );
+});
+
+test("the production CLI rejects the offline fixture checkpoint before reading recovery stores", async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "scripts/recover-doubao-production-run.ts",
+        "unused-registry",
+        "root:artifact",
+        "root:specification",
+        "root:checkpoint",
+        "unused-artifact-store",
+        "artifacts/unused/manifest",
+        "artifacts/unused/original",
+        "unused-specification-store",
+        "run-specifications/unused",
+        "unused-checkpoint-store",
+        "unused-attempt",
+        OFFLINE_RECOVERY_FIXTURE_CHECKPOINT_ID,
+      ],
+      { cwd: new URL("..", import.meta.url).pathname },
+    ),
+    /requires the real-provider trusted checkpoint/i,
+  );
 });

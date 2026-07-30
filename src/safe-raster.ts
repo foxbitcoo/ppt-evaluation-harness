@@ -30,6 +30,7 @@ function crc32(content: Uint8Array): number {
 
 function assertSafePng(content: Uint8Array, label: string): void {
   if (
+    content.byteLength > 64 * 1024 * 1024 ||
     content.byteLength < 33 ||
     content[0] !== 0x89 ||
     content[1] !== 0x50 ||
@@ -106,6 +107,49 @@ function assertSafePng(content: Uint8Array, label: string): void {
   }
   if (!sawIdat || !sawIend || offset !== content.byteLength) {
     throw new Error(`${label} PNG is incomplete`);
+  }
+}
+
+export async function validatedSafePngDimensions(
+  content: Uint8Array,
+  label: string,
+): Promise<{
+  readonly width: number;
+  readonly height: number;
+}> {
+  assertSafePng(content, label);
+  try {
+    const image = sharp(Buffer.from(content), {
+      animated: false,
+      failOn: "error",
+      limitInputPixels: 33_554_432,
+      sequentialRead: true,
+    });
+    const metadata = await image.metadata();
+    if (
+      metadata.format !== "png" ||
+      (metadata.pages !== undefined && metadata.pages !== 1) ||
+      metadata.width === undefined ||
+      metadata.height === undefined
+    ) {
+      throw new Error("unexpected decoded PNG metadata");
+    }
+    const decoded = await image.raw().toBuffer({
+      resolveWithObject: true,
+    });
+    if (
+      decoded.info.width !== metadata.width ||
+      decoded.info.height !== metadata.height ||
+      decoded.data.byteLength === 0
+    ) {
+      throw new Error("decoded PNG dimensions are inconsistent");
+    }
+    return Object.freeze({
+      width: metadata.width,
+      height: metadata.height,
+    });
+  } catch (error) {
+    throw new Error(`${label} PNG decode failed`, { cause: error });
   }
 }
 

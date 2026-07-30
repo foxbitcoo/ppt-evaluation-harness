@@ -1,45 +1,39 @@
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
+  DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
   FileSystemAttemptCheckpointStore,
   FileSystemImmutableBlobStore,
+  BUILD_SPEC_COMMIT_SHA,
   calculateArtifactDerivativeSetHash,
   loadDurableRootRegistry,
   resolveDurableRoot,
+  trustedDoubaoRecoveryCheckpoint,
+  type TrustedDoubaoRecoveryCheckpoint,
 } from "../src/index.ts";
-
-const [
-  registryId,
-  artifactRecoveryRootReference,
-  runSpecificationRootReference,
-  checkpointRootReference,
-  artifactStoreId,
-  manifestKey,
-  originalKey,
-  runSpecificationStoreId,
-  runSpecificationKey,
-  checkpointStoreId,
-  attemptId,
-] = process.argv.slice(2);
-
-if (
-  registryId === undefined ||
-  artifactRecoveryRootReference === undefined ||
-  runSpecificationRootReference === undefined ||
-  checkpointRootReference === undefined ||
-  artifactStoreId === undefined ||
-  manifestKey === undefined ||
-  originalKey === undefined ||
-  runSpecificationStoreId === undefined ||
-  runSpecificationKey === undefined ||
-  checkpointStoreId === undefined ||
-  attemptId === undefined
-) {
-  throw new Error("Recovery command arguments are incomplete");
-}
+import { validatedSafePngDimensions } from "../src/safe-raster.ts";
+import {
+  validatedOpenXmlPresentationSlideNames,
+} from "../src/wps-aippt.ts";
 
 type JsonRecord = Record<string, unknown>;
 type Sha256 = `sha256:${string}`;
+
+export interface DoubaoProductionRecoveryCommand {
+  readonly registryId: string;
+  readonly artifactRecoveryRootReference: string;
+  readonly runSpecificationRootReference: string;
+  readonly checkpointRootReference: string;
+  readonly artifactStoreId: string;
+  readonly manifestKey: string;
+  readonly originalKey: string;
+  readonly runSpecificationStoreId: string;
+  readonly runSpecificationKey: string;
+  readonly checkpointStoreId: string;
+  readonly attemptId: string;
+}
 
 interface ValidatedDerivative {
   readonly derivativeId: string;
@@ -172,6 +166,23 @@ function normalizedProductionTaskId(rawVendorTaskId: string): string {
         .slice(0, 32)}`;
 }
 
+export async function validateDoubaoRecoveryStoresAgainstCheckpoint(
+  command: DoubaoProductionRecoveryCommand,
+  trustedCheckpoint: TrustedDoubaoRecoveryCheckpoint,
+) {
+const {
+  registryId,
+  artifactRecoveryRootReference,
+  runSpecificationRootReference,
+  checkpointRootReference,
+  artifactStoreId,
+  manifestKey,
+  originalKey,
+  runSpecificationStoreId,
+  runSpecificationKey,
+  checkpointStoreId,
+  attemptId,
+} = command;
 const registry = await loadDurableRootRegistry(registryId);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
@@ -271,6 +282,13 @@ if (
 const originalHash = hash(original);
 if (artifactContentHash !== originalHash) {
   throw new Error("Durable Doubao recovery original Artifact hash mismatch");
+}
+const originalSlideNames =
+  validatedOpenXmlPresentationSlideNames(original);
+if (originalSlideNames.length !== 16) {
+  throw new Error(
+    "Durable Doubao recovery original Artifact is not a safe 16-page PPTX",
+  );
 }
 
 const rawDerivatives = manifestIdentity.derivatives;
@@ -420,6 +438,7 @@ if (
 text(
   runSpecificationBundle.specCommitSha,
   "Run Specification.specCommitSha",
+  BUILD_SPEC_COMMIT_SHA,
 );
 const evaluationCase = record(
   runSpecificationBundle.evaluationCase,
@@ -493,15 +512,15 @@ if (
     "Durable Doubao recovery Run Specification adapter lineage mismatch",
   );
 }
-sha(
+const adapterImplementationDigest = sha(
   adapterSpecification.implementationDigest,
   "Run Specification.adapterSpecification.implementationDigest",
 );
-sha(
+const executionEntrypointDigest = sha(
   adapterSpecification.executionEntrypointDigest,
   "Run Specification.adapterSpecification.executionEntrypointDigest",
 );
-sha(
+const executionConfigurationDigest = sha(
   adapterSpecification.executionConfigurationDigest,
   "Run Specification.adapterSpecification.executionConfigurationDigest",
 );
@@ -509,7 +528,7 @@ const browserEvidence = record(
   adapterSpecification.browserDriverEvidence,
   "Run Specification.browserDriverEvidence",
 );
-text(
+const browserDriverId = text(
   browserEvidence.driverId,
   "Run Specification.browserDriverEvidence.driverId",
   "doubao-real-provider-replay",
@@ -524,19 +543,19 @@ text(
   "Run Specification.browserDriverEvidence.captureSource",
   "REAL_PROVIDER_CAPTURE",
 );
-text(
+const driverVersion = text(
   browserEvidence.driverVersion,
   "Run Specification.browserDriverEvidence.driverVersion",
 );
-sha(
+const browserProfileDigest = sha(
   browserEvidence.browserProfileDigest,
   "Run Specification.browserDriverEvidence.browserProfileDigest",
 );
-sha(
+const driverImplementationDigest = sha(
   browserEvidence.implementationDigest,
   "Run Specification.browserDriverEvidence.implementationDigest",
 );
-sha(
+const driverConfigurationDigest = sha(
   browserEvidence.configurationDigest,
   "Run Specification.browserDriverEvidence.configurationDigest",
 );
@@ -574,6 +593,10 @@ text(
   "render manifest.schemaVersion",
   "render-manifest-v1",
 );
+const rendererId = text(
+  renderIdentity.renderer,
+  "render manifest.renderer",
+);
 if (
   text(renderIdentity.renderManifestId, "render manifest.renderManifestId") !==
     renderManifestId ||
@@ -605,6 +628,15 @@ const slides = rawSlides.map((value, index) => {
       slide.contentHash,
       `render manifest.slides[${index}].contentHash`,
     ),
+    filename: text(
+      slide.filename,
+      `render manifest.slides[${index}].filename`,
+    ),
+    mimeType: text(
+      slide.mimeType,
+      `render manifest.slides[${index}].mimeType`,
+      "image/png",
+    ),
     extractedTextHash: sha(
       slide.extractedTextHash,
       `render manifest.slides[${index}].extractedTextHash`,
@@ -618,6 +650,15 @@ const contactSheet = record(
 const contactSheetHash = sha(
   contactSheet.contentHash,
   "render manifest.contactSheet.contentHash",
+);
+const contactSheetFilename = text(
+  contactSheet.filename,
+  "render manifest.contactSheet.filename",
+);
+text(
+  contactSheet.mimeType,
+  "render manifest.contactSheet.mimeType",
+  "image/png",
 );
 
 const expectedDerivative = (
@@ -638,11 +679,21 @@ const expectedDerivative = (
     derivativeType === "static_slide"
       ? slide.contentHash
       : slide.extractedTextHash;
+  const expectedFilename =
+    derivativeType === "static_slide"
+      ? slide.filename
+      : `slide-${pageNumber}.txt`;
+  const expectedMimeType =
+    derivativeType === "static_slide"
+      ? "image/png"
+      : "text/plain; charset=utf-8";
   if (
     matches.length !== 1 ||
     matches[0]?.derivativeId !== expectedId ||
     matches[0].sourceArtifactId !== artifactId ||
-    matches[0].contentHash !== expectedHash
+    matches[0].contentHash !== expectedHash ||
+    matches[0].filename !== expectedFilename ||
+    matches[0].mimeType !== expectedMimeType
   ) {
     throw new Error(
       `Durable Doubao recovery derivative lineage mismatch: ${derivativeType}:${pageNumber}`,
@@ -665,7 +716,9 @@ if (
   contactDerivatives[0]?.derivativeId !== `${artifactId}:contact-sheet` ||
   contactDerivatives[0].sourceArtifactId !== artifactId ||
   contactDerivatives[0].pageNumber !== null ||
-  contactDerivatives[0].contentHash !== contactSheetHash
+  contactDerivatives[0].contentHash !== contactSheetHash ||
+  contactDerivatives[0].filename !== contactSheetFilename ||
+  contactDerivatives[0].mimeType !== "image/png"
 ) {
   throw new Error(
     "Durable Doubao recovery contact-sheet derivative lineage mismatch",
@@ -696,6 +749,38 @@ const recoveredDerivatives = await Promise.all(
     return Object.freeze({ lineage, content });
   }),
 );
+for (const recovered of recoveredDerivatives) {
+  if (
+    recovered.lineage.pipelineVersion !==
+    trustedCheckpoint.derivativePipelineVersion
+  ) {
+    throw new Error(
+      "Durable Doubao recovery renderer pipeline is not allowlisted",
+    );
+  }
+  if (
+    recovered.lineage.derivativeType !== "static_slide" &&
+    recovered.lineage.derivativeType !== "contact_sheet"
+  ) {
+    continue;
+  }
+  const dimensions = await validatedSafePngDimensions(
+    recovered.content,
+    `Durable Doubao recovery ${recovered.lineage.derivativeId}`,
+  );
+  const expectedDimensions =
+    recovered.lineage.derivativeType === "static_slide"
+      ? trustedCheckpoint.slideDimensions
+      : trustedCheckpoint.contactSheetDimensions;
+  if (
+    dimensions.width !== expectedDimensions.width ||
+    dimensions.height !== expectedDimensions.height
+  ) {
+    throw new Error(
+      `Durable Doubao recovery ${recovered.lineage.derivativeType} PNG dimensions do not match the trusted checkpoint`,
+    );
+  }
+}
 const derivativeSetHash = calculateArtifactDerivativeSetHash(
   validatedDerivatives.map(({ derivativeId, contentHash }) => ({
     derivativeId,
@@ -716,6 +801,37 @@ if (
 ) {
   throw new Error(
     "Durable Doubao recovery capture receipt Artifact hash mismatch",
+  );
+}
+if (
+  artifactContentHash !== trustedCheckpoint.artifactContentHash ||
+  trustedCheckpoint.pageCount !== 16 ||
+  packageId !== trustedCheckpoint.packageId ||
+  adapterVersion !== trustedCheckpoint.adapterVersion ||
+  adapterImplementationDigest !==
+    trustedCheckpoint.adapterImplementationDigest ||
+  executionEntrypointDigest !==
+    trustedCheckpoint.executionEntrypointDigest ||
+  executionConfigurationDigest !==
+    trustedCheckpoint.executionConfigurationDigest ||
+  browserDriverId !== trustedCheckpoint.driverId ||
+  driverVersion !== trustedCheckpoint.driverVersion ||
+  browserProfileDigest !== trustedCheckpoint.browserProfileDigest ||
+  driverImplementationDigest !==
+    trustedCheckpoint.driverImplementationDigest ||
+  driverConfigurationDigest !==
+    trustedCheckpoint.driverConfigurationDigest ||
+  rendererId !== trustedCheckpoint.rendererId ||
+  manifestVendorTaskId !== trustedCheckpoint.vendorTaskId ||
+  manifestTaskStateVersion !== trustedCheckpoint.taskStateVersion ||
+  !sameReceipt(manifestReceipt, trustedCheckpoint.captureReceipt) ||
+  !sameReceipt(
+    runSpecificationReceipt,
+    trustedCheckpoint.captureReceipt,
+  )
+) {
+  throw new Error(
+    "Durable Doubao recovery bundle does not match the harness-owned trusted checkpoint",
   );
 }
 
@@ -812,8 +928,7 @@ if (
   );
 }
 
-process.stdout.write(
-  `${JSON.stringify({
+return Object.freeze({
     registryId,
     registryHash: registry.registryHash,
     rootReferences: {
@@ -834,6 +949,106 @@ process.stdout.write(
     derivativeSetHash,
     runSpecificationHash,
     checkpointCount: checkpoints.length,
-    browserDriverId: browserEvidence.driverId,
-  })}\n`,
-);
+    browserDriverId,
+    trustedRecoveryCheckpoint: {
+      checkpointId: trustedCheckpoint.checkpointId,
+      purpose: trustedCheckpoint.purpose,
+      schemaVersion: trustedCheckpoint.schemaVersion,
+    },
+    binaryValidation: {
+      pptxSlideCount: originalSlideNames.length,
+      staticPngCount: recoveredDerivatives.filter(
+        ({ lineage }) =>
+          lineage.derivativeType === "static_slide",
+      ).length,
+      contactSheetPngCount: recoveredDerivatives.filter(
+        ({ lineage }) =>
+          lineage.derivativeType === "contact_sheet",
+      ).length,
+    },
+  });
+}
+
+function productionCommandFromArguments(
+  values: readonly string[],
+): {
+  readonly command: DoubaoProductionRecoveryCommand;
+  readonly trustedCheckpointId: string;
+} {
+  const [
+    registryId,
+    artifactRecoveryRootReference,
+    runSpecificationRootReference,
+    checkpointRootReference,
+    artifactStoreId,
+    manifestKey,
+    originalKey,
+    runSpecificationStoreId,
+    runSpecificationKey,
+    checkpointStoreId,
+    attemptId,
+    trustedCheckpointId,
+    ...unexpected
+  ] = values;
+  if (
+    registryId === undefined ||
+    artifactRecoveryRootReference === undefined ||
+    runSpecificationRootReference === undefined ||
+    checkpointRootReference === undefined ||
+    artifactStoreId === undefined ||
+    manifestKey === undefined ||
+    originalKey === undefined ||
+    runSpecificationStoreId === undefined ||
+    runSpecificationKey === undefined ||
+    checkpointStoreId === undefined ||
+    attemptId === undefined ||
+    trustedCheckpointId === undefined ||
+    unexpected.length !== 0
+  ) {
+    throw new Error("Recovery command arguments are incomplete");
+  }
+  return {
+    command: {
+      registryId,
+      artifactRecoveryRootReference,
+      runSpecificationRootReference,
+      checkpointRootReference,
+      artifactStoreId,
+      manifestKey,
+      originalKey,
+      runSpecificationStoreId,
+      runSpecificationKey,
+      checkpointStoreId,
+      attemptId,
+    },
+    trustedCheckpointId,
+  };
+}
+
+if (
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1])
+) {
+  const { command, trustedCheckpointId } =
+    productionCommandFromArguments(process.argv.slice(2));
+  if (
+    trustedCheckpointId !==
+    DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID
+  ) {
+    throw new Error(
+      "Production Doubao recovery requires the real-provider trusted checkpoint",
+    );
+  }
+  const trustedCheckpoint =
+    trustedDoubaoRecoveryCheckpoint(trustedCheckpointId);
+  if (trustedCheckpoint.purpose !== "real_provider_recovery") {
+    throw new Error(
+      "Production Doubao recovery checkpoint purpose is invalid",
+    );
+  }
+  const result = await validateDoubaoRecoveryStoresAgainstCheckpoint(
+    command,
+    trustedCheckpoint,
+  );
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}

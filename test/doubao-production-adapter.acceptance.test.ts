@@ -837,6 +837,16 @@ test("the exact-current public Doubao replay fixture records durable recovery an
       readonly cliRecoveredDerivativeCount: number;
       readonly cliDerivativeSetHash: string;
       readonly checkpointCount: number;
+      readonly trustedRecoveryCheckpoint: {
+        readonly checkpointId: string;
+        readonly purpose: string;
+        readonly schemaVersion: string;
+      };
+      readonly binaryValidation: {
+        readonly pptxSlideCount: number;
+        readonly staticPngCount: number;
+        readonly contactSheetPngCount: number;
+      };
       readonly browserDriverEvidence: {
         readonly driverId: string;
         readonly provenance: string;
@@ -879,8 +889,8 @@ test("the exact-current public Doubao replay fixture records durable recovery an
       specCommitSha:
         "17c13217369f4c46a6a6fde10ae7fdf274686044",
       sourceArchiveDigest:
-        "sha256:60beb2d15f78ae985ceda483de19f67c50f25919dbbffa42ef5f23854c271a05",
-      sourceArchiveEntryCount: 38,
+        "sha256:217be17dd03e200c8e2032ae70b487e6528575bfcbf93530015f30098a1f0777",
+      sourceArchiveEntryCount: 39,
     },
   );
   assert.deepEqual(fixture.artifact, {
@@ -938,7 +948,7 @@ test("the exact-current public Doubao replay fixture records durable recovery an
   assert.equal(fixture.recovery.recoveredDerivativeCount, 33);
   assert.equal(
     fixture.recovery.cliArtifactIdentityHash,
-    "sha256:d8ffa04713b812ab339314c6182bf93206e3891384a1c6138880cbdb54e3b129",
+    "sha256:7a412a1ee7369dbd9ac94900451c1ce179c4e9c44558afe0cc0540c461f1ed3c",
   );
   assert.equal(fixture.recovery.cliDerivativeCount, 33);
   assert.equal(
@@ -947,13 +957,23 @@ test("the exact-current public Doubao replay fixture records durable recovery an
   );
   assert.equal(
     fixture.recovery.cliRenderManifestHash,
-    "sha256:65d2d2ecfbf9356ab0e392521c27e6ff90957b37088dec7798bcfbc8102e674b",
+    "sha256:6571fdb7d5f46069bbea6659a038100129dd6a483a03a04813f4c021d8e9edf1",
   );
   assert.equal(
     fixture.recovery.cliDerivativeSetHash,
     "sha256:047f33568528b87be6abc3ce17898fdb98d36ed5f38742eed3d4b05db7e26826",
   );
   assert.equal(fixture.recovery.checkpointCount, 4);
+  assert.deepEqual(fixture.recovery.trustedRecoveryCheckpoint, {
+    checkpointId: "doubao-volcano-20260727-real-provider-v1",
+    purpose: "real_provider_recovery",
+    schemaVersion: "doubao-recovery-checkpoint-v1",
+  });
+  assert.deepEqual(fixture.recovery.binaryValidation, {
+    pptxSlideCount: 16,
+    staticPngCount: 16,
+    contactSheetPngCount: 1,
+  });
   assert.deepEqual(fixture.recovery.browserDriverEvidence, {
     browserProfileDigest:
       "sha256:c6e451e70a930e80e799843cd8b1576d2bcaf47eb59c33ea1767e009fd599222",
