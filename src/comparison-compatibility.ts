@@ -229,8 +229,10 @@ function assertScoreDimensionValues(
       dimension.assessmentStatus === "NOT_ASSESSABLE" &&
       dimension.deductionBasis ===
         "not_assessable_no_reference_pack" &&
-      dimension.dimension !==
-        "factual_accuracy_and_content_quality";
+      (dimension.dimension !==
+        "factual_accuracy_and_content_quality" ||
+        scorecard.evaluationInputManifest.referencePackHash !==
+          null);
     const invalidDegradedRenderOwnership =
       dimension.assessmentStatus === "NOT_ASSESSABLE" &&
       dimension.deductionBasis ===

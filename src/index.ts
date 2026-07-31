@@ -202,6 +202,7 @@ export {
   FROZEN_LARK_CLI_VERSION,
   FROZEN_LARK_CLI_WRAPPER,
   FROZEN_LARK_CLI_WRAPPER_TARGET,
+  REVIEWED_LARK_MACHINE_LOCK_ROOT,
   assertFrozenLarkCliInstallation,
   assertHarnessOwnedLarkBaseProjection,
   claimHarnessOwnedLarkProductionJob,

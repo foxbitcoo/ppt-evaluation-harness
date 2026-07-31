@@ -26,6 +26,14 @@ export function assertArtifactRenderManifestIntegrity(record: {
   const { artifact, renderManifest } = record;
   const pages = renderedPageNumbers(renderManifest);
   if (
+    artifact.byteSize !== artifact.content.byteLength ||
+    sha256Bytes(artifact.content) !== artifact.contentHash
+  ) {
+    throw new Error(
+      "Artifact byte size or content hash is invalid",
+    );
+  }
+  if (
     !Number.isSafeInteger(artifact.pageCount) ||
     artifact.pageCount < 1 ||
     artifact.pageCount !== renderManifest.pageCount ||

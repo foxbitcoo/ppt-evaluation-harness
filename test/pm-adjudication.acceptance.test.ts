@@ -15,6 +15,7 @@ import {
   type FeishuProjectionPort,
   type GitHubIssueCreateCommand,
   type GitHubIssuePort,
+  type ReviewEventRecord,
 } from "../src/index.ts";
 
 function withAdjudicationEvents(
@@ -29,6 +30,28 @@ function withAdjudicationEvents(
         return async (scorecardId: string) =>
           transform(
             await target.listAdjudicationEvents(scorecardId),
+          );
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function"
+        ? value.bind(target)
+        : value;
+    },
+  });
+}
+
+function withReviewEvents(
+  feishu: InMemoryFeishuProjection,
+  transform: (
+    events: readonly ReviewEventRecord[],
+  ) => readonly ReviewEventRecord[],
+): FeishuProjectionPort {
+  return new Proxy(feishu, {
+    get(target, property, receiver) {
+      if (property === "listReviewEvents") {
+        return async (scorecardId: string) =>
+          transform(
+            await target.listReviewEvents(scorecardId),
           );
       }
       const value = Reflect.get(target, property, receiver) as unknown;
@@ -198,6 +221,120 @@ test("adjudication append and readback reject invalid human-final fields", async
     });
   }
   assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
+});
+
+test("effective Scorecard readback rejects foreign adjudication and review lineage", async (t) => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) => assessmentStatus === "ASSESSED",
+  );
+  assert.ok(score);
+  assert.ok(dimension);
+  assert.notEqual(dimension.value, null);
+  const adjudication = await service.adjudicateDimension({
+    adjudicationEventId: "adj-readback-lineage",
+    scorecardId,
+    dimension: dimension.dimension,
+    humanFinalScore: dimension.value === 1 ? 2 : 1,
+    actorId: "pm-lineage-reviewer",
+    occurredAt: "2026-07-31T00:00:00.000Z",
+    reason: "Readback lineage fixture.",
+    priorAdjudicationEventId: null,
+  });
+  const review = await service.recordReview({
+    reviewEventId: "review-readback-lineage",
+    scorecardId,
+    reviewedDimensions: [dimension.dimension],
+    actorId: "pm-lineage-reviewer",
+    occurredAt: "2026-07-31T00:01:00.000Z",
+    reason: "Readback lineage fixture.",
+    priorReviewEventId: null,
+  });
+  const foreignOrigin = {
+    originId: "test:foreign-readback",
+    environment: "test",
+  } as unknown as typeof score.environmentOrigin;
+  const adjudicationDrifts = [
+    {
+      label: "foreign Scorecard",
+      event: { ...adjudication, scorecardId: "foreign-scorecard" },
+    },
+    {
+      label: "foreign Artifact",
+      event: { ...adjudication, artifactId: "foreign-artifact" },
+    },
+    {
+      label: "foreign Run",
+      event: { ...adjudication, runId: "foreign-run" },
+    },
+    {
+      label: "foreign Job",
+      event: { ...adjudication, jobId: "foreign-job" },
+    },
+    {
+      label: "foreign provenance",
+      event: { ...adjudication, provenance: "PRODUCTION" as const },
+    },
+    {
+      label: "foreign environment",
+      event: { ...adjudication, environmentOrigin: foreignOrigin },
+    },
+  ] as const;
+  for (const { label, event } of adjudicationDrifts) {
+    await t.test(`adjudication ${label}`, async () => {
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withAdjudicationEvents(
+            feishu,
+            () => [event],
+          ),
+        }).getEffectiveScorecard(scorecardId),
+        /adjudication.*lineage|score.*lineage/i,
+      );
+    });
+  }
+  const reviewDrifts = [
+    {
+      label: "foreign Scorecard",
+      event: { ...review, scorecardId: "foreign-scorecard" },
+    },
+    {
+      label: "foreign Artifact",
+      event: { ...review, artifactId: "foreign-artifact" },
+    },
+    {
+      label: "foreign Run",
+      event: { ...review, runId: "foreign-run" },
+    },
+    {
+      label: "foreign Job",
+      event: { ...review, jobId: "foreign-job" },
+    },
+    {
+      label: "foreign provenance",
+      event: { ...review, provenance: "PRODUCTION" as const },
+    },
+    {
+      label: "foreign environment",
+      event: { ...review, environmentOrigin: foreignOrigin },
+    },
+  ] as const;
+  for (const { label, event } of reviewDrifts) {
+    await t.test(`review ${label}`, async () => {
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withReviewEvents(
+            feishu,
+            () => [event],
+          ),
+        }).getEffectiveScorecard(scorecardId),
+        /review.*lineage|score.*lineage/i,
+      );
+    });
+  }
 });
 
 test("a PM adjudication is append-only and exposes the latest human score without overwriting the model score", async () => {

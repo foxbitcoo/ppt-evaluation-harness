@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
   AdjudicationEventRecord,
   ArtifactScoreTableRecord,
@@ -148,6 +149,42 @@ function effectiveScorecard(
   reviews: readonly ReviewEventRecord[],
 ): EffectiveArtifactScorecard {
   events.forEach(assertValidAdjudicationEventFields);
+  if (
+    events.some(
+      (event) =>
+        event.scorecardId !== score.scorecard.scorecardId ||
+        event.artifactId !== score.artifactId ||
+        event.runId !== score.runId ||
+        event.jobId !== score.jobId ||
+        event.provenance !== score.provenance ||
+        !isDeepStrictEqual(
+          event.environmentOrigin,
+          score.environmentOrigin,
+        ),
+    )
+  ) {
+    throw new Error(
+      "Invalid adjudication causal history: score lineage mismatch",
+    );
+  }
+  if (
+    reviews.some(
+      (review) =>
+        review.scorecardId !== score.scorecard.scorecardId ||
+        review.artifactId !== score.artifactId ||
+        review.runId !== score.runId ||
+        review.jobId !== score.jobId ||
+        review.provenance !== score.provenance ||
+        !isDeepStrictEqual(
+          review.environmentOrigin,
+          score.environmentOrigin,
+        ),
+    )
+  ) {
+    throw new Error(
+      "Invalid review causal history: score lineage mismatch",
+    );
+  }
   const availablePages = renderedPageNumbers(
     score.renderManifest,
   );

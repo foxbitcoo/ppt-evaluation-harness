@@ -348,7 +348,7 @@ function normalizedProductionTaskId(rawVendorTaskId: string): string {
         .slice(0, 32)}`;
 }
 
-export async function validateDoubaoRecoveryStoresAgainstCheckpoint(
+async function validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
   command: DoubaoProductionRecoveryCommand,
   trustedCheckpoint: TrustedDoubaoRecoveryCheckpoint,
 ) {
@@ -2030,6 +2030,38 @@ return Object.freeze({
   });
 }
 
+export async function validateDoubaoRecoveryStoresAgainstCheckpoint(
+  command: DoubaoProductionRecoveryCommand,
+  trustedCheckpointId: string,
+) {
+  const trustedCheckpoint =
+    trustedDoubaoRecoveryCheckpoint(trustedCheckpointId);
+  if (trustedCheckpoint.purpose !== "real_provider_recovery") {
+    throw new Error(
+      "Production Doubao recovery checkpoint purpose is invalid",
+    );
+  }
+  return validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
+    command,
+    trustedCheckpoint,
+  );
+}
+
+export async function validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTest(
+  command: DoubaoProductionRecoveryCommand,
+  trustedCheckpoint: TrustedDoubaoRecoveryCheckpoint,
+) {
+  if (trustedCheckpoint.purpose !== "offline_validation_fixture") {
+    throw new Error(
+      "Doubao recovery TEST-only validator requires an offline fixture trusted checkpoint",
+    );
+  }
+  return validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
+    command,
+    trustedCheckpoint,
+  );
+}
+
 function productionCommandFromArguments(
   values: readonly string[],
 ): {
@@ -2100,16 +2132,9 @@ if (
       "Production Doubao recovery requires the real-provider trusted checkpoint",
     );
   }
-  const trustedCheckpoint =
-    trustedDoubaoRecoveryCheckpoint(trustedCheckpointId);
-  if (trustedCheckpoint.purpose !== "real_provider_recovery") {
-    throw new Error(
-      "Production Doubao recovery checkpoint purpose is invalid",
-    );
-  }
   const result = await validateDoubaoRecoveryStoresAgainstCheckpoint(
     command,
-    trustedCheckpoint,
+    trustedCheckpointId,
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

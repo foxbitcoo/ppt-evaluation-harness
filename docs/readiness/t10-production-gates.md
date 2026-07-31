@@ -32,10 +32,14 @@ payload. Recovery, attachment readback, replay, and marker lookup use the same
 physical identity. A single-table acceptance fake retains all entity kinds
 simultaneously and proves replay does not add duplicates.
 
-Production Base mutation is deliberately limited to one workstation. Operators
-must configure one explicit, canonical, machine-level lock root shared by every
-local process; production never derives it from `TMPDIR` or another
-process-scoped directory. The mutex is the reviewed `/usr/bin/lockf` OS
+Production Base mutation is deliberately limited to one workstation. Verified
+production accepts only the build-reviewed machine-global lock root
+`/Users/Shared/ppt-evaluation-harness-lark-locks-v1`; a caller cannot select a
+different root. Before registration and every later mutex or lease-sentinel
+operation, the root must resolve to itself, be a non-symlink directory owned by
+the current user with mode `0700`, and retain the originally registered
+device/inode/owner/mode identity. Production never derives it from `TMPDIR` or
+another process-scoped directory. The mutex is the reviewed `/usr/bin/lockf` OS
 advisory lock, attested by canonical path, exact executable hash, and exact
 usage/version contract before acquisition. The lock holder emits a no-shell
 handshake only after `lockf` owns the lock; release waits for the holder to
@@ -200,22 +204,27 @@ real WPS, Qwen, or Doubao run has not yet been accepted.
     `b6b575a31d62ea45f55155f1090a49d31e79a1b0e5c70af15f9431ab850ca577`
 
 Production first opens and hashes the 43 MB native binary as one file object,
-copies those reviewed bytes into a private read-only executable snapshot, and
-then executes only that snapshot. It never executes the
+copies those reviewed bytes into a private executable snapshot whose directory
+is mode `0500`, and then executes only that snapshot. It never executes the
 `bin/lark-cli` symlink or its download-capable JavaScript wrapper and never
 runs `lark-cli update`. Native hash, exact `--version` output, symlink target,
 and wrapper-script hash must all match the reviewed installation; any drift
 fails closed. Immediately before every read or mutation egress, one handle to
 the executable snapshot supplies both `fstat` metadata and the complete bytes
-for rehashing; the target process is spawned from that same immutable snapshot.
-Replacing or upgrading the original package path cannot change an in-flight
-transport.
+for rehashing. The protected directory and executable device/inode/mode are
+rechecked, that exact handle stays open, and the target spawn begins
+synchronously before the handle is released. Snapshot-path replacement,
+directory drift, and original-package replacement all fail closed or preserve
+the already captured original bytes.
 
 Every Lark CLI subprocess, including identity checks and the version probe, has
 a hard deadline, a 16 MiB stdout raw-byte cap, and a 1 MiB stderr raw-byte cap
 (the version probe uses smaller 64 KiB caps). A deadline, abort, or cap breach
 terminates the whole process group and does not return until that group is
-confirmed absent. Output is bounded before UTF-8 decoding or JSON parsing.
+confirmed absent. Cleanup confirmation timers remain referenced so an orphan
+descendant cannot let the supervisor exit early. A spawn failure is observed
+through the child error event and never calls `kill` without a valid child PID.
+Output is bounded before UTF-8 decoding or JSON parsing.
 
 The Artifact renderer runs each fixed LibreOffice or Poppler command under a
 deny-default Seatbelt profile. The profile grants no network operation,
@@ -313,9 +322,11 @@ between the final check and runner invocation.
 
 Attachment authorization hashes a cloned immutable byte snapshot; only after
 the final authorization, executable attestation, and current CLI
-profile/app/user/tenant revalidation does the transport
-materialize that snapshot in a private read-only invocation directory and
-synchronously spawn the runner. Docx writes use the equally bound stdin path.
+profile/app/user/tenant revalidation does the transport materialize a
+read-only file snapshot in a private invocation directory and synchronously
+spawn the runner. The invocation-directory path also forwards
+the disposal `AbortSignal`, so an attachment upload cannot outlive transport
+shutdown. Docx writes use the equally bound stdin path.
 Transport disposal is irreversible: it aborts all active process groups,
 waits for every in-flight invocation to reject and disappear, then releases
 the execution lease and removes the executable snapshot. All later reads,

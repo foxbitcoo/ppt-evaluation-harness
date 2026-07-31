@@ -26,6 +26,7 @@ import {
   FROZEN_LARK_CLI_VERSION,
   FROZEN_LARK_CLI_WRAPPER,
   FROZEN_LARK_CLI_WRAPPER_TARGET,
+  REVIEWED_LARK_MACHINE_LOCK_ROOT,
   InMemoryEgressAuthorizationAudit,
   parseLarkDocumentReadback,
   parseLarkRecordShareLinkEnvelope,
@@ -42,7 +43,7 @@ import {
 const FIXED_TIME = "2020-01-01T00:00:00.000Z";
 const LARK_TEST_CONFIGURATION = {
   concurrencyBoundary: "single_workstation_durable_mutex",
-  lockRootPath: "/tmp/ppt-evaluation-lark-projection-test-locks",
+  lockRootPath: REVIEWED_LARK_MACHINE_LOCK_ROOT,
   baseTokenEnvironmentVariable: "PPT_EVAL_TEST_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_TEST_REPORT_DOC_TOKEN",

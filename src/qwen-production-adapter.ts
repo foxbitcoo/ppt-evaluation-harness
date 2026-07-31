@@ -908,15 +908,41 @@ function opaqueEvidenceId(
   return `ev_${sha256(textEncoder.encode(JSON.stringify(value))).slice(7, 39)}`;
 }
 
+function nextQwenObservableEventIndex(
+  recoveredEvents: readonly ObservableAttemptEvent[],
+  attemptId: string,
+): number {
+  const escapedAttemptId = attemptId.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const eventIdPattern = new RegExp(
+    `^${escapedAttemptId}-qwen-event-([1-9]\\d*)$`,
+  );
+  let maximum = 0;
+  for (const event of recoveredEvents) {
+    const match = eventIdPattern.exec(event.eventId);
+    if (match === null) continue;
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index)) {
+      throw new Error("Recovered Qwen event identity is not safely ordered");
+    }
+    maximum = Math.max(maximum, index);
+  }
+  return maximum + 1;
+}
+
 async function persistedObservableEvents(
   command: ProductRunCommand,
   execution: QwenBrowserExecution,
   checkpointStore: AttemptCheckpointPort | undefined,
   production: boolean,
+  firstEventIndex: number,
 ): Promise<readonly ObservableAttemptEvent[]> {
   const events: ObservableAttemptEvent[] = [];
   let submitted = false;
   for (const [index, milestone] of execution.milestones.entries()) {
+    const eventIndex = firstEventIndex + index;
     assertIsoTimestamp(milestone.observedAt, "milestone time");
     safeQwenUrl(milestone.url);
     const evidenceId =
@@ -924,7 +950,7 @@ async function persistedObservableEvents(
       opaqueEvidenceId({
         attemptId: command.attemptId,
         eventType: milestone.eventType,
-        index,
+        index: eventIndex,
         observedAt: milestone.observedAt,
       });
     if (!/^ev_[a-f0-9]{16,64}$/.test(evidenceId)) {
@@ -948,7 +974,7 @@ async function persistedObservableEvents(
       );
     }
     const event = Object.freeze({
-      eventId: `${command.attemptId}-qwen-event-${index + 1}`,
+      eventId: `${command.attemptId}-qwen-event-${eventIndex}`,
       jobId: command.jobId,
       caseId: command.evaluationCase.caseId,
       runId: command.runId,
@@ -979,13 +1005,14 @@ async function appendTerminalNotSubmittedEvent(
   execution: QwenBrowserTerminalExecution,
   checkpointStore: AttemptCheckpointPort | undefined,
   events: readonly ObservableAttemptEvent[],
+  firstEventIndex: number,
 ): Promise<readonly ObservableAttemptEvent[]> {
   if (
     execution.submissionEvidence !== "not_submitted"
   ) {
     return events;
   }
-  const eventIndex = events.length + 1;
+  const eventIndex = firstEventIndex + events.length;
   const evidenceId = opaqueEvidenceId({
     attemptId: command.attemptId,
     eventType: "query_not_submitted",
@@ -1418,6 +1445,10 @@ function qwenExecutor(
       execution,
       checkpointStore,
       productionValidation,
+      nextQwenObservableEventIndex(
+        recoveredEvents,
+        command.attemptId,
+      ),
     );
     if (execution.status === "terminal") {
       validateTerminalExecution(execution);
@@ -1431,6 +1462,10 @@ function qwenExecutor(
             execution,
             checkpointStore,
             milestoneEvents,
+            nextQwenObservableEventIndex(
+              recoveredEvents,
+              command.attemptId,
+            ),
           )
         : milestoneEvents;
     const durableResultEvents =

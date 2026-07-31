@@ -41,7 +41,17 @@ import {
   artifactManifestAttestedPayloadHash,
   renderManifestAttestedPayloadHash,
   validateDoubaoRecoveryStoresAgainstCheckpoint,
+  validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTest,
 } from "../scripts/recover-doubao-production-run.ts";
+
+type PublicRecoveryCheckpointArgument =
+  Parameters<
+    typeof validateDoubaoRecoveryStoresAgainstCheckpoint
+  >[1];
+const publicRecoveryCheckpointArgumentIsIdOnly:
+  PublicRecoveryCheckpointArgument extends string ? true : false =
+    true;
+void publicRecoveryCheckpointArgumentIsIdOnly;
 
 const execFileAsync = promisify(execFile);
 const encoder = new TextEncoder();
@@ -136,6 +146,28 @@ const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
     slideDimensions: Object.freeze({ width: 1, height: 1 }),
     contactSheetDimensions: Object.freeze({ width: 1, height: 1 }),
   });
+
+test("the public Doubao recovery validator rejects caller-supplied trust objects before reading stores", async () => {
+  await assert.rejects(
+    validateDoubaoRecoveryStoresAgainstCheckpoint(
+      {
+        registryId: "must-not-read-caller-selected-registry",
+        artifactRecoveryRootReference: "root:artifact",
+        runSpecificationRootReference: "root:specification",
+        checkpointRootReference: "root:checkpoint",
+        artifactStoreId: "caller-selected-artifact-store",
+        manifestKey: "artifacts/caller-selected/manifest",
+        originalKey: "artifacts/caller-selected/original",
+        runSpecificationStoreId: "caller-selected-specification-store",
+        runSpecificationKey: "run-specifications/caller-selected",
+        checkpointStoreId: "caller-selected-checkpoint-store",
+        attemptId: "caller-selected-attempt",
+      },
+      OFFLINE_RECOVERY_FIXTURE_CHECKPOINT as unknown as string,
+    ),
+    /harness-owned allowlist/i,
+  );
+});
 
 type MalformedLineageCase =
   | "valid"
@@ -777,7 +809,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         trustedRunSpecificationCanonicalHash,
     });
     const result =
-      await validateDoubaoRecoveryStoresAgainstCheckpoint(
+      await validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTest(
         {
           registryId,
           artifactRecoveryRootReference: "root:artifact",
@@ -813,7 +845,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
   }
 }
 
-test("the shipped Doubao recovery validator accepts a real minimal binary fixture through an injected trusted checkpoint", async () => {
+test("the TEST-only Doubao recovery fixture validator accepts a real minimal binary fixture", async () => {
   const result = await runRecoveryFixture("valid");
   assert.deepEqual(
     {

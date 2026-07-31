@@ -147,8 +147,32 @@ test("Captured Artifact projection rejects an incomplete Render Manifest page in
   );
 });
 
-test("Captured Artifact projection verifies page identities and rendered content hashes", async (t) => {
+test("Captured Artifact projection verifies Artifact bytes, page identities, and rendered content hashes", async (t) => {
   const invalidCaptures = [
+    {
+      label: "Artifact byte-size drift",
+      mutate: (capture: CapturedArtifactTableRecord) => ({
+        ...capture,
+        artifact: {
+          ...capture.artifact,
+          byteSize: capture.artifact.byteSize + 1,
+        },
+      }),
+    },
+    {
+      label: "Artifact content hash drift",
+      mutate: (capture: CapturedArtifactTableRecord) => {
+        const content = Uint8Array.from(capture.artifact.content);
+        content[0] = content[0]! ^ 0xff;
+        return {
+          ...capture,
+          artifact: {
+            ...capture.artifact,
+            content,
+          },
+        };
+      },
+    },
     {
       label: "duplicate page identity",
       mutate: (capture: CapturedArtifactTableRecord) => ({
@@ -227,7 +251,7 @@ test("Captured Artifact projection verifies page identities and rendered content
         await projectionBeforeCaptures();
       await assert.rejects(
         feishu.appendCapturedArtifact(mutate(capture)),
-        /Render Manifest.*page|page inventory|content hash/i,
+        /Artifact.*byte|Artifact.*hash|Render Manifest.*page|page inventory|content hash/i,
       );
     });
   }
@@ -354,6 +378,44 @@ test("Artifact Score projection enforces NOT_ASSESSABLE ownership and its persis
       await assert.rejects(
         feishu.appendArtifactScore(invalidScore),
         /NOT_ASSESSABLE.*ownership|Reference Pack.*factual|deduction basis/i,
+      );
+    },
+  );
+  await t.test(
+    "no-reference-pack requires no persisted Reference Pack",
+    async () => {
+      const { feishu, score } = await projectionBeforeScores();
+      assert.notEqual(
+        score.scorecard.evaluationInputManifest.referencePackHash,
+        null,
+      );
+      const invalidScore: ArtifactScoreTableRecord = {
+        ...score,
+        scorecard: {
+          ...score.scorecard,
+          dimensions: score.scorecard.dimensions.map(
+            (dimension) =>
+              dimension.dimension ===
+              "factual_accuracy_and_content_quality"
+                ? {
+                    ...dimension,
+                    assessmentStatus:
+                      "NOT_ASSESSABLE" as const,
+                    value: null,
+                    deductionBasis:
+                      "not_assessable_no_reference_pack" as const,
+                    evidencePages: [],
+                    rationale:
+                      "No Reference Pack was available.",
+                  }
+                : dimension,
+          ),
+        },
+      };
+
+      await assert.rejects(
+        feishu.appendArtifactScore(invalidScore),
+        /Reference Pack|NOT_ASSESSABLE.*ownership|no-reference/i,
       );
     },
   );
@@ -497,6 +559,64 @@ test("Comparison projection rejects cross-wired Run and Scorecard lineage", asyn
       leftScorecardId: comparison.rightScorecardId,
     }),
     /Comparison.*lineage|distinct Runs|Scorecard/i,
+  );
+});
+
+test("Comparison projection enforces one ID for each unordered logical pair", async (t) => {
+  const { feishu } = await seededThreeVendorProjection();
+  const comparison = feishu
+    .snapshot()
+    .productGapCardTable.find(
+      (record) => record.recordType === "comparison",
+    );
+  assert.ok(comparison);
+
+  await t.test("same orientation with a new ID", async () => {
+    await assert.rejects(
+      feishu.appendComparison({
+        ...comparison,
+        comparisonId: `${comparison.comparisonId}-duplicate`,
+      }),
+      /Comparison.*logical|duplicate|unordered|identity/i,
+    );
+  });
+  await t.test("reversed orientation with a new ID", async () => {
+    await assert.rejects(
+      feishu.appendComparison({
+        ...comparison,
+        comparisonId: `${comparison.comparisonId}-reversed`,
+        leftRunId: comparison.rightRunId,
+        leftScorecardId: comparison.rightScorecardId,
+        rightRunId: comparison.leftRunId,
+        rightScorecardId: comparison.leftScorecardId,
+      }),
+      /Comparison.*logical|duplicate|unordered|identity/i,
+    );
+  });
+  await t.test(
+    "snapshot readback rejects a reversed new ID",
+    () => {
+      const snapshot = feishu.snapshot();
+      const invalidSnapshot = {
+        ...snapshot,
+        productGapCardTable: [
+          ...snapshot.productGapCardTable,
+          {
+            ...comparison,
+            comparisonId: `${comparison.comparisonId}-readback-reversed`,
+            leftRunId: comparison.rightRunId,
+            leftScorecardId: comparison.rightScorecardId,
+            rightRunId: comparison.leftRunId,
+            rightScorecardId: comparison.leftScorecardId,
+          },
+        ],
+      };
+
+      assert.throws(
+        () => feishu.forkForStaging(invalidSnapshot),
+        /Comparison.*logical|duplicate|unordered|identity/i,
+      );
+    },
   );
 });
 
@@ -907,7 +1027,7 @@ test("dynamic comparison preserves NOT_ASSESSABLE instead of inventing factual s
   assert.match(outcome.report.markdown, /NOT_ASSESSABLE/);
 });
 
-test("one-sided NOT_ASSESSABLE preserves the assessed side while suppressing only the difference", async () => {
+test("one-sided no-reference-pack NOT_ASSESSABLE is not directly comparable to a scored Reference Pack side", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
     feishu,
@@ -920,59 +1040,67 @@ test("one-sided NOT_ASSESSABLE preserves the assessed side while suppressing onl
     environment: "test",
     caseId: VOLCANO_CASE_ID,
   });
-  const projection = withComparisonSourceOverride(feishu, (source) => ({
-    ...source,
-    artifactScores: source.artifactScores.map((record) =>
-      record.runId !== "MOCK-run-doubao-volcano-v1"
-        ? record
-        : {
-            ...record,
-            scorecard: {
-              ...record.scorecard,
-              dimensions: record.scorecard.dimensions.map(
-                (dimension) =>
-                  dimension.dimension !==
-                  "factual_accuracy_and_content_quality"
-                    ? dimension
-                    : {
-                        ...dimension,
-                        assessmentStatus:
-                          "NOT_ASSESSABLE" as const,
-                        value: null,
-                        deductionBasis:
-                          "not_assessable_no_reference_pack" as const,
-                        evidencePages: [],
-                        rationale: "该侧没有可用事实判断证据。",
-                      },
-              ),
-            },
+  const projection = withComparisonSourceOverride(feishu, (source) => {
+    const protocolSnapshot = source.job.protocolSnapshot;
+    assert.ok(protocolSnapshot);
+    return {
+      ...source,
+      artifactScores: source.artifactScores.map((record) => {
+        if (record.runId !== "MOCK-run-doubao-volcano-v1") {
+          return record;
+        }
+        const scorecard = {
+          ...record.scorecard,
+          evaluationInputManifest: {
+            ...record.scorecard.evaluationInputManifest,
+            referencePackHash: null,
           },
-    ),
-  }));
-
-  const outcome = await createComparisonReportService({
-    feishu: projection,
-  }).createReport({
-    jobId: bakeoff.job.jobId,
-    pairs: [
-      {
-        leftRunId: "MOCK-run-qwen-volcano-v1",
-        rightRunId: "MOCK-run-doubao-volcano-v1",
-      },
-    ],
+          dimensions: record.scorecard.dimensions.map(
+            (dimension) =>
+              dimension.dimension !==
+              "factual_accuracy_and_content_quality"
+                ? dimension
+                : {
+                    ...dimension,
+                    assessmentStatus:
+                      "NOT_ASSESSABLE" as const,
+                    value: null,
+                    deductionBasis:
+                      "not_assessable_no_reference_pack" as const,
+                    evidencePages: [],
+                    rationale: "该侧没有可用事实判断证据。",
+                  },
+          ),
+        };
+        return {
+          ...record,
+          scorecard,
+          comparisonCompatibilityFingerprint:
+            expectedComparisonCompatibilityFingerprint(
+              scorecard,
+              protocolSnapshot,
+              source.evaluationCase,
+              record.renderManifest,
+            ),
+        };
+      }),
+    };
   });
-  const factual = outcome.comparisons[0]?.dimensions.find(
-    ({ dimension }) =>
-      dimension === "factual_accuracy_and_content_quality",
-  );
 
-  assert.equal(factual?.leftAssessmentStatus, "ASSESSED");
-  assert.equal(factual?.leftValue, 5);
-  assert.deepEqual(factual?.leftEvidencePages, [3, 5, 7, 9, 13]);
-  assert.equal(factual?.rightAssessmentStatus, "NOT_ASSESSABLE");
-  assert.equal(factual?.rightValue, null);
-  assert.deepEqual(factual?.rightEvidencePages, []);
-  assert.equal(factual?.difference, null);
+  await assert.rejects(
+    createComparisonReportService({
+      feishu: projection,
+    }).createReport({
+      jobId: bakeoff.job.jobId,
+      pairs: [
+        {
+          leftRunId: "MOCK-run-qwen-volcano-v1",
+          rightRunId: "MOCK-run-doubao-volcano-v1",
+        },
+      ],
+    }),
+    /not compatible for direct comparison/i,
+  );
 });
 
 test("a partial default report keeps every selected vendor delivery outcome beside scored comparisons", async () => {

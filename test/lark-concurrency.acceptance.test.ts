@@ -5,14 +5,18 @@ import {
   readFileSync,
 } from "node:fs";
 import {
+  chmod,
+  mkdir,
   mkdtemp,
   open,
   readdir,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -21,6 +25,7 @@ import {
   createLarkExecutionLeaseForTest,
   createLarkCliTransportForMutationBoundaryTest,
   createVerifiedLarkCliTransport,
+  REVIEWED_LARK_MACHINE_LOCK_ROOT,
   runLarkCliSubprocessForTest,
   type LarkCliProjectionConfiguration,
 } from "../src/lark-base-projection.ts";
@@ -37,7 +42,7 @@ import {
 const FIXED_TIME = "2020-01-01T00:00:00.000Z";
 const LARK_TEST_CONFIGURATION = {
   concurrencyBoundary: "single_workstation_durable_mutex",
-  lockRootPath: "/tmp/ppt-evaluation-lark-concurrency-test-locks",
+  lockRootPath: REVIEWED_LARK_MACHINE_LOCK_ROOT,
   baseTokenEnvironmentVariable: "PPT_EVAL_CONCURRENCY_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_CONCURRENCY_REPORT_TOKEN",
@@ -937,6 +942,143 @@ test("dispose aborts and waits for an in-flight Lark child before releasing its 
   );
 });
 
+test("dispose propagates AbortSignal through an in-flight attachment snapshot upload", async (context) => {
+  const tokenVariable =
+    LARK_TEST_CONFIGURATION.baseTokenEnvironmentVariable;
+  const previousToken = process.env[tokenVariable];
+  process.env[tokenVariable] = "basDisposeAttachment";
+  context.after(() => {
+    if (previousToken === undefined) {
+      delete process.env[tokenVariable];
+    } else {
+      process.env[tokenVariable] = previousToken;
+    }
+  });
+  const clock = {
+    clockId: "dispose-attachment-clock",
+    now: () => FIXED_TIME,
+  };
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolveStarted) => {
+    signalStarted = resolveStarted;
+  });
+  let uploadSignalPresent = false;
+  let childStopped = false;
+  let leaseReleasedAfterChild = false;
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: LARK_TEST_CONFIGURATION,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock,
+      claimLeaseForTest: {
+        leaseId: "dispose-attachment-lease",
+        processId: 7003,
+        processStartIdentity: "dispose-attachment-process",
+        async isActive() {
+          return true;
+        },
+        async release() {
+          leaseReleasedAfterChild = childStopped;
+        },
+      },
+      async run(args, options) {
+        const command = args[1] ?? "";
+        if (command === "+record-search") {
+          return {
+            ok: true,
+            data: {
+              data: [],
+              field_id_list: [
+                "fldStable",
+                "fldPayload",
+                "fldHash",
+                "fldAttachment",
+              ],
+              fields: ["稳定ID", "载荷", "载荷哈希", "产物附件"],
+              has_more: false,
+              record_id_list: [],
+            },
+          };
+        }
+        if (command === "+record-upload-attachment") {
+          uploadSignalPresent = options?.signal !== undefined;
+          signalStarted?.();
+          return await new Promise<never>((_resolve, reject) => {
+            if (options?.signal === undefined) {
+              setTimeout(() => {
+                childStopped = true;
+                reject(new Error("attachment upload received no signal"));
+              }, 25);
+              return;
+            }
+            options.signal.addEventListener(
+              "abort",
+              () => {
+                setTimeout(() => {
+                  childStopped = true;
+                  reject(new Error("test attachment child aborted"));
+                }, 25);
+              },
+              { once: true },
+            );
+          });
+        }
+        throw new Error(`Unexpected command ${args.join(" ")}`);
+      },
+    });
+  const content = new TextEncoder().encode("attachment-dispose");
+  const contentHash = sha256Bytes(content);
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "dispose-attachment-parent",
+      jobId: "job-dispose-attachment",
+      runId: null,
+      attemptId: null,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: "test",
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["captured_artifact_table"],
+      payloadHash: contentHash,
+      requiredRedactions: [],
+    },
+    clock,
+  );
+  const operation = transport.uploadAttachment({
+    tableKey: "artifacts",
+    remoteRecordId: "recDisposeAttachment",
+    stableId: "artifact:dispose-attachment",
+    attachmentRole: "original",
+    filename: "artifact.pptx",
+    content,
+    contentHash,
+    idempotencyKey: "dispose-attachment",
+    authorization,
+  });
+
+  await started;
+  const disposing = transport.dispose!();
+  await assert.rejects(operation);
+  await disposing;
+  assert.equal(
+    uploadSignalPresent,
+    true,
+    "the immutable input-snapshot path must forward the disposal signal",
+  );
+  assert.equal(childStopped, true);
+  assert.equal(
+    leaseReleasedAfterChild,
+    true,
+    "the lease must remain held until the attachment child is absent",
+  );
+});
+
 test("every Lark egress re-attests the frozen executable before invocation", async (context) => {
   const baseTokenVariable = "PPT_EVAL_CLI_REATTEST_BASE";
   const previousBaseToken = process.env[baseTokenVariable];
@@ -1139,6 +1281,41 @@ test("the verified CLI executes an immutable snapshot after the source path is r
   }
 });
 
+test("the verified CLI rejects replacement of the attested snapshot path", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-lark-cli-path-replacement-test-"),
+  );
+  const sourcePath = join(directory, "lark-cli-test");
+  const original =
+    '#!/bin/sh\nprintf \'{"ok":true,"value":"original"}\'\n';
+  const replacement =
+    '#!/bin/sh\nprintf \'{"ok":true,"value":"replacement"}\'\n';
+  await writeFile(sourcePath, original, { mode: 0o700 });
+  const snapshot = await createLarkCliExecutableSnapshotForTest({
+    sourcePath,
+    expectedHash: sha256Bytes(new TextEncoder().encode(original)),
+  });
+  try {
+    const snapshotDirectory = dirname(snapshot.snapshotPathForTest);
+    const replacementPath = join(
+      snapshotDirectory,
+      "replacement-lark-cli",
+    );
+    await chmod(snapshotDirectory, 0o700);
+    await writeFile(replacementPath, replacement, { mode: 0o500 });
+    await rename(replacementPath, snapshot.snapshotPathForTest);
+    await chmod(snapshotDirectory, 0o500);
+
+    await assert.rejects(
+      snapshot.run([]),
+      /snapshot object drifted/i,
+    );
+  } finally {
+    await snapshot.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the Lark CLI supervisor enforces a hard deadline and raw output byte caps", async () => {
   await assert.rejects(
     runLarkCliSubprocessForTest({
@@ -1172,6 +1349,157 @@ test("the Lark CLI supervisor enforces a hard deadline and raw output byte caps"
       stderrByteCap: 100,
     }),
     /stderr.*byte cap/i,
+  );
+});
+
+test("a Lark CLI spawn failure rejects without terminating the caller process group", async () => {
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const childScript = [
+    `import { runLarkCliSubprocessForTest } from ${JSON.stringify(moduleUrl)};`,
+    "try {",
+    "  await runLarkCliSubprocessForTest({",
+    '    executablePath: "/tmp/ppt-evaluation-definitely-missing-lark-cli",',
+    "    args: [],",
+    "    deadlineMs: 1_000,",
+    "    stdoutByteCap: 1_024,",
+    "    stderrByteCap: 1_024,",
+    "  });",
+    '  process.stdout.write("unexpected-success\\n");',
+    "} catch {",
+    '  process.stdout.write("caught\\n");',
+    "}",
+  ].join("\n");
+  const worker = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      childScript,
+    ],
+    {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  worker.stdout.setEncoding("utf8");
+  worker.stdout.on("data", (value: string) => {
+    stdout += value;
+  });
+  worker.stderr.setEncoding("utf8");
+  worker.stderr.on("data", (value: string) => {
+    stderr += value;
+  });
+  const exit = await new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveExit, rejectExit) => {
+    worker.once("error", rejectExit);
+    worker.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+
+  assert.deepEqual(
+    exit,
+    { code: 0, signal: null },
+    `spawn-failure worker was terminated; stderr=${stderr}`,
+  );
+  assert.equal(stdout, "caught\n");
+});
+
+test("the Lark CLI supervisor keeps cleanup alive until orphan descendants are absent", async () => {
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const targetScript = [
+    'const { spawn } = require("node:child_process");',
+    "const descendant = spawn(",
+    "  process.execPath,",
+    '  ["-e", "setInterval(() => {}, 1_000)"],',
+    '  { stdio: "ignore" },',
+    ");",
+    "descendant.unref();",
+    "process.stdout.write(JSON.stringify({",
+    "  ok: true,",
+    "  descendantPid: descendant.pid,",
+    "}));",
+  ].join("\n");
+  const workerScript = [
+    `import { runLarkCliSubprocessForTest } from ${JSON.stringify(moduleUrl)};`,
+    "const result = await runLarkCliSubprocessForTest({",
+    `  executablePath: ${JSON.stringify(process.execPath)},`,
+    `  args: ["-e", ${JSON.stringify(targetScript)}],`,
+    "  deadlineMs: 2_000,",
+    "  stdoutByteCap: 16_384,",
+    "  stderrByteCap: 16_384,",
+    "});",
+    'process.stdout.write(`${JSON.stringify(result)}\\n`);',
+  ].join("\n");
+  const worker = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      workerScript,
+    ],
+    {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  let stdout = "";
+  let stderr = "";
+  worker.stdout.setEncoding("utf8");
+  worker.stdout.on("data", (value: string) => {
+    stdout += value;
+  });
+  worker.stderr.setEncoding("utf8");
+  worker.stderr.on("data", (value: string) => {
+    stderr += value;
+  });
+  const exit = await new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveExit, rejectExit) => {
+    worker.once("error", rejectExit);
+    worker.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+
+  assert.deepEqual(
+    exit,
+    { code: 0, signal: null },
+    `orphan-cleanup worker failed; stderr=${stderr}`,
+  );
+  assert.notEqual(
+    stdout,
+    "",
+    "the cleanup confirmation timer must keep the supervisor alive",
+  );
+  const result = JSON.parse(stdout) as {
+    readonly ok: boolean;
+    readonly descendantPid: number;
+  };
+  assert.equal(result.ok, true);
+  assert.throws(
+    () => process.kill(result.descendantPid, 0),
+    (error: unknown) =>
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { readonly code?: unknown }).code === "ESRCH",
+    "the descendant process must be absent before the supervisor resolves",
   );
 });
 
@@ -1450,8 +1778,96 @@ test("verified Lark production rejects a configuration without one fixed machine
       egressAuthorization: allowLarkMutation,
       egressAudit: new InMemoryEgressAuthorizationAudit(),
     }),
-    /fixed machine lock root/i,
+    /reviewed machine-global lock root/i,
   );
+});
+
+test("verified Lark production rejects every lock root except the reviewed machine-global root", async () => {
+  await assert.rejects(
+    createVerifiedLarkCliTransport({
+      configuration: {
+        ...LARK_TEST_CONFIGURATION,
+        lockRootPath: "/tmp/ppt-evaluation-unreviewed-lark-locks",
+      },
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+    }),
+    /reviewed machine-global lock root/i,
+  );
+});
+
+test("verified Lark production starts from the reviewed root and protected CLI snapshot", async () => {
+  const transport = await createVerifiedLarkCliTransport({
+    configuration: LARK_TEST_CONFIGURATION,
+    egressAuthorization: allowLarkMutation,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+  });
+  assert.equal(
+    transport.transportId,
+    "lark-cli:sha256:4b38c877ec833fe72c370dad3768d0564ff678fde1a488910be3e38b0a1e1238:test-account",
+  );
+  await transport.dispose!();
+});
+
+test("the machine-root policy rejects symlinks and non-owner-only modes", async () => {
+  const parent = await mkdtemp(
+    "/Users/Shared/ppt-lark-root-policy-test-",
+  );
+  const target = join(parent, "target");
+  const alias = join(parent, "alias");
+  const loose = join(parent, "loose");
+  try {
+    await mkdir(target, { mode: 0o700 });
+    await symlink(target, alias);
+    await assert.rejects(
+      acquireLarkSingleWorkstationMutexForTest({
+        lockRoot: alias,
+        scope: "symlink-root",
+        enforceMachineRootPolicyForTest: true,
+      }),
+      /canonical, non-symlinked, owner-only/i,
+    );
+
+    await mkdir(loose, { mode: 0o755 });
+    await assert.rejects(
+      acquireLarkSingleWorkstationMutexForTest({
+        lockRoot: loose,
+        scope: "loose-root",
+        enforceMachineRootPolicyForTest: true,
+      }),
+      /canonical, non-symlinked, owner-only/i,
+    );
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("the machine-root policy rejects inode drift after registration", async () => {
+  const lockRoot = await mkdtemp(
+    "/Users/Shared/ppt-lark-root-drift-test-",
+  );
+  try {
+    const release =
+      await acquireLarkSingleWorkstationMutexForTest({
+        lockRoot,
+        scope: "register-root",
+        enforceMachineRootPolicyForTest: true,
+      });
+    await release();
+    await rm(lockRoot, { recursive: true, force: true });
+    await mkdir(lockRoot, { mode: 0o700 });
+
+    await assert.rejects(
+      acquireLarkSingleWorkstationMutexForTest({
+        lockRoot,
+        scope: "drifted-root",
+        enforceMachineRootPolicyForTest: true,
+      }),
+      /identity drifted/i,
+    );
+  } finally {
+    await rm(lockRoot, { recursive: true, force: true });
+  }
 });
 
 test("verified Lark production requires an explicit CLI identity binding", async () => {

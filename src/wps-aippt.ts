@@ -397,6 +397,59 @@ function artifactReferenceForReconciliation(
     : null;
 }
 
+function submissionEvidenceForReconciliation(
+  observedState: WpsAiPptBrowserEvent["reconciliationObservedState"],
+  priorEvidence: SubmissionEvidence,
+): Exclude<SubmissionEvidence, "not_submitted"> {
+  if (
+    observedState === "unknown" &&
+    priorEvidence !== "submitted"
+  ) {
+    return "unknown";
+  }
+  return "submitted";
+}
+
+function assertDurableWpsAiPptReconciliation(
+  event: ObservableAttemptEvent,
+): void {
+  const observedState = event.reconciliationObservedState;
+  if (
+    event.eventType !== "task_reconciliation_result" ||
+    observedState === undefined ||
+    !["unknown", "submitted", "artifact_ready", "failed"].includes(
+      observedState,
+    ) ||
+    event.vendorTaskId === null ||
+    event.vendorTaskId === undefined ||
+    event.taskStateVersion === null ||
+    event.taskStateVersion === undefined
+  ) {
+    throw new Error(
+      "Durable WPS reconciliation result is structurally incomplete",
+    );
+  }
+  const submissionEvidenceIsConsistent =
+    observedState === "unknown"
+      ? event.submissionEvidenceAtCheckpoint === "unknown" ||
+        event.submissionEvidenceAtCheckpoint === "submitted"
+      : event.submissionEvidenceAtCheckpoint === "submitted";
+  if (
+    event.reconciliationTerminalReason !==
+      terminalReasonForReconciliation(observedState) ||
+    (event.reconciliationArtifactReference ?? null) !==
+      artifactReferenceForReconciliation(
+        observedState,
+        event.vendorTaskId,
+      ) ||
+    !submissionEvidenceIsConsistent
+  ) {
+    throw new Error(
+      "Durable WPS reconciliation result is internally inconsistent",
+    );
+  }
+}
+
 function assertObservedConfiguration(
   observed: WpsAiPptObservedConfiguration,
 ): void {
@@ -1246,6 +1299,11 @@ function createWpsAiPptProductAdapterExecutor(
         ({ eventType }) =>
           eventType === "task_reconciliation_result",
       );
+      if (latestReconciliation !== undefined) {
+        assertDurableWpsAiPptReconciliation(
+          latestReconciliation,
+        );
+      }
       const alreadyReconciled = latestReconciliation !== undefined;
       const recoveredSubmissionState =
         attemptSubmissionState(persistedEvents);
@@ -1281,13 +1339,10 @@ function createWpsAiPptProductAdapterExecutor(
               evidenceId: reconciliation.evidenceId,
               sourceUrl: null,
               submissionEvidenceAtCheckpoint:
-                persistedEvents.some(
-                  (event) =>
-                    event.submissionEvidenceAtCheckpoint ===
-                    "submitted",
-                )
-                  ? "submitted"
-                  : "unknown",
+                submissionEvidenceForReconciliation(
+                  reconciliation.observedState,
+                  recoveredSubmissionState,
+                ),
               vendorTaskId: reconciliation.query.vendorTaskId,
               taskStateVersion:
                 reconciliation.query.taskStateVersion,
@@ -1521,7 +1576,10 @@ function createWpsAiPptProductAdapterExecutor(
             evidenceId: reconciliation.evidenceId,
             sourceUrl: null,
             submissionEvidenceAtCheckpoint:
-              result.submissionEvidence,
+              submissionEvidenceForReconciliation(
+                reconciliation.observedState,
+                result.submissionEvidence,
+              ),
             vendorTaskId: latest.vendorTaskId,
             taskStateVersion: latest.taskStateVersion,
             adapterVersion: WPS_AIPPT_ADAPTER_VERSION,

@@ -19,6 +19,7 @@ import {
   createLarkReportCollectionMarkdown,
   createVerifiedLarkCliTransport,
   expectedComparisonCompatibilityFingerprint,
+  REVIEWED_LARK_MACHINE_LOCK_ROOT,
   requireEgressAuthorization,
   sha256Bytes,
   type AdjudicationEventRecord,
@@ -188,7 +189,7 @@ async function authorizeSnapshot(
 
 const LARK_TEST_CONFIGURATION = {
   concurrencyBoundary: "single_workstation_durable_mutex",
-  lockRootPath: "/tmp/ppt-evaluation-lark-atomicity-test-locks",
+  lockRootPath: REVIEWED_LARK_MACHINE_LOCK_ROOT,
   baseTokenEnvironmentVariable: "PPT_EVAL_ATOMICITY_TEST_BASE_TOKEN",
   reportDocumentTokenEnvironmentVariable:
     "PPT_EVAL_ATOMICITY_TEST_REPORT_DOC_TOKEN",
@@ -529,6 +530,134 @@ test("authorized snapshot validation rejects an incomplete or cross-wired comple
     projection.materializationCalls,
     materializationCallsBeforeInvalidCommit,
   );
+});
+
+test("authorized snapshot validation rejects invalid Attempt sequences and Observable Event parent bindings before materialization", async (t) => {
+  const variants = [
+    {
+      name: "duplicate Attempt sequence",
+      mutate(record) {
+        return {
+          ...record,
+          attemptSeq: 1,
+          observableEvents: record.observableEvents?.map((event) => ({
+            ...event,
+            attemptSeq: 1,
+          })) ?? null,
+        };
+      },
+    },
+    {
+      name: "non-contiguous Attempt sequence",
+      mutate(record) {
+        return {
+          ...record,
+          attemptSeq: 3,
+          observableEvents: record.observableEvents?.map((event) => ({
+            ...event,
+            attemptSeq: 3,
+          })) ?? null,
+        };
+      },
+    },
+    {
+      name: "Observable Event sequence",
+      mutate(record) {
+        return {
+          ...record,
+          observableEvents: record.observableEvents?.map(
+            (event, index) =>
+              index === 0
+                ? { ...event, attemptSeq: 1 }
+                : event,
+          ) ?? null,
+        };
+      },
+    },
+    {
+      name: "Observable Event Run parent",
+      mutate(record) {
+        return {
+          ...record,
+          observableEvents: record.observableEvents?.map(
+            (event, index) =>
+              index === 0
+                ? { ...event, runId: "foreign-run" }
+                : event,
+          ) ?? null,
+        };
+      },
+    },
+    {
+      name: "Observable Event Attempt parent",
+      mutate(record) {
+        return {
+          ...record,
+          observableEvents: record.observableEvents?.map(
+            (event, index) =>
+              index === 0
+                ? { ...event, attemptId: "foreign-attempt" }
+                : event,
+          ) ?? null,
+        };
+      },
+    },
+  ] satisfies readonly {
+    readonly name: string;
+    readonly mutate: (
+      record: FeishuProjectionSnapshot["runRecordTable"][number],
+    ) => FeishuProjectionSnapshot["runRecordTable"][number];
+  }[];
+
+  for (const variant of variants) {
+    await t.test(variant.name, async () => {
+      const projection = new ObservedMaterializingProjection();
+      await createBakeoffHarness({
+        feishu: projection,
+        productAdapters: [
+          new MockQwenProductAdapter({
+            scenario: "retry_then_success",
+          }),
+        ],
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      });
+      const snapshot = projection.snapshot();
+      const attempts = snapshot.runRecordTable.filter(
+        ({ recordType }) =>
+          recordType === "evaluation_attempt",
+      );
+      assert.deepEqual(
+        attempts.map(({ attemptSeq }) => attemptSeq),
+        [1, 2],
+      );
+      const secondAttempt = attempts[1];
+      assert.ok(secondAttempt?.observableEvents?.[0]);
+      const invalidSnapshot: FeishuProjectionSnapshot = {
+        ...snapshot,
+        runRecordTable: snapshot.runRecordTable.map((record) =>
+          record.recordId === secondAttempt.recordId
+            ? variant.mutate(record)
+            : record,
+        ),
+      };
+      const materializationCallsBeforeInvalidCommit =
+        projection.materializationCalls;
+
+      await assert.rejects(
+        projection.commitAuthorizedSnapshot(
+          invalidSnapshot,
+          await authorizeSnapshot(projection, invalidSnapshot),
+        ),
+        /Evaluation Attempt|Attempt sequence|Observable Event|Run graph|parent/i,
+      );
+      assert.equal(
+        projection.materializationCalls,
+        materializationCallsBeforeInvalidCommit,
+      );
+    });
+  }
 });
 
 test("authorized snapshot replay rejects an internally inconsistent Render Manifest before materialization", async () => {

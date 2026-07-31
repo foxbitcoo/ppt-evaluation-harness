@@ -93,6 +93,36 @@ function stableReportReplayPayload(report: FeishuReport): unknown {
   return stable;
 }
 
+function comparisonLogicalKey(record: ComparisonRecord): string {
+  const sides = [
+    [record.leftRunId, record.leftScorecardId],
+    [record.rightRunId, record.rightScorecardId],
+  ].sort(
+    ([leftRun = "", leftScore = ""], [rightRun = "", rightScore = ""]) =>
+      leftRun.localeCompare(rightRun) ||
+      leftScore.localeCompare(rightScore),
+  );
+  return JSON.stringify([record.jobId, record.caseId, sides]);
+}
+
+function assertComparisonLogicalIdentities(
+  records: readonly (ComparisonRecord | ProductGapCardRecord)[],
+): void {
+  const logicalKeys = new Set<string>();
+  for (const record of records) {
+    if (record.recordType !== "comparison") {
+      continue;
+    }
+    const logicalKey = comparisonLogicalKey(record);
+    if (logicalKeys.has(logicalKey)) {
+      throw new Error(
+        `Comparison logical identity conflict: ${record.comparisonId}`,
+      );
+    }
+    logicalKeys.add(logicalKey);
+  }
+}
+
 function cloneWithEnvironmentOrigin<
   T extends { readonly environmentOrigin: EnvironmentOrigin },
 >(record: T): T {
@@ -158,6 +188,20 @@ function assertArtifactScoreIdentities(
     recordIds.add(score.recordId);
     scorecardIds.add(scorecardId);
   }
+}
+
+function observableEventsMatchAttempt(record: RunRecord): boolean {
+  if (record.recordType !== "evaluation_attempt") {
+    return true;
+  }
+  return (record.observableEvents ?? []).every(
+    (event) =>
+      event.jobId === record.jobId &&
+      event.caseId === record.caseId &&
+      event.runId === record.parentRecordId &&
+      event.attemptId === record.recordId &&
+      event.attemptSeq === record.attemptSeq,
+  );
 }
 
 export interface EvaluationCaseTablePort {
@@ -354,6 +398,27 @@ function assertCompleteProjectionGraph(
     const runAttempts = attempts.filter(
       ({ parentRecordId }) => parentRecordId === run.recordId,
     );
+    const attemptSequences = runAttempts
+      .map(({ attemptSeq }) => attemptSeq)
+      .sort((left, right) => (left ?? 0) - (right ?? 0));
+    if (
+      attemptSequences.some(
+        (attemptSeq, index) => attemptSeq !== index + 1,
+      )
+    ) {
+      throw new Error(
+        `Operational ledger Run graph has a duplicate or non-contiguous Evaluation Attempt sequence: ${run.recordId}`,
+      );
+    }
+    if (
+      runAttempts.some(
+        (attempt) => !observableEventsMatchAttempt(attempt),
+      )
+    ) {
+      throw new Error(
+        `Operational ledger Run graph has an Observable Event parent or Attempt sequence mismatch: ${run.recordId}`,
+      );
+    }
     const captures = snapshot.capturedArtifactTable.filter(
       ({ runId }) => runId === run.recordId,
     );
@@ -606,6 +671,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         candidate.recordId === record.parentRecordId,
     );
     const parent = parents[0];
+    const duplicateAttemptSequence =
+      this.#runRecordTable.some(
+        (candidate) =>
+          candidate.recordType === "evaluation_attempt" &&
+          candidate.parentRecordId === record.parentRecordId &&
+          candidate.attemptSeq === record.attemptSeq,
+      );
     if (
       parents.length !== 1 ||
       parent === undefined ||
@@ -618,7 +690,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       parent.productPackageId !== record.productPackageId ||
       parent.adapterVersion !== record.adapterVersion ||
       !Number.isSafeInteger(record.attemptSeq) ||
-      (record.attemptSeq ?? 0) < 1
+      (record.attemptSeq ?? 0) < 1 ||
+      duplicateAttemptSequence ||
+      !observableEventsMatchAttempt(record)
     ) {
       throw new Error(
         "Evaluation Attempt relational lineage does not match its vendor Run parent",
@@ -1476,6 +1550,17 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       }
       return;
     }
+    const logicalExisting = this.#productGapCardTable.find(
+      (candidate): candidate is ComparisonRecord =>
+        candidate.recordType === "comparison" &&
+        comparisonLogicalKey(candidate) ===
+          comparisonLogicalKey(record),
+    );
+    if (logicalExisting !== undefined) {
+      throw new Error(
+        `Comparison logical identity conflict: ${record.comparisonId}`,
+      );
+    }
     this.#productGapCardTable.push(record);
     this.#mutationVersion += 1;
   }
@@ -1886,6 +1971,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   snapshot(): FeishuProjectionSnapshot {
+    assertComparisonLogicalIdentities(
+      this.#productGapCardTable,
+    );
     return {
       caseTable: cloneProjectionValue(this.#caseTable),
       runRecordTable: cloneProjectionValue(this.#runRecordTable),
@@ -2387,6 +2475,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   }
 
   #replaceSnapshot(snapshot: FeishuProjectionSnapshot): void {
+    assertComparisonLogicalIdentities(
+      snapshot.productGapCardTable,
+    );
     const replace = <T>(target: T[], source: readonly T[]) => {
       target.splice(0, target.length, ...cloneProjectionValue(source));
     };

@@ -13,6 +13,7 @@ import {
   open,
   readFile,
   readlink,
+  realpath,
   rm,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -294,8 +295,9 @@ export interface LarkCliProjectionConfiguration {
    */
   readonly concurrencyBoundary: "single_workstation_durable_mutex";
   /**
-   * One explicit, normalized machine-local directory shared by every worker.
-   * Verified production never derives this boundary from TMPDIR.
+   * The build-reviewed machine-global directory shared by every worker.
+   * Verified production accepts only REVIEWED_LARK_MACHINE_LOCK_ROOT and
+   * never derives this boundary from TMPDIR.
    */
   readonly lockRootPath: string;
   readonly baseTokenEnvironmentVariable: string;
@@ -352,6 +354,8 @@ const LARK_PROCESS_START_IDENTITY: string = (() => {
   return identity;
 })();
 const LARK_MUTEX_WAIT_TIMEOUT_MS = 35 * 60 * 1_000;
+export const REVIEWED_LARK_MACHINE_LOCK_ROOT =
+  "/Users/Shared/ppt-evaluation-harness-lark-locks-v1";
 const FROZEN_MACOS_LOCKF_BINARY = "/usr/bin/lockf";
 const FROZEN_MACOS_LOCKF_SHA256 =
   "sha256:0ec2e00997f6b6660dc74b849b00ad25c69ba9b41496248c1d8aaa96977d0071" as const;
@@ -372,6 +376,81 @@ const LOCKF_HOLDER_SCRIPT = [
   `process.stdout.write(${JSON.stringify(LOCKF_ACQUIRED_HANDSHAKE)});`,
   "process.stdin.resume();",
 ].join("\n");
+
+interface LarkMachineLockRootIdentity {
+  readonly path: string;
+  readonly device: number;
+  readonly inode: number;
+  readonly ownerUserId: number;
+  readonly mode: number;
+}
+
+const registeredLarkMachineLockRoots =
+  new Map<string, Promise<LarkMachineLockRootIdentity>>();
+
+async function readLarkMachineLockRootIdentity(
+  root: string,
+): Promise<LarkMachineLockRootIdentity> {
+  const [canonicalPath, metadata] = await Promise.all([
+    realpath(root),
+    lstat(root),
+  ]);
+  const ownerUserId = process.getuid?.();
+  if (
+    canonicalPath !== root ||
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    ownerUserId === undefined ||
+    metadata.uid !== ownerUserId ||
+    (metadata.mode & 0o777) !== 0o700
+  ) {
+    throw new Error(
+      "Lark machine lock root must be canonical, non-symlinked, owner-only, and owned by the current user",
+    );
+  }
+  return Object.freeze({
+    path: root,
+    device: metadata.dev,
+    inode: metadata.ino,
+    ownerUserId: metadata.uid,
+    mode: metadata.mode & 0o777,
+  });
+}
+
+async function registerAndAssertLarkMachineLockRoot(
+  configuredRoot: string,
+  reviewedRoot: string,
+): Promise<() => Promise<void>> {
+  if (configuredRoot !== reviewedRoot) {
+    throw new Error(
+      `Verified Lark production requires the reviewed machine-global lock root ${reviewedRoot}`,
+    );
+  }
+  let registered = registeredLarkMachineLockRoots.get(reviewedRoot);
+  if (registered === undefined) {
+    registered = (async () => {
+      await mkdir(reviewedRoot, { recursive: true, mode: 0o700 });
+      return await readLarkMachineLockRootIdentity(reviewedRoot);
+    })();
+    registeredLarkMachineLockRoots.set(reviewedRoot, registered);
+  }
+  const expected = await registered;
+  const assertCurrent = async (): Promise<void> => {
+    const current = await readLarkMachineLockRootIdentity(reviewedRoot);
+    if (
+      current.device !== expected.device ||
+      current.inode !== expected.inode ||
+      current.ownerUserId !== expected.ownerUserId ||
+      current.mode !== expected.mode
+    ) {
+      throw new Error(
+        "Lark machine lock root identity drifted after verification",
+      );
+    }
+  };
+  await assertCurrent();
+  return assertCurrent;
+}
 
 interface LarkExecutionLeasePort {
   readonly leaseId: string;
@@ -403,6 +482,7 @@ function createProcessLarkExecutionLease(options: {
   readonly leaseId?: string;
   readonly processId?: number;
   readonly processStartIdentity?: string;
+  readonly assertLockRootCurrent?: () => Promise<void>;
 }): LarkExecutionLeasePort {
   const leaseId = options.leaseId ?? randomUUID();
   const processId = options.processId ?? process.pid;
@@ -415,6 +495,7 @@ function createProcessLarkExecutionLease(options: {
     if (released) {
       throw new Error("Lark execution lease is already released");
     }
+    await options.assertLockRootCurrent?.();
     if (sentinelRelease !== null) return;
     sentinelAcquisition ??= (async () => {
       const release = await acquireMacOsAdvisoryLock(
@@ -445,6 +526,7 @@ function createProcessLarkExecutionLease(options: {
         return true;
       }
       try {
+        await options.assertLockRootCurrent?.();
         const release = await acquireMacOsAdvisoryLock(
           larkExecutionLeaseSentinelPath(
             options.lockRoot,
@@ -836,6 +918,7 @@ async function acquireLarkSingleWorkstationMutex(
     readonly resourceIdentityForTest?: string;
     readonly resourceIdentities?: readonly string[];
     readonly includeReportDocument?: boolean;
+    readonly assertLockRootCurrent?: () => Promise<void>;
   } = {},
 ): Promise<() => Promise<void>> {
   if (
@@ -848,7 +931,9 @@ async function acquireLarkSingleWorkstationMutex(
   }
   nonEmpty(scope, "mutex operation scope");
   const root = larkMutexRoot(configuration);
+  await options.assertLockRootCurrent?.();
   await mkdir(root, { recursive: true, mode: 0o700 });
+  await options.assertLockRootCurrent?.();
   const resourceIdentities =
     options.resourceIdentities !== undefined
       ? [...new Set(options.resourceIdentities)].sort()
@@ -898,13 +983,22 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
   readonly lockRoot: string;
   readonly scope: string;
   readonly waitTimeoutMs?: number;
+  readonly enforceMachineRootPolicyForTest?: boolean;
 }): Promise<() => Promise<void>> {
   nonEmpty(options.lockRoot, "Lark mutex test root");
   nonEmpty(options.scope, "Lark mutex test scope");
+  const lockRoot = resolve(options.lockRoot);
+  const assertLockRootCurrent =
+    options.enforceMachineRootPolicyForTest === true
+      ? await registerAndAssertLarkMachineLockRoot(
+          lockRoot,
+          lockRoot,
+        )
+      : undefined;
   return await acquireLarkSingleWorkstationMutex(
     {
       concurrencyBoundary: "single_workstation_durable_mutex",
-      lockRootPath: resolve(options.lockRoot),
+      lockRootPath: lockRoot,
       baseTokenEnvironmentVariable: "PPT_LARK_MUTEX_TEST_UNUSED",
       reportDocumentTokenEnvironmentVariable:
         "PPT_LARK_MUTEX_TEST_UNUSED",
@@ -932,11 +1026,17 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
       ? {
           resourceIdentityForTest:
             "lark-mutex-public-test-resource-v1",
+          ...(assertLockRootCurrent === undefined
+            ? {}
+            : { assertLockRootCurrent }),
         }
       : {
           waitTimeoutMs: options.waitTimeoutMs,
           resourceIdentityForTest:
             "lark-mutex-public-test-resource-v1",
+          ...(assertLockRootCurrent === undefined
+            ? {}
+            : { assertLockRootCurrent }),
         },
   );
 }
@@ -2832,6 +2932,9 @@ async function invokeLarkCliRunner(
       ...(options.stdin === undefined
         ? {}
         : { stdin: options.stdin }),
+      ...(options.signal === undefined
+        ? {}
+        : { signal: options.signal }),
     });
     return await pending;
   } finally {
@@ -2904,8 +3007,7 @@ async function confirmProcessGroupAbsent(
   while (processGroupExists(processId) && Date.now() < deadline) {
     signalProcessGroup(processId, "SIGKILL");
     await new Promise<void>((resolveWait) => {
-      const timer = setTimeout(resolveWait, 10);
-      timer.unref();
+      setTimeout(resolveWait, 10);
     });
   }
   if (processGroupExists(processId)) {
@@ -2944,18 +3046,34 @@ async function spawnLarkCliBytesWithLimits(
         LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
       },
     });
-    const processId = child.pid;
-    if (processId === undefined) {
-      child.kill("SIGKILL");
-      rejectOutput(new Error("lark-cli process ID is unavailable"));
-      return;
-    }
     let settled = false;
     let terminationError: Error | null = null;
     let forceKillTimer: NodeJS.Timeout | undefined;
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    let abort: (() => void) | undefined;
     const stdoutChunks: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    const clearSupervisorState = () => {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
+      if (abort !== undefined) {
+        input.signal?.removeEventListener("abort", abort);
+      }
+    };
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearSupervisorState();
+      rejectOutput(error);
+    });
+    const processId = child.pid;
+    if (processId === undefined) {
+      // Spawn failures arrive through the error event. ChildProcess.kill()
+      // must never be called without a PID because an undefined POSIX PID can
+      // target the caller's own process group.
+      return;
+    }
     const requestTermination = (error: Error) => {
       if (terminationError !== null) return;
       terminationError = error;
@@ -2965,7 +3083,7 @@ async function spawnLarkCliBytesWithLimits(
       }, 250);
       forceKillTimer.unref();
     };
-    const deadlineTimer = setTimeout(() => {
+    deadlineTimer = setTimeout(() => {
       requestTermination(
         new Error(
           `lark-cli exceeded hard deadline of ${input.deadlineMs}ms`,
@@ -2973,7 +3091,7 @@ async function spawnLarkCliBytesWithLimits(
       );
     }, input.deadlineMs);
     deadlineTimer.unref();
-    const abort = () => {
+    abort = () => {
       requestTermination(
         new Error("lark-cli invocation was aborted during disposal"),
       );
@@ -3017,21 +3135,11 @@ async function spawnLarkCliBytesWithLimits(
         );
       }
     });
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(deadlineTimer);
-      if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
-      input.signal?.removeEventListener("abort", abort);
-      rejectOutput(error);
-    });
     child.once("close", (code) => {
       void (async () => {
         if (settled) return;
         settled = true;
-        clearTimeout(deadlineTimer);
-        if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
-        input.signal?.removeEventListener("abort", abort);
+        clearSupervisorState();
         await confirmProcessGroupAbsent(processId);
         if (terminationError !== null) {
           rejectOutput(terminationError);
@@ -3087,6 +3195,14 @@ interface VerifiedExecutableSnapshot {
   readonly executablePath: string;
   readonly contentHash: `sha256:${string}`;
   attest(): Promise<void>;
+  runBytes(
+    args: readonly string[],
+    options?: LarkCliRunOptions,
+  ): Promise<Buffer>;
+  runJson(
+    args: readonly string[],
+    options?: LarkCliRunOptions,
+  ): Promise<unknown>;
   dispose(): Promise<void>;
 }
 
@@ -3138,23 +3254,81 @@ async function createVerifiedExecutableSnapshot(options: {
     await rm(directory, { recursive: true, force: true });
     throw error;
   }
+  const protectedDirectoryMetadata = await lstat(directory);
+  const protectedExecutableMetadata = await lstat(executablePath);
+  const assertProtectedDirectory = async (): Promise<void> => {
+    const metadata = await lstat(directory);
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      metadata.dev !== protectedDirectoryMetadata.dev ||
+      metadata.ino !== protectedDirectoryMetadata.ino ||
+      (metadata.mode & 0o777) !== 0o500
+    ) {
+      throw new Error(
+        "Verified executable snapshot directory drifted before egress",
+      );
+    }
+  };
   let disposed = false;
-  const attest = async (): Promise<void> => {
+  const openAttestedExecutable = async () => {
     if (disposed) {
       throw new Error("Verified executable snapshot is disposed");
     }
+    await assertProtectedDirectory();
     const handle = await open(executablePath, "r");
     try {
       const metadata = await handle.stat();
       const bytes = await handle.readFile();
+      const pathMetadata = await lstat(executablePath);
       if (
         !metadata.isFile() ||
+        pathMetadata.isSymbolicLink() ||
+        pathMetadata.dev !== metadata.dev ||
+        pathMetadata.ino !== metadata.ino ||
+        metadata.dev !== protectedExecutableMetadata.dev ||
+        metadata.ino !== protectedExecutableMetadata.ino ||
+        (pathMetadata.mode & 0o777) !== 0o500 ||
         sha256(Uint8Array.from(bytes)) !== options.expectedHash
       ) {
         throw new Error(
           "Verified executable snapshot object drifted before egress",
         );
       }
+      return handle;
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  };
+  const attest = async (): Promise<void> => {
+    const handle = await openAttestedExecutable();
+    await handle.close();
+  };
+  const startVerified = async <T>(
+    operation: (path: string) => Promise<T>,
+  ): Promise<T> => {
+    const handle = await openAttestedExecutable();
+    try {
+      // The directory is non-writable and the retained descriptor identifies
+      // the exact inode whose bytes were hashed above. The operation reaches
+      // spawn synchronously before returning its Promise, so there is no
+      // authorization callback or event-loop continuation between the final
+      // path/inode check and executable resolution.
+      const pending = operation(executablePath);
+      const pathMetadata = await lstat(executablePath);
+      const handleMetadata = await handle.stat();
+      if (
+        pathMetadata.isSymbolicLink() ||
+        pathMetadata.dev !== handleMetadata.dev ||
+        pathMetadata.ino !== handleMetadata.ino
+      ) {
+        void pending.catch(() => undefined);
+        throw new Error(
+          "Verified executable snapshot path changed during spawn",
+        );
+      }
+      return await pending;
     } finally {
       await handle.close();
     }
@@ -3163,6 +3337,32 @@ async function createVerifiedExecutableSnapshot(options: {
     executablePath,
     contentHash: options.expectedHash,
     attest,
+    async runBytes(args, runOptions = {}) {
+      return await startVerified(
+        (path) =>
+          spawnLarkCliBytesWithLimits({
+            executablePath: path,
+            args,
+            ...runOptions,
+            deadlineMs: 30_000,
+            stdoutByteCap: 64 * 1024,
+            stderrByteCap: 64 * 1024,
+          }),
+      );
+    },
+    async runJson(args, runOptions = {}) {
+      return await startVerified(
+        (path) =>
+          spawnLarkCliJsonWithLimits({
+            executablePath: path,
+            args,
+            ...runOptions,
+            deadlineMs: 30 * 60 * 1_000,
+            stdoutByteCap: 16 * 1024 * 1024,
+            stderrByteCap: 1024 * 1024,
+          }),
+      );
+    },
     async dispose() {
       if (disposed) return;
       disposed = true;
@@ -3177,19 +3377,14 @@ export async function createLarkCliExecutableSnapshotForTest(options: {
   readonly expectedHash: `sha256:${string}`;
 }): Promise<{
   run(args: readonly string[]): Promise<unknown>;
+  readonly snapshotPathForTest: string;
   dispose(): Promise<void>;
 }> {
   const snapshot = await createVerifiedExecutableSnapshot(options);
   return {
+    snapshotPathForTest: snapshot.executablePath,
     async run(args) {
-      await snapshot.attest();
-      return await spawnLarkCliJsonWithLimits({
-        executablePath: snapshot.executablePath,
-        args,
-        deadlineMs: 2_000,
-        stdoutByteCap: 1024 * 1024,
-        stderrByteCap: 1024 * 1024,
-      });
+      return await snapshot.runJson(args);
     },
     async dispose() {
       await snapshot.dispose();
@@ -3197,14 +3392,10 @@ export async function createLarkCliExecutableSnapshotForTest(options: {
   };
 }
 
-async function frozenLarkCliVersion(binaryPath: string): Promise<string> {
-  const output = await spawnLarkCliBytesWithLimits({
-    executablePath: binaryPath,
-    args: ["--version"],
-    deadlineMs: 30_000,
-    stdoutByteCap: 64 * 1024,
-    stderrByteCap: 64 * 1024,
-  });
+async function frozenLarkCliVersion(
+  executableSnapshot: VerifiedExecutableSnapshot,
+): Promise<string> {
+  const output = await executableSnapshot.runBytes(["--version"]);
   return output.toString("utf8").trim();
 }
 
@@ -3310,6 +3501,7 @@ class VerifiedLarkCliTransport
   readonly #attestExecutable: LarkCliExecutableAttestor;
   readonly #attestIdentity: LarkCliIdentityAttestor;
   readonly #disposeExecutableSnapshot: () => Promise<void>;
+  readonly #assertLockRootCurrent: () => Promise<void>;
   readonly #mutexContext =
     new AsyncLocalStorage<ReadonlySet<string>>();
   readonly #activeInvocations = new Set<Promise<unknown>>();
@@ -3330,6 +3522,8 @@ class VerifiedLarkCliTransport
     attestIdentity: LarkCliIdentityAttestor = async () => undefined,
     disposeExecutableSnapshot: () => Promise<void> =
       async () => undefined,
+    assertLockRootCurrent: () => Promise<void> =
+      async () => undefined,
   ) {
     this.#binaryPath = binaryPath;
     this.#egressAuthorization = egressAuthorization;
@@ -3343,10 +3537,12 @@ class VerifiedLarkCliTransport
       executionLease ??
       createProcessLarkExecutionLease({
         lockRoot: configuration.lockRootPath,
+        assertLockRootCurrent,
       });
     this.#attestExecutable = attestExecutable;
     this.#attestIdentity = attestIdentity;
     this.#disposeExecutableSnapshot = disposeExecutableSnapshot;
+    this.#assertLockRootCurrent = assertLockRootCurrent;
     this.#configuration = Object.freeze({
       ...configuration,
       tables: Object.freeze({ ...configuration.tables }),
@@ -3467,6 +3663,7 @@ class VerifiedLarkCliTransport
       scope,
       {
         resourceIdentities: missingResources,
+        assertLockRootCurrent: this.#assertLockRootCurrent,
       },
     );
     try {
@@ -3510,6 +3707,7 @@ class VerifiedLarkCliTransport
       {
         includeReportDocument:
           options.requireReportDocument === true,
+        assertLockRootCurrent: this.#assertLockRootCurrent,
       },
     );
     try {
@@ -3693,6 +3891,7 @@ class VerifiedLarkCliTransport
         {
           includeReportDocument:
             options.requireReportDocument === true,
+          assertLockRootCurrent: this.#assertLockRootCurrent,
         },
       );
     await releaseConcurrencyProbe();
@@ -5298,12 +5497,19 @@ export async function createVerifiedLarkCliTransport(options: {
     options.configuration.lockRootPath.trim().length === 0 ||
     resolve(options.configuration.lockRootPath) !==
       options.configuration.lockRootPath ||
-    options.configuration.lockRootPath === sep
+    options.configuration.lockRootPath === sep ||
+    options.configuration.lockRootPath !==
+      REVIEWED_LARK_MACHINE_LOCK_ROOT
   ) {
     throw new Error(
-      "Verified Lark transport requires one normalized fixed machine lock root",
+      `Verified Lark transport requires the reviewed machine-global lock root ${REVIEWED_LARK_MACHINE_LOCK_ROOT}`,
     );
   }
+  const assertLockRootCurrent =
+    await registerAndAssertLarkMachineLockRoot(
+      options.configuration.lockRootPath,
+      REVIEWED_LARK_MACHINE_LOCK_ROOT,
+    );
   for (const [label, value] of Object.entries({
     lockRootPath: options.configuration.lockRootPath,
     baseTokenEnvironmentVariable:
@@ -5380,7 +5586,7 @@ export async function createVerifiedLarkCliTransport(options: {
   });
   try {
     const nativeVersionOutput = await frozenLarkCliVersion(
-      executableSnapshot.executablePath,
+      executableSnapshot,
     );
     assertFrozenLarkCliInstallation({
       nativeHash,
@@ -5393,11 +5599,7 @@ export async function createVerifiedLarkCliTransport(options: {
       args,
       runOptions,
     ) =>
-      await spawnFrozenLarkCliJson(
-        executableSnapshot.executablePath,
-        args,
-        runOptions,
-      );
+      await executableSnapshot.runJson(args, runOptions);
     const transport = new VerifiedLarkCliTransport(
       executableSnapshot.executablePath,
       options.configuration,
@@ -5406,7 +5608,9 @@ export async function createVerifiedLarkCliTransport(options: {
       options.clock ?? SYSTEM_CLOCK,
       productionRunner,
       undefined,
-      executableSnapshot.attest,
+      // The production runner itself performs the final protected
+      // handle/hash/inode attestation immediately around every actual spawn.
+      async () => undefined,
       async (signal) =>
         await attestLarkCliIdentity(
           productionRunner,
@@ -5414,6 +5618,7 @@ export async function createVerifiedLarkCliTransport(options: {
           signal,
         ),
       executableSnapshot.dispose,
+      assertLockRootCurrent,
     );
     VERIFIED_LARK_TRANSPORTS.add(transport);
     VERIFIED_LARK_DESTINATIONS.set(transport, {

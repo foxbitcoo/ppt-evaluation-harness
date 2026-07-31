@@ -820,6 +820,7 @@ function failedAttempt(
     readonly observedConfiguration?: ObservedProductConfiguration;
     readonly vendorTaskId?: string;
     readonly artifactId?: string;
+    readonly firstEventIndex: number;
   },
 ): ProductAttemptResult {
   return Object.freeze({
@@ -833,6 +834,7 @@ function failedAttempt(
       input.observableEvents,
       input.vendorTaskId,
       input.artifactId,
+      input.firstEventIndex,
     ),
     manualActions: Object.freeze([...input.manualActions]),
     ...(input.observedConfiguration === undefined
@@ -846,12 +848,14 @@ function materializeObservableEvents(
   events: readonly ProductAdapterObservableEvent[],
   vendorTaskId?: string,
   artifactId?: string,
+  firstEventIndex = 1,
 ): readonly ObservableAttemptEvent[] {
   const submittedIndex = events.findIndex(
     ({ eventType }) => eventType === "query_submitted",
   );
   return Object.freeze(
     events.map((event, index) => {
+      const eventIndex = firstEventIndex + index;
       const eventVendorTaskId =
         vendorTaskId !== undefined &&
         submittedIndex >= 0 &&
@@ -859,7 +863,7 @@ function materializeObservableEvents(
           ? vendorTaskId
           : undefined;
       return Object.freeze({
-        eventId: `${command.attemptId}-event-${index + 1}`,
+        eventId: `${command.attemptId}-event-${eventIndex}`,
         jobId: command.jobId,
         caseId: command.evaluationCase.caseId,
         runId: command.runId,
@@ -880,9 +884,9 @@ function materializeObservableEvents(
         taskStateVersion:
           eventVendorTaskId === undefined
             ? event.eventType === "query_not_submitted"
-              ? `not_submitted@${index + 1}`
+              ? `not_submitted@${eventIndex}`
               : null
-            : `${event.eventType}@${index + 1}`,
+            : `${event.eventType}@${eventIndex}`,
         artifactId:
           event.eventType === "artifact_exported"
             ? artifactId ?? null
@@ -890,6 +894,30 @@ function materializeObservableEvents(
       });
     }),
   );
+}
+
+function nextDoubaoObservableEventIndex(
+  recoveredEvents: readonly ObservableAttemptEvent[],
+  attemptId: string,
+): number {
+  const escapedAttemptId = attemptId.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const eventIdPattern = new RegExp(
+    `^${escapedAttemptId}-event-([1-9]\\d*)$`,
+  );
+  let maximum = 0;
+  for (const event of recoveredEvents) {
+    const match = eventIdPattern.exec(event.eventId);
+    if (match === null) continue;
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index)) {
+      throw new Error("Recovered Doubao event identity is not safely ordered");
+    }
+    maximum = Math.max(maximum, index);
+  }
+  return maximum + 1;
 }
 
 function observedConfiguration(
@@ -1106,6 +1134,12 @@ export function resolveDoubaoProductionExecutor(
     const operation = operationCommand(command);
     const events: ProductAdapterObservableEvent[] = [];
     const manualActions: string[] = [];
+    const recovered =
+      (await checkpointStore?.readAttempt?.(command.attemptId)) ?? [];
+    const firstEventIndex = nextDoubaoObservableEventIndex(
+      recovered,
+      command.attemptId,
+    );
     const persistLatest = async (
       vendorTaskId?: string,
       artifactId?: string,
@@ -1115,11 +1149,10 @@ export function resolveDoubaoProductionExecutor(
         events,
         vendorTaskId,
         artifactId,
+        firstEventIndex,
       ).at(-1);
       if (latest !== undefined) await checkpointStore?.append(latest);
     };
-    const recovered =
-      (await checkpointStore?.readAttempt?.(command.attemptId)) ?? [];
     if (recovered.length > 0) {
       if (
         recovered.some(
@@ -1274,6 +1307,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest();
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: preflight.incrementalChargeRequired
           ? "payment"
           : "technical_failure",
@@ -1325,6 +1359,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest();
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: submission.status,
@@ -1373,6 +1408,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest(submission.vendorTaskId);
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason:
           generation.status === "timed_out"
             ? "vendor_timeout"
@@ -1406,6 +1442,7 @@ export function resolveDoubaoProductionExecutor(
     if (command.signal.aborted) {
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "task_state_unknown",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -1439,6 +1476,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest(submission.vendorTaskId);
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -1465,6 +1503,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest(submission.vendorTaskId);
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -1501,6 +1540,7 @@ export function resolveDoubaoProductionExecutor(
       events,
       submission.vendorTaskId,
       artifactId,
+      firstEventIndex,
     );
     const provenance =
       isProduction
@@ -1613,6 +1653,7 @@ export function resolveDoubaoProductionExecutor(
             events,
             submission.vendorTaskId,
             artifactId,
+            firstEventIndex,
           ),
         manualActions: Object.freeze(manualActions),
         observedConfiguration: configuration,
@@ -1642,6 +1683,7 @@ export function resolveDoubaoProductionExecutor(
             events,
             submission.vendorTaskId,
             artifactId,
+            firstEventIndex,
           ),
         manualActions: Object.freeze(manualActions),
         observedConfiguration: configuration,
@@ -1667,6 +1709,7 @@ export function resolveDoubaoProductionExecutor(
         events,
         submission.vendorTaskId,
         artifactId,
+        firstEventIndex,
       ),
       manualActions: Object.freeze(manualActions),
       observedConfiguration: configuration,
