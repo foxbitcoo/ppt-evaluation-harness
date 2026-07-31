@@ -1414,7 +1414,11 @@ test("Feishu projection commits one authorized canonical batch without rewriting
   const unrelatedSeedProjection = new InMemoryFeishuProjection();
   await createBakeoffHarness({
     feishu: unrelatedSeedProjection,
-    productAdapters: [new MockWpsProductAdapter()],
+    productAdapters: [
+      new MockWpsProductAdapter({
+        scenario: "submitted_technical_failure",
+      }),
+    ],
   }).startBakeoffJob({
     environment: "test",
     caseId: VOLCANO_CASE_ID,
@@ -1424,8 +1428,19 @@ test("Feishu projection commits one authorized canonical batch without rewriting
   const seedJob = unrelatedSeed.runRecordTable.find(
     ({ recordType }) => recordType === "bakeoff_job",
   );
+  const seedVendorRun = unrelatedSeed.runRecordTable.find(
+    ({ recordType }) => recordType === "vendor_run",
+  );
+  const seedAttempt = unrelatedSeed.runRecordTable.find(
+    ({ recordType }) => recordType === "evaluation_attempt",
+  );
   assert.ok(seedCase);
   assert.ok(seedJob);
+  assert.ok(seedVendorRun);
+  assert.ok(seedAttempt);
+  const unrelatedJobId = "unrelated-job";
+  const unrelatedRunId = "unrelated-run";
+  const unrelatedAttemptId = "unrelated-attempt-1";
   await feishu.upsertCase({
     ...seedCase,
     recordId: "unrelated-case-record",
@@ -1434,20 +1449,46 @@ test("Feishu projection commits one authorized canonical batch without rewriting
   });
   await feishu.appendRunRecord({
     ...seedJob,
-    recordId: "unrelated-job-record",
-    jobId: "unrelated-job",
+    recordId: unrelatedJobId,
+    jobId: unrelatedJobId,
     caseId: "unrelated-case",
-    selectedRunIds: [],
+    selectedRunIds: [unrelatedRunId],
     reportUrl: null,
     auxiliaryReportUrls: null,
+  });
+  await feishu.appendRunRecord({
+    ...seedVendorRun,
+    recordId: unrelatedRunId,
+    parentRecordId: unrelatedJobId,
+    jobId: unrelatedJobId,
+    caseId: "unrelated-case",
+    specificationReference: null,
+    egressAuthorizations: [],
+    securityContextHash: null,
+  });
+  await feishu.appendRunRecord({
+    ...seedAttempt,
+    recordId: unrelatedAttemptId,
+    parentRecordId: unrelatedRunId,
+    jobId: unrelatedJobId,
+    caseId: "unrelated-case",
+    observableEvents:
+      seedAttempt.observableEvents?.map((event, index) => ({
+        ...event,
+        eventId: `${unrelatedAttemptId}-event-${index + 1}`,
+        jobId: unrelatedJobId,
+        caseId: "unrelated-case",
+        runId: unrelatedRunId,
+        attemptId: unrelatedAttemptId,
+      })) ?? null,
   });
   await feishu.createReport({
     reportId: "unrelated-report",
     provenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     title: "Unrelated",
-    jobId: "unrelated-job",
-    runIds: [],
+    jobId: unrelatedJobId,
+    runIds: [unrelatedRunId],
     artifactIds: [],
     claimLevel: "case_sample",
     markdown: "unrelated",
@@ -1558,8 +1599,19 @@ test("a Job B projection commit cannot restore Job A rows scrubbed by a concurre
   const jobA = seeded.runRecordTable.find(
     ({ recordType }) => recordType === "bakeoff_job",
   );
+  const runA = seeded.runRecordTable.find(
+    ({ recordType }) => recordType === "vendor_run",
+  );
+  const attemptA = seeded.runRecordTable.find(
+    ({ recordType }) => recordType === "evaluation_attempt",
+  );
   assert.ok(caseA);
   assert.ok(jobA);
+  assert.ok(runA);
+  assert.ok(attemptA);
+  const jobBId = "job-b";
+  const runBId = "run-b";
+  const attemptBId = "run-b-attempt-1";
   const caseB = {
     ...caseA,
     recordId: "case-record-job-b",
@@ -1568,16 +1620,55 @@ test("a Job B projection commit cannot restore Job A rows scrubbed by a concurre
   };
   const jobB = {
     ...jobA,
-    recordId: "job-record-b",
-    jobId: "job-b",
+    recordId: jobBId,
+    jobId: jobBId,
     caseId: caseB.caseId,
-    selectedRunIds: [],
+    status: "failed" as const,
+    selectedRunIds: [runBId],
     reportUrl: null,
     auxiliaryReportUrls: null,
   };
+  const runB = {
+    ...runA,
+    recordId: runBId,
+    parentRecordId: jobBId,
+    jobId: jobBId,
+    caseId: caseB.caseId,
+    status: "failed" as const,
+    terminalReason: "technical_failure" as const,
+    artifactId: null,
+    renderManifestId: null,
+    scorecardId: null,
+    specificationReference: null,
+    artifactPackageManifest: null,
+    egressAuthorizations: [],
+    securityContextHash: null,
+  };
+  const attemptB = {
+    ...attemptA,
+    recordId: attemptBId,
+    parentRecordId: runBId,
+    jobId: jobBId,
+    caseId: caseB.caseId,
+    status: "failed" as const,
+    terminalReason: "technical_failure" as const,
+    artifactId: null,
+    renderManifestId: null,
+    scorecardId: null,
+    observableEvents:
+      attemptA.observableEvents?.map((event, index) => ({
+        ...event,
+        eventId: `${attemptBId}-event-${index + 1}`,
+        jobId: jobBId,
+        caseId: caseB.caseId,
+        runId: runBId,
+        attemptId: attemptBId,
+        eventType: "terminal:technical_failure",
+      })) ?? null,
+  };
   const snapshotB = {
     caseTable: [caseB],
-    runRecordTable: [jobB],
+    runRecordTable: [jobB, runB, attemptB],
     capturedArtifactTable: [],
     artifactScoreTable: [],
     adjudicationEventTable: [],
@@ -1639,12 +1730,13 @@ test("a Job B projection commit cannot restore Job A rows scrubbed by a concurre
       ).length,
     0,
   );
-  assert.equal(
+  assert.deepEqual(
     target
       .snapshot()
-      .runRecordTable.filter(({ jobId }) => jobId === "job-b")
-      .length,
-    1,
+      .runRecordTable.filter(({ jobId }) => jobId === jobBId)
+      .map(({ recordId }) => recordId)
+      .sort(),
+    [jobBId, runBId, attemptBId].sort(),
   );
 });
 
