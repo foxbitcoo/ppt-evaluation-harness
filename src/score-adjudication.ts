@@ -11,6 +11,8 @@ import type {
   AdjudicationEventTablePort,
   ReviewEventTablePort,
 } from "./feishu.ts";
+import { assertValidAdjudicationEventFields } from "./adjudication-validation.ts";
+import { renderedPageNumbers } from "./artifact-projection-validation.ts";
 
 export interface AdjudicateDimensionCommand {
   readonly adjudicationEventId: string;
@@ -145,6 +147,27 @@ function effectiveScorecard(
   events: readonly AdjudicationEventRecord[],
   reviews: readonly ReviewEventRecord[],
 ): EffectiveArtifactScorecard {
+  events.forEach(assertValidAdjudicationEventFields);
+  const availablePages = renderedPageNumbers(
+    score.renderManifest,
+  );
+  if (
+    events.some(
+      (event) =>
+        event.evidencePages.length === 0 ||
+        new Set(event.evidencePages).size !==
+          event.evidencePages.length ||
+        event.evidencePages.some(
+          (pageNumber) =>
+            !Number.isSafeInteger(pageNumber) ||
+            !availablePages.has(pageNumber),
+        ),
+    )
+  ) {
+    throw new Error(
+      "Invalid adjudication causal history: page evidence does not exist in the persisted Render Manifest",
+    );
+  }
   const scoreDimensions = new Set(
     score.scorecard.dimensions.map(({ dimension }) => dimension),
   );
@@ -306,6 +329,7 @@ export function createScoreAdjudicationService({
         provenance: score.provenance,
         environmentOrigin: score.environmentOrigin,
       };
+      assertValidAdjudicationEventFields(event);
       await feishu.appendAdjudicationEvent(event);
       return event;
     },

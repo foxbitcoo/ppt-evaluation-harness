@@ -21,6 +21,7 @@ import {
   expectedComparisonCompatibilityFingerprint,
   requireEgressAuthorization,
   sha256Bytes,
+  type AdjudicationEventRecord,
   type EgressAuthorizationAuditPort,
   type EgressAuthorizationPort,
   type FeishuProjectionPort,
@@ -210,6 +211,15 @@ const LARK_TEST_CONFIGURATION = {
   reportDocumentExpectedOrigin: "https://example.feishu.cn",
   targetAccount: "test-account",
   targetRegion: "cn",
+  cliIdentityBinding: {
+    profile: "test-profile",
+    appId: "test-app",
+    brand: "feishu",
+    defaultAs: "auto",
+    identitySource: "auto_detect",
+    userOpenId: "test-account",
+    tenantKey: "test-tenant",
+  },
 } as const;
 
 const allowLarkMutation = {
@@ -474,6 +484,163 @@ test("authorized snapshot validation rejects cross-table lineage before material
   );
 });
 
+test("authorized snapshot validation rejects an incomplete or cross-wired completed Run graph before materialization", async () => {
+  const projection = new ObservedMaterializingProjection();
+  await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = projection.snapshot();
+  const invalidSnapshot: FeishuProjectionSnapshot = {
+    ...snapshot,
+    runRecordTable: snapshot.runRecordTable.map((record) =>
+      record.recordType === "bakeoff_job"
+        ? {
+            ...record,
+            reportUrl: null,
+            auxiliaryReportUrls: null,
+          }
+        : record,
+    ),
+    capturedArtifactTable: [],
+    artifactScoreTable: [],
+    adjudicationEventTable: [],
+    reviewEventTable: [],
+    gapCardWorkflowEventTable: [],
+    githubIssueDeliveryReservationTable: [],
+    githubIssueLinkEventTable: [],
+    productGapCardTable: [],
+    reports: [],
+  };
+  const materializationCallsBeforeInvalidCommit =
+    projection.materializationCalls;
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      invalidSnapshot,
+      await authorizeSnapshot(projection, invalidSnapshot),
+    ),
+    /Run graph|selected Run|parent|Captured Artifact|closure/i,
+  );
+  assert.equal(
+    projection.materializationCalls,
+    materializationCallsBeforeInvalidCommit,
+  );
+});
+
+test("authorized snapshot replay rejects an internally inconsistent Render Manifest before materialization", async () => {
+  const projection = new ObservedMaterializingProjection();
+  await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = projection.snapshot();
+  const capture = snapshot.capturedArtifactTable[0];
+  assert.ok(capture);
+  const invalidRenderManifest = {
+    ...capture.renderManifest,
+    pageCount: capture.renderManifest.pageCount - 1,
+    slides: capture.renderManifest.slides.slice(0, -1),
+  };
+  const invalidSnapshot: FeishuProjectionSnapshot = {
+    ...snapshot,
+    capturedArtifactTable: snapshot.capturedArtifactTable.map(
+      (record) => ({
+        ...record,
+        renderManifest: invalidRenderManifest,
+      }),
+    ),
+    artifactScoreTable: snapshot.artifactScoreTable.map(
+      (record) => ({
+        ...record,
+        renderManifest: invalidRenderManifest,
+      }),
+    ),
+  };
+  const materializationCallsBeforeInvalidCommit =
+    projection.materializationCalls;
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      invalidSnapshot,
+      await authorizeSnapshot(projection, invalidSnapshot),
+    ),
+    /Render Manifest.*page|page inventory|content hash/i,
+  );
+  assert.equal(
+    projection.materializationCalls,
+    materializationCallsBeforeInvalidCommit,
+  );
+});
+
+test("authorized snapshot replay rejects invalid adjudication human-final fields before materialization", async () => {
+  const projection = new ObservedMaterializingProjection();
+  await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [new MockWpsProductAdapter()],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = projection.snapshot();
+  const score = snapshot.artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) =>
+      assessmentStatus === "ASSESSED",
+  );
+  assert.ok(score);
+  assert.ok(dimension);
+  assert.notEqual(dimension.value, null);
+  const invalidEvent = {
+    recordType: "adjudication_event",
+    schemaVersion: "adjudication-event-v1",
+    adjudicationEventId: "adj-invalid-snapshot-replay",
+    scorecardId: score.scorecard.scorecardId,
+    artifactId: score.artifactId,
+    runId: score.runId,
+    jobId: score.jobId,
+    dimension: dimension.dimension,
+    modelOriginalAssessmentStatus:
+      dimension.assessmentStatus,
+    modelOriginalScore: dimension.value,
+    humanFinalAssessmentStatus: "NOT_ASSESSABLE",
+    humanFinalScore: 99,
+    evidencePages: dimension.evidencePages,
+    actorId: "",
+    occurredAt: "not-a-date",
+    createdAt: "not-a-date",
+    lastSyncedAt: "not-a-date",
+    reason: "",
+    priorAdjudicationEventId: null,
+    provenance: score.provenance,
+    environmentOrigin: score.environmentOrigin,
+  } as unknown as AdjudicationEventRecord;
+  const invalidSnapshot: FeishuProjectionSnapshot = {
+    ...snapshot,
+    adjudicationEventTable: [invalidEvent],
+  };
+  const materializationCallsBeforeInvalidCommit =
+    projection.materializationCalls;
+
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      invalidSnapshot,
+      await authorizeSnapshot(projection, invalidSnapshot),
+    ),
+    /Adjudication Event.*invalid|human.*score|actor|timestamp/i,
+  );
+  assert.equal(
+    projection.materializationCalls,
+    materializationCallsBeforeInvalidCommit,
+  );
+});
+
 test("authorized snapshot validation rejects materialized report-link drift", async () => {
   const projection =
     new CrossWiredReportMaterializingProjection();
@@ -722,10 +889,13 @@ test("two dynamic reports staged from one baseline cannot overwrite each other a
     new Set(job?.auxiliaryReportUrls),
     new Set([
       `https://example.test/docx/${first.outcome.report.reportId}`,
-      `https://example.test/docx/${retried.report.reportId}`,
     ]),
   );
-  assert.equal(projection.snapshot().reports.length, 3);
+  assert.equal(
+    retried.report.reportId,
+    first.outcome.report.reportId,
+  );
+  assert.equal(projection.snapshot().reports.length, 2);
 });
 
 test("production dynamic comparison without persistence authorization leaves the local projection unchanged", async () => {

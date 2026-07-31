@@ -1261,19 +1261,24 @@ function qwenExecutor(
           staticRenders: Object.freeze([]),
         });
       }
-      const latestTaskCheckpoint = [...recoveredEvents].reverse().find(
-        (event) =>
-          event.vendorTaskId !== null &&
-          event.vendorTaskId !== undefined &&
-          event.taskStateVersion !== null &&
-          event.taskStateVersion !== undefined,
-      );
+      const recoveredSubmissionState =
+        attemptSubmissionState(recoveredEvents);
+      const latestTaskCheckpoint =
+        recoveredSubmissionState === "not_submitted"
+          ? undefined
+          : [...recoveredEvents].reverse().find(
+              (event) =>
+                event.vendorTaskId !== null &&
+                event.vendorTaskId !== undefined &&
+                event.taskStateVersion !== null &&
+                event.taskStateVersion !== undefined,
+            );
       if (latestTaskCheckpoint === undefined) {
         if (
           recoveredEvents.some(
             isUnresolvedProviderSubmissionIntent,
           ) &&
-          attemptSubmissionState(recoveredEvents) === "unknown"
+          recoveredSubmissionState === "unknown"
         ) {
           return Object.freeze({
             terminalReason: "task_state_unknown",
@@ -1295,8 +1300,7 @@ function qwenExecutor(
           });
         }
         if (
-          attemptSubmissionState(recoveredEvents) !==
-          "not_submitted"
+          recoveredSubmissionState !== "not_submitted"
         ) {
           throw new Error(
             "Recovered Qwen checkpoints require vendor task identity and state version",

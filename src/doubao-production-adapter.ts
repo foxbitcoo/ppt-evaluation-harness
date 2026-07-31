@@ -1023,6 +1023,51 @@ function validatedStaticRenders(
   );
 }
 
+function terminalReasonForDoubaoReconciliation(
+  observedState: ObservableAttemptEvent["reconciliationObservedState"],
+): "task_state_unknown" | "download_failure" | "technical_failure" {
+  if (observedState === "artifact_ready") return "download_failure";
+  if (observedState === "failed") return "technical_failure";
+  return "task_state_unknown";
+}
+
+function assertDurableDoubaoReconciliation(
+  event: ObservableAttemptEvent,
+): void {
+  const observedState = event.reconciliationObservedState;
+  if (
+    observedState === undefined ||
+    !["unknown", "submitted", "artifact_ready", "failed"].includes(
+      observedState,
+    ) ||
+    event.vendorTaskId === null ||
+    event.vendorTaskId === undefined ||
+    event.taskStateVersion === null ||
+    event.taskStateVersion === undefined ||
+    event.submissionEvidenceAtCheckpoint !== "submitted"
+  ) {
+    throw new Error(
+      "Durable Doubao reconciliation result is structurally incomplete",
+    );
+  }
+  if (
+    event.reconciliationTerminalReason !==
+      terminalReasonForDoubaoReconciliation(observedState) ||
+    (event.reconciliationArtifactReference ?? null) !== null
+  ) {
+    throw new Error(
+      "Durable Doubao reconciliation result is internally inconsistent",
+    );
+  }
+  assertIsoTimestamp(event.observedAt, "reconciliation.observedAt");
+  assertSafeEvidenceRef(event.evidenceRef);
+  assertSafeText(event.vendorTaskId, "reconciliation.vendorTaskId");
+  assertSafeText(
+    event.taskStateVersion,
+    "reconciliation.taskStateVersion",
+  );
+}
+
 export function resolveDoubaoProductionExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   driver: DoubaoBrowserDriverPort | undefined,
@@ -1096,6 +1141,33 @@ export function resolveDoubaoProductionExecutor(
           "Recovered Doubao checkpoint lineage does not match the Attempt",
         );
       }
+      const latestDurableReconciliation = [...recovered]
+        .reverse()
+        .find(
+          ({ eventType }) =>
+            eventType === "task_reconciliation_result",
+        );
+      if (latestDurableReconciliation !== undefined) {
+        assertDurableDoubaoReconciliation(
+          latestDurableReconciliation,
+        );
+        return Object.freeze({
+          terminalReason:
+            latestDurableReconciliation.reconciliationTerminalReason!,
+          blockReason: null,
+          submissionEvidence: "submitted",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: Object.freeze(
+            recovered.map((event) =>
+              Object.freeze(structuredClone(event)),
+            ),
+          ),
+          manualActions: Object.freeze([
+            "reconciled retained submitted Doubao task before browser reuse",
+          ]),
+        });
+      }
       const latestTask = [...recovered].reverse().find(
         ({ vendorTaskId, taskStateVersion }) =>
           vendorTaskId !== null &&
@@ -1134,21 +1206,17 @@ export function resolveDoubaoProductionExecutor(
             reconciliationObservedState:
               reconciliation.observedState,
             reconciliationTerminalReason:
-              reconciliation.observedState === "artifact_ready"
-                ? "download_failure"
-                : reconciliation.observedState === "failed"
-                  ? "technical_failure"
-                : "task_state_unknown",
+              terminalReasonForDoubaoReconciliation(
+                reconciliation.observedState,
+              ),
             reconciliationArtifactReference: null,
           });
         await checkpointStore?.append(reconciliationEvent);
         return Object.freeze({
           terminalReason:
-            reconciliation.observedState === "artifact_ready"
-              ? "download_failure"
-              : reconciliation.observedState === "failed"
-                ? "technical_failure"
-              : "task_state_unknown",
+            terminalReasonForDoubaoReconciliation(
+              reconciliation.observedState,
+            ),
           blockReason: null,
           submissionEvidence: "submitted",
           elapsedMs: 0,

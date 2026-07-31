@@ -4,6 +4,7 @@ import type { ObservableAttemptEvent } from "./domain.ts";
 import {
   calculateArtifactDerivativeSetHash,
 } from "./artifact-vault.ts";
+import { BUILD_IDENTITY } from "./build-identity.ts";
 import {
   canonicalJsonBytes,
 } from "./run-specification.ts";
@@ -12,9 +13,10 @@ import { parseStrictJson } from "./strict-json.ts";
 import {
   validatedOpenXmlPresentationSlideNames,
 } from "./wps-aippt.ts";
-import type {
-  TrustedWpsRecoveryCheckpoint,
-  WpsRecoverySha256,
+import {
+  trustedWpsRecoveryCheckpoint,
+  type TrustedWpsRecoveryCheckpoint,
+  type WpsRecoverySha256,
 } from "./wps-recovery-checkpoints.ts";
 
 type JsonRecord = Record<string, unknown>;
@@ -54,8 +56,6 @@ export interface WpsProductionRecoveryPayloads {
   readonly readArtifactPayload: (
     key: string,
   ) => Promise<Uint8Array | null>;
-  readonly trustedCheckpoint: TrustedWpsRecoveryCheckpoint;
-  readonly verifierBuildIdentity: WpsVerifiedBuildIdentity;
 }
 
 export interface WpsProductionRecoveryResult {
@@ -403,7 +403,9 @@ function assertVersionReference(
 export async function validateWpsProductionRecoveryPayloads(
   input: WpsProductionRecoveryPayloads,
 ): Promise<WpsProductionRecoveryResult> {
-  const trusted = input.trustedCheckpoint;
+  const trusted = trustedWpsRecoveryCheckpoint(
+    input.command.registryId,
+  );
   assertCommandBound(input.command, trusted);
   if (input.registryHash !== trusted.registryHash) {
     throw new Error(
@@ -1393,7 +1395,7 @@ export async function validateWpsProductionRecoveryPayloads(
       runSpecificationCanonicalHash:
         trusted.runSpecificationCanonicalHash,
     }),
-    verifierBuildIdentity: input.verifierBuildIdentity,
+    verifierBuildIdentity: BUILD_IDENTITY,
     binaryValidation: Object.freeze({
       pptxSlideCount: slideNames.length,
       staticPngCount: derivatives.filter(

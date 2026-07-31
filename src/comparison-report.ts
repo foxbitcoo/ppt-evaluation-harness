@@ -902,23 +902,83 @@ function createVendorSummaries(
   });
 }
 
+const COMPARISON_VENDOR_ORDER = new Map([
+  ["wps", 0],
+  ["qwen", 1],
+  ["doubao", 2],
+]);
+
+function compareCanonicalRunOrder(
+  left: ScoredRun,
+  right: ScoredRun,
+): number {
+  return (
+    (COMPARISON_VENDOR_ORDER.get(
+      left.run.productVendorId ?? "",
+    ) ?? Number.MAX_SAFE_INTEGER) -
+      (COMPARISON_VENDOR_ORDER.get(
+        right.run.productVendorId ?? "",
+      ) ?? Number.MAX_SAFE_INTEGER) ||
+    left.run.recordId.localeCompare(right.run.recordId) ||
+    left.score.scorecard.scorecardId.localeCompare(
+      right.score.scorecard.scorecardId,
+    )
+  );
+}
+
+function canonicalExplicitPairs(
+  pairs: readonly ComparisonPairSelection[],
+  vendorRuns: readonly RunRecord[],
+  scores: readonly EffectiveArtifactScoreTableRecord[],
+): readonly ComparisonPairSelection[] {
+  const seen = new Set<string>();
+  return pairs.flatMap((pair) => {
+    const requestedLeft = scoredRunById(
+      pair.leftRunId,
+      vendorRuns,
+      scores,
+      pair.leftScorecardId,
+    );
+    const requestedRight = scoredRunById(
+      pair.rightRunId,
+      vendorRuns,
+      scores,
+      pair.rightScorecardId,
+    );
+    const [left, right] =
+      compareCanonicalRunOrder(requestedLeft, requestedRight) <= 0
+        ? [requestedLeft, requestedRight]
+        : [requestedRight, requestedLeft];
+    const canonicalPair: ComparisonPairSelection = {
+      leftRunId: left.run.recordId,
+      leftScorecardId: left.score.scorecard.scorecardId,
+      rightRunId: right.run.recordId,
+      rightScorecardId: right.score.scorecard.scorecardId,
+    };
+    const key = JSON.stringify([
+      canonicalPair.leftRunId,
+      canonicalPair.leftScorecardId,
+      canonicalPair.rightRunId,
+      canonicalPair.rightScorecardId,
+    ]);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [canonicalPair];
+  });
+}
+
 function defaultViewPairs(
   vendorRuns: readonly RunRecord[],
   scores: readonly ArtifactScoreTableRecord[],
 ): readonly ComparisonPairSelection[] {
   const scoredRunIds = new Set(scores.map(({ runId }) => runId));
-  const vendorOrder = new Map([
-    ["wps", 0],
-    ["qwen", 1],
-    ["doubao", 2],
-  ]);
   const scoredRuns = vendorRuns
     .filter((run) => scoredRunIds.has(run.recordId))
     .sort(
       (left, right) =>
-        (vendorOrder.get(left.productVendorId ?? "") ??
+        (COMPARISON_VENDOR_ORDER.get(left.productVendorId ?? "") ??
           Number.MAX_SAFE_INTEGER) -
-          (vendorOrder.get(right.productVendorId ?? "") ??
+          (COMPARISON_VENDOR_ORDER.get(right.productVendorId ?? "") ??
             Number.MAX_SAFE_INTEGER) ||
         left.recordId.localeCompare(right.recordId),
     );
@@ -1006,12 +1066,17 @@ export function createComparisonReportService({
               })),
             );
           const pairs =
-            command.pairs ??
-            planCompatibleComparisonPairs({
-              jobId: command.jobId,
-              vendorRuns: source.vendorRuns,
-              artifactScores: effectiveScores,
-            });
+            command.pairs === undefined
+              ? planCompatibleComparisonPairs({
+                  jobId: command.jobId,
+                  vendorRuns: source.vendorRuns,
+                  artifactScores: effectiveScores,
+                })
+              : canonicalExplicitPairs(
+                  command.pairs,
+                  source.vendorRuns,
+                  effectiveScores,
+                );
           if (pairs.length === 0) {
             throw new Error("A comparison report requires at least one pair");
           }

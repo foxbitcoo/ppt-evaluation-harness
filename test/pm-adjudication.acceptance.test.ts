@@ -107,6 +107,99 @@ test("effective Scorecard readback fails closed when its Artifact payload diverg
   );
 });
 
+test("adjudication append and readback reject invalid human-final fields", async (t) => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const modelOriginal = score?.scorecard.dimensions.find(
+    ({ dimension }) =>
+      dimension === "narrative_and_audience_fit",
+  );
+  assert.ok(score);
+  assert.ok(modelOriginal);
+  assert.equal(modelOriginal.assessmentStatus, "ASSESSED");
+  assert.notEqual(modelOriginal.value, null);
+  const validEvent: AdjudicationEventRecord = {
+    recordType: "adjudication_event",
+    schemaVersion: "adjudication-event-v1",
+    adjudicationEventId: "adj-runtime-validation",
+    scorecardId,
+    artifactId: score.artifactId,
+    runId: score.runId,
+    jobId: score.jobId,
+    dimension: modelOriginal.dimension,
+    modelOriginalAssessmentStatus: modelOriginal.assessmentStatus,
+    modelOriginalScore: modelOriginal.value,
+    humanFinalAssessmentStatus: "ASSESSED",
+    humanFinalScore: 4,
+    evidencePages: modelOriginal.evidencePages,
+    actorId: "pm-runtime-reviewer",
+    occurredAt: "2026-07-31T00:00:00.000Z",
+    createdAt: "2026-07-31T00:00:00.000Z",
+    lastSyncedAt: "2026-07-31T00:00:00.000Z",
+    reason: "Runtime validation fixture.",
+    priorAdjudicationEventId: null,
+    provenance: score.provenance,
+    environmentOrigin: score.environmentOrigin,
+  };
+  const invalidEvents = [
+    {
+      label: "out-of-range human score",
+      event: { ...validEvent, humanFinalScore: 99 },
+    },
+    {
+      label: "contradictory assessment status",
+      event: {
+        ...validEvent,
+        humanFinalAssessmentStatus: "NOT_ASSESSABLE",
+      },
+    },
+    {
+      label: "blank actor",
+      event: { ...validEvent, actorId: " " },
+    },
+    {
+      label: "blank reason",
+      event: { ...validEvent, reason: "" },
+    },
+    {
+      label: "invalid occurrence timestamp",
+      event: { ...validEvent, occurredAt: "not-a-date" },
+    },
+    {
+      label: "invalid creation timestamp",
+      event: { ...validEvent, createdAt: "not-a-date" },
+    },
+    {
+      label: "invalid sync timestamp",
+      event: { ...validEvent, lastSyncedAt: "not-a-date" },
+    },
+  ] as const;
+
+  for (const { label, event } of invalidEvents) {
+    await t.test(label, async () => {
+      await assert.rejects(
+        feishu.appendAdjudicationEvent(
+          event as unknown as AdjudicationEventRecord,
+        ),
+        /Adjudication Event.*invalid|human.*score|actor|reason|timestamp/i,
+      );
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withAdjudicationEvents(
+            feishu,
+            () => [
+              event as unknown as AdjudicationEventRecord,
+            ],
+          ),
+        }).getEffectiveScorecard(scorecardId),
+        /Adjudication Event.*invalid|human.*score|actor|reason|timestamp/i,
+      );
+    });
+  }
+  assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
+});
+
 test("a PM adjudication is append-only and exposes the latest human score without overwriting the model score", async () => {
   const { feishu, scorecardId } = await createScoredWpsProjection();
   const service = createScoreAdjudicationService({ feishu });

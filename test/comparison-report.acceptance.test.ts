@@ -14,11 +14,27 @@ import {
   expectedComparisonCompatibilityFingerprint,
   type ArtifactScoreTableRecord,
   type AttemptDeadlinePort,
+  type CapturedArtifactTableRecord,
   type ComparisonReportSource,
   type FeishuProjectionPort,
   type ProductAdapterPort,
   type ReferencePackGeneratorPort,
 } from "../src/index.ts";
+
+function rehashRenderManifest(
+  artifactContentHash: ArtifactScoreTableRecord["artifact"]["contentHash"],
+  renderManifest: ArtifactScoreTableRecord["renderManifest"],
+): ArtifactScoreTableRecord["renderManifest"] {
+  const { contentHash: _previousContentHash, ...hashInput } =
+    renderManifest;
+  return {
+    ...renderManifest,
+    contentHash: calculateRenderManifestHash(
+      artifactContentHash,
+      hashInput,
+    ),
+  };
+}
 
 function withComparisonSourceOverride(
   feishu: InMemoryFeishuProjection,
@@ -79,6 +95,143 @@ async function projectionBeforeScores(): Promise<{
   assert.ok(score);
   return { feishu, score };
 }
+
+async function projectionBeforeCaptures(): Promise<{
+  readonly feishu: InMemoryFeishuProjection;
+  readonly capture: CapturedArtifactTableRecord;
+}> {
+  const { feishu: source } = await seededThreeVendorProjection();
+  const snapshot = source.snapshot();
+  const feishu = new InMemoryFeishuProjection();
+  for (const record of snapshot.caseTable) {
+    await feishu.upsertCase(record);
+  }
+  for (const record of snapshot.runRecordTable) {
+    await feishu.appendRunRecord(record);
+  }
+  const capture = snapshot.capturedArtifactTable[0];
+  assert.ok(capture);
+  return { feishu, capture };
+}
+
+test("a Case already referenced by a Run rejects non-idempotent identity overwrite", async () => {
+  const { feishu } = await seededThreeVendorProjection();
+  const before = feishu.snapshot();
+  const evaluationCase = before.caseTable[0];
+  assert.ok(evaluationCase);
+
+  await assert.rejects(
+    feishu.upsertCase({
+      ...evaluationCase,
+      caseId: "cross-wired-case-v999",
+    }),
+    /Case.*identity|referenced.*Case|non-idempotent/i,
+  );
+  assert.deepEqual(feishu.snapshot().caseTable, before.caseTable);
+});
+
+test("Captured Artifact projection rejects an incomplete Render Manifest page inventory", async () => {
+  const { feishu, capture } = await projectionBeforeCaptures();
+  const invalidCapture: CapturedArtifactTableRecord = {
+    ...capture,
+    renderManifest: {
+      ...capture.renderManifest,
+      pageCount: capture.renderManifest.pageCount - 1,
+      slides: capture.renderManifest.slides.slice(0, -1),
+    },
+  };
+
+  await assert.rejects(
+    feishu.appendCapturedArtifact(invalidCapture),
+    /Render Manifest.*page|page inventory|content hash/i,
+  );
+});
+
+test("Captured Artifact projection verifies page identities and rendered content hashes", async (t) => {
+  const invalidCaptures = [
+    {
+      label: "duplicate page identity",
+      mutate: (capture: CapturedArtifactTableRecord) => ({
+        ...capture,
+        renderManifest: {
+          ...capture.renderManifest,
+          slides: capture.renderManifest.slides.map(
+            (slide, index) =>
+              index === 1
+                ? { ...slide, pageNumber: 1 }
+                : slide,
+          ),
+        },
+      }),
+    },
+    {
+      label: "slide content hash drift",
+      mutate: (capture: CapturedArtifactTableRecord) => ({
+        ...capture,
+        renderManifest: {
+          ...capture.renderManifest,
+          slides: capture.renderManifest.slides.map(
+            (slide, index) =>
+              index === 0
+                ? {
+                    ...slide,
+                    content:
+                      typeof slide.content === "string"
+                        ? `${slide.content}drift`
+                        : Uint8Array.from([
+                            ...slide.content,
+                            0,
+                          ]),
+                  }
+                : slide,
+          ),
+        },
+      }),
+    },
+    {
+      label: "contact-sheet content hash drift",
+      mutate: (capture: CapturedArtifactTableRecord) => ({
+        ...capture,
+        renderManifest: {
+          ...capture.renderManifest,
+          contactSheet: {
+            ...capture.renderManifest.contactSheet,
+            content:
+              typeof capture.renderManifest.contactSheet.content ===
+              "string"
+                ? `${capture.renderManifest.contactSheet.content}drift`
+                : Uint8Array.from([
+                    ...capture.renderManifest.contactSheet.content,
+                    0,
+                  ]),
+          },
+        },
+      }),
+    },
+    {
+      label: "manifest content hash drift",
+      mutate: (capture: CapturedArtifactTableRecord) => ({
+        ...capture,
+        renderManifest: {
+          ...capture.renderManifest,
+          contentHash:
+            `sha256:${"0".repeat(64)}` as `sha256:${string}`,
+        },
+      }),
+    },
+  ] as const;
+
+  for (const { label, mutate } of invalidCaptures) {
+    await t.test(label, async () => {
+      const { feishu, capture } =
+        await projectionBeforeCaptures();
+      await assert.rejects(
+        feishu.appendCapturedArtifact(mutate(capture)),
+        /Render Manifest.*page|page inventory|content hash/i,
+      );
+    });
+  }
+});
 
 test("Artifact Score projection rejects a six-dimension value outside 1–5", async () => {
   const { feishu, score } = await projectionBeforeScores();
@@ -168,6 +321,73 @@ test("Artifact Score projection rejects an assessment/deduction mismatch", async
   await assert.rejects(
     feishu.appendArtifactScore(invalidScore),
     /Scorecard.*deduction.*assessment|field combination/i,
+  );
+});
+
+test("Artifact Score projection enforces NOT_ASSESSABLE ownership and its persisted render gate", async (t) => {
+  await t.test(
+    "no-reference-pack is owned only by factual accuracy",
+    async () => {
+      const { feishu, score } = await projectionBeforeScores();
+      const invalidScore: ArtifactScoreTableRecord = {
+        ...score,
+        scorecard: {
+          ...score.scorecard,
+          dimensions: score.scorecard.dimensions.map(
+            (dimension) =>
+              dimension.dimension ===
+              "requirement_understanding_and_content_coverage"
+                ? {
+                    ...dimension,
+                    assessmentStatus:
+                      "NOT_ASSESSABLE" as const,
+                    value: null,
+                    deductionBasis:
+                      "not_assessable_no_reference_pack" as const,
+                    evidencePages: [],
+                  }
+                : dimension,
+          ),
+        },
+      };
+
+      await assert.rejects(
+        feishu.appendArtifactScore(invalidScore),
+        /NOT_ASSESSABLE.*ownership|Reference Pack.*factual|deduction basis/i,
+      );
+    },
+  );
+  await t.test(
+    "degraded-render requires a persisted degraded render gate",
+    async () => {
+      const { feishu, score } = await projectionBeforeScores();
+      const invalidScore: ArtifactScoreTableRecord = {
+        ...score,
+        scorecard: {
+          ...score.scorecard,
+          dimensions: score.scorecard.dimensions.map(
+            (dimension) =>
+              dimension.dimension ===
+              "visual_aesthetics_and_professional_finish"
+                ? {
+                    ...dimension,
+                    assessmentStatus:
+                      "NOT_ASSESSABLE" as const,
+                    value: null,
+                    deductionBasis:
+                      "not_assessable_degraded_render" as const,
+                    evidencePages: [],
+                  }
+                : dimension,
+          ),
+        },
+      };
+
+      await assert.rejects(
+        feishu.appendArtifactScore(invalidScore),
+        /NOT_ASSESSABLE.*ownership|degraded render|render gate/i,
+      );
+    },
   );
 });
 
@@ -467,6 +687,63 @@ test("an already-scored compatible Qwen–Doubao pair can be selected without re
   assert.deepEqual(parentJob?.auxiliaryReportUrls, [report.report.url]);
 });
 
+test("explicit duplicate or reversed pairs converge to one unordered logical Comparison", async () => {
+  const { feishu, jobId } = await seededThreeVendorProjection();
+  const service = createComparisonReportService({ feishu });
+  const comparisonIdsBefore = feishu
+    .snapshot()
+    .productGapCardTable.filter(
+      ({ recordType }) => recordType === "comparison",
+    )
+    .map(({ comparisonId }) => comparisonId);
+  const report = await service.createReport({
+    jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-wps-volcano-v1",
+        rightRunId: "MOCK-run-qwen-volcano-v1",
+      },
+      {
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        rightRunId: "MOCK-run-wps-volcano-v1",
+      },
+      {
+        leftRunId: "MOCK-run-wps-volcano-v1",
+        rightRunId: "MOCK-run-qwen-volcano-v1",
+      },
+    ],
+  });
+
+  assert.equal(report.comparisons.length, 1);
+  assert.equal(
+    report.comparisons[0]?.comparisonId,
+    "MOCK-comparison-wps-qwen-volcano-v1",
+  );
+  const reversedReplay = await service.createReport({
+    jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-qwen-volcano-v1",
+        rightRunId: "MOCK-run-wps-volcano-v1",
+      },
+    ],
+  });
+  assert.equal(
+    reversedReplay.comparisons[0]?.comparisonId,
+    report.comparisons[0]?.comparisonId,
+  );
+  assert.equal(reversedReplay.report.reportId, report.report.reportId);
+  assert.deepEqual(
+    feishu
+      .snapshot()
+      .productGapCardTable.filter(
+        ({ recordType }) => recordType === "comparison",
+      )
+      .map(({ comparisonId }) => comparisonId),
+    comparisonIdsBefore,
+  );
+});
+
 test("the report view defaults to every compatible pair without making any product a stored baseline", async () => {
   const feishu = new InMemoryFeishuProjection();
   const bakeoff = await createBakeoffHarness({
@@ -652,19 +929,21 @@ test("one-sided NOT_ASSESSABLE preserves the assessed side while suppressing onl
             ...record,
             scorecard: {
               ...record.scorecard,
-              dimensions: record.scorecard.dimensions.map((dimension) =>
-                dimension.dimension !==
-                "factual_accuracy_and_content_quality"
-                  ? dimension
-                  : {
-                      ...dimension,
-                      assessmentStatus: "NOT_ASSESSABLE" as const,
-                      value: null,
-                      deductionBasis:
-                        "not_assessable_no_reference_pack" as const,
-                      evidencePages: [],
-                      rationale: "该侧没有可用事实判断证据。",
-                    },
+              dimensions: record.scorecard.dimensions.map(
+                (dimension) =>
+                  dimension.dimension !==
+                  "factual_accuracy_and_content_quality"
+                    ? dimension
+                    : {
+                        ...dimension,
+                        assessmentStatus:
+                          "NOT_ASSESSABLE" as const,
+                        value: null,
+                        deductionBasis:
+                          "not_assessable_no_reference_pack" as const,
+                        evidencePages: [],
+                        rationale: "该侧没有可用事实判断证据。",
+                      },
               ),
             },
           },
@@ -1048,28 +1327,37 @@ test("Artifact Score projection rejects inconsistent capture execution provenanc
   });
   const score = source.snapshot().artifactScoreTable[0]!;
   const target = new InMemoryFeishuProjection();
+  const replayRenderManifest = rehashRenderManifest(
+    score.artifact.contentHash,
+    {
+      ...score.renderManifest,
+      provenance: "PRODUCTION_REPLAY",
+    },
+  );
 
   await assert.rejects(
     target.appendArtifactScore({
       ...score,
-      renderManifest: {
-        ...score.renderManifest,
-        provenance: "PRODUCTION_REPLAY",
-      },
+      renderManifest: replayRenderManifest,
     }),
     /provenance|lineage/i,
+  );
+  const liveArtifact = {
+    ...score.artifact,
+    provenance: "LIVE_PRODUCTION" as const,
+  };
+  const liveRenderManifest = rehashRenderManifest(
+    liveArtifact.contentHash,
+    {
+      ...score.renderManifest,
+      provenance: "LIVE_PRODUCTION",
+    },
   );
   await assert.rejects(
     target.appendArtifactScore({
       ...score,
-      artifact: {
-        ...score.artifact,
-        provenance: "LIVE_PRODUCTION",
-      },
-      renderManifest: {
-        ...score.renderManifest,
-        provenance: "LIVE_PRODUCTION",
-      },
+      artifact: liveArtifact,
+      renderManifest: liveRenderManifest,
       scorecard: {
         ...score.scorecard,
         provenance: "LIVE_PRODUCTION",
@@ -1161,6 +1449,14 @@ test("Artifact Score projection rejects a production-shaped score whose persiste
       provenance: "PRODUCTION",
     });
   }
+  const productionRenderManifest = {
+    ...qwenCapture.renderManifest,
+    provenance: "LIVE_PRODUCTION" as const,
+  };
+  const {
+    contentHash: _previousProductionRenderManifestHash,
+    ...productionRenderManifestHashInput
+  } = productionRenderManifest;
   await target.appendCapturedArtifact({
     ...qwenCapture,
     provenance: "PRODUCTION",
@@ -1169,15 +1465,18 @@ test("Artifact Score projection rejects a production-shaped score whose persiste
       provenance: "LIVE_PRODUCTION",
     },
     renderManifest: {
-      ...qwenCapture.renderManifest,
-      provenance: "LIVE_PRODUCTION",
+      ...productionRenderManifest,
+      contentHash: calculateRenderManifestHash(
+        qwenCapture.artifact.contentHash,
+        productionRenderManifestHashInput,
+      ),
     },
   });
   const productionJob = target.snapshot().runRecordTable.find(
     (record) => record.recordType === "bakeoff_job",
   );
   assert.ok(productionJob?.protocolSnapshot);
-  const productionScore = {
+  const productionScoreWithoutRehashedManifest = {
     ...qwenScore,
     provenance: "PRODUCTION" as const,
     artifact: {
@@ -1192,6 +1491,13 @@ test("Artifact Score projection rejects a production-shaped score whose persiste
       ...qwenScore.scorecard,
       provenance: "PRODUCTION_REPLAY" as const,
     },
+  };
+  const productionScore = {
+    ...productionScoreWithoutRehashedManifest,
+    renderManifest: rehashRenderManifest(
+      productionScoreWithoutRehashedManifest.artifact.contentHash,
+      productionScoreWithoutRehashedManifest.renderManifest,
+    ),
   };
 
   await assert.rejects(
@@ -1242,6 +1548,72 @@ test("comparison source readback fails closed when Captured Artifact and Artifac
   await assert.rejects(
     readback.loadComparisonReportSource(bakeoff.job.jobId),
     /captured artifact|cross-table|lineage/i,
+  );
+});
+
+test("comparison source readback rejects a shared but internally inconsistent Render Manifest", async () => {
+  const { feishu, jobId } = await seededThreeVendorProjection();
+  const snapshot = feishu.snapshot();
+  const capture = snapshot.capturedArtifactTable[0];
+  assert.ok(capture);
+  const invalidRenderManifest = {
+    ...capture.renderManifest,
+    pageCount: capture.renderManifest.pageCount - 1,
+    slides: capture.renderManifest.slides.slice(0, -1),
+  };
+  const corrupted = {
+    ...snapshot,
+    capturedArtifactTable: snapshot.capturedArtifactTable.map(
+      (record) =>
+        record.artifactId === capture.artifactId
+          ? {
+              ...record,
+              renderManifest: invalidRenderManifest,
+            }
+          : record,
+    ),
+    artifactScoreTable: snapshot.artifactScoreTable.map(
+      (record) =>
+        record.artifactId === capture.artifactId
+          ? {
+              ...record,
+              renderManifest: invalidRenderManifest,
+            }
+          : record,
+    ),
+  };
+
+  await assert.rejects(
+    feishu
+      .forkForStaging(corrupted)
+      .loadComparisonReportSource(jobId),
+    /Render Manifest.*page|page inventory|content hash|Scorecard.*evidence page/i,
+  );
+});
+
+test("Run append rejects a vendor Run cross-wired outside its selected Job parent", async () => {
+  const { feishu: source } = await seededThreeVendorProjection();
+  const snapshot = source.snapshot();
+  const evaluationCase = snapshot.caseTable[0];
+  const job = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const vendorRun = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "vendor_run",
+  );
+  assert.ok(evaluationCase);
+  assert.ok(job);
+  assert.ok(vendorRun);
+  const target = new InMemoryFeishuProjection();
+  await target.upsertCase(evaluationCase);
+  await target.appendRunRecord(job);
+
+  await assert.rejects(
+    target.appendRunRecord({
+      ...vendorRun,
+      parentRecordId: "missing-job-record",
+    }),
+    /Run.*parent|selected Job|relational lineage/i,
   );
 });
 

@@ -35,6 +35,11 @@ import {
 import {
   assertArtifactScoreCompatibility,
 } from "./comparison-compatibility.ts";
+import { assertValidAdjudicationEventFields } from "./adjudication-validation.ts";
+import {
+  assertArtifactRenderManifestIntegrity,
+  renderedPageNumbers,
+} from "./artifact-projection-validation.ts";
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -117,6 +122,8 @@ function assertCaptureScoreBindings(
   captures: readonly CapturedArtifactTableRecord[],
   scores: readonly ArtifactScoreTableRecord[],
 ): void {
+  captures.forEach(assertArtifactRenderManifestIntegrity);
+  scores.forEach(assertArtifactRenderManifestIntegrity);
   for (const score of scores) {
     const matchingCaptures = captures.filter(
       ({ artifactId }) => artifactId === score.artifactId,
@@ -305,6 +312,119 @@ export interface FeishuProjectionSnapshot {
   readonly reports: readonly FeishuReport[];
 }
 
+function assertCompleteProjectionGraph(
+  snapshot: FeishuProjectionSnapshot,
+): void {
+  const jobs = snapshot.runRecordTable.filter(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const job = jobs[0];
+  if (jobs.length !== 1 || job === undefined) {
+    throw new Error(
+      "Operational ledger Run graph requires exactly one logical Bakeoff Job",
+    );
+  }
+  const selectedRunIds = job.selectedRunIds;
+  if (
+    selectedRunIds === null ||
+    new Set(selectedRunIds).size !== selectedRunIds.length
+  ) {
+    throw new Error(
+      "Operational ledger Run graph has an invalid selected Run set",
+    );
+  }
+  const vendorRuns = snapshot.runRecordTable.filter(
+    ({ recordType }) => recordType === "vendor_run",
+  );
+  const vendorRunIds = new Set(
+    vendorRuns.map(({ recordId }) => recordId),
+  );
+  if (
+    vendorRuns.length !== selectedRunIds.length ||
+    selectedRunIds.some((runId) => !vendorRunIds.has(runId))
+  ) {
+    throw new Error(
+      "Operational ledger Run graph does not contain exactly its selected vendor Runs",
+    );
+  }
+  const attempts = snapshot.runRecordTable.filter(
+    ({ recordType }) => recordType === "evaluation_attempt",
+  );
+  for (const run of vendorRuns) {
+    const runAttempts = attempts.filter(
+      ({ parentRecordId }) => parentRecordId === run.recordId,
+    );
+    const captures = snapshot.capturedArtifactTable.filter(
+      ({ runId }) => runId === run.recordId,
+    );
+    const scores = snapshot.artifactScoreTable.filter(
+      ({ runId }) => runId === run.recordId,
+    );
+    const capture = captures[0];
+    const score = scores[0];
+    if (
+      run.parentRecordId !== job.recordId ||
+      run.jobId !== job.jobId ||
+      run.caseId !== job.caseId ||
+      run.provenance !== job.provenance ||
+      run.environmentOrigin !== job.environmentOrigin ||
+      runAttempts.length === 0 ||
+      runAttempts.some(
+        (attempt) =>
+          attempt.jobId !== run.jobId ||
+          attempt.caseId !== run.caseId ||
+          attempt.provenance !== run.provenance ||
+          attempt.environmentOrigin !== run.environmentOrigin,
+      ) ||
+      captures.length > 1 ||
+      scores.length > 1 ||
+      (run.status === "completed" &&
+        (run.artifactId === null ||
+          run.renderManifestId === null)) ||
+      (run.artifactId === null
+        ? captures.length !== 0 ||
+          scores.length !== 0 ||
+          run.renderManifestId !== null ||
+          run.scorecardId !== null
+        : capture === undefined ||
+          capture.artifactId !== run.artifactId ||
+          capture.renderManifest.renderManifestId !==
+            run.renderManifestId) ||
+      (run.scorecardId === null
+        ? scores.length !== 0
+        : score === undefined ||
+          score.scorecard.scorecardId !== run.scorecardId)
+    ) {
+      throw new Error(
+        `Operational ledger Run graph has an incomplete Capture, Render, Score, or Attempt closure: ${run.recordId}`,
+      );
+    }
+  }
+  if (
+    attempts.some(
+      (attempt) =>
+        !vendorRunIds.has(attempt.parentRecordId ?? ""),
+    )
+  ) {
+    throw new Error(
+      "Operational ledger Run graph contains an orphan Evaluation Attempt",
+    );
+  }
+  const linkedReportUrls = new Set([
+    ...(job.reportUrl === null ? [] : [job.reportUrl]),
+    ...(job.auxiliaryReportUrls ?? []),
+  ]);
+  if (
+    snapshot.reports.some(
+      ({ url }) => !linkedReportUrls.has(url),
+    )
+  ) {
+    throw new Error(
+      "Operational ledger Run graph contains an unlinked Report",
+    );
+  }
+}
+
 export interface InMemoryFeishuProjectionOptions {
   readonly targetEnvironment?: "test" | "production";
   readonly egressDestination?: EgressDestinationMetadata;
@@ -412,6 +532,96 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     if (this.#expiredJobIds.has(jobId)) {
       throw new Error(
         `Tombstoned Job ${jobId} blocked Feishu projection write`,
+      );
+    }
+  }
+
+  #assertRunRecordRelationsForAppend(record: RunRecord): void {
+    const cases = this.#caseTable.filter(
+      ({ caseId }) => caseId === record.caseId,
+    );
+    const evaluationCase = cases[0];
+    if (
+      cases.length !== 1 ||
+      evaluationCase === undefined ||
+      evaluationCase.provenance !== record.provenance ||
+      evaluationCase.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "Run relational lineage does not match exactly one persisted Case",
+      );
+    }
+    if (record.recordType === "bakeoff_job") {
+      if (
+        record.parentRecordId !== null ||
+        record.recordId !== record.jobId ||
+        record.selectedRunIds === null ||
+        new Set(record.selectedRunIds).size !==
+          record.selectedRunIds.length ||
+        this.#runRecordTable.some(
+          (candidate) =>
+            candidate.recordType === "bakeoff_job" &&
+            candidate.jobId === record.jobId,
+        )
+      ) {
+        throw new Error(
+          "Bakeoff Job has an invalid parent, selected Run set, or logical identity",
+        );
+      }
+      return;
+    }
+    const jobs = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "bakeoff_job" &&
+        candidate.jobId === record.jobId,
+    );
+    const job = jobs[0];
+    if (
+      jobs.length !== 1 ||
+      job === undefined ||
+      (record.recordType === "vendor_run" &&
+        job.recordId !== record.parentRecordId) ||
+      job.caseId !== record.caseId ||
+      job.provenance !== record.provenance ||
+      job.environmentOrigin !== record.environmentOrigin
+    ) {
+      throw new Error(
+        "Run relational lineage does not match its selected Job parent",
+      );
+    }
+    if (record.recordType === "vendor_run") {
+      if (
+        job.selectedRunIds === null ||
+        !job.selectedRunIds.includes(record.recordId)
+      ) {
+        throw new Error(
+          "Vendor Run is not selected by its Bakeoff Job",
+        );
+      }
+      return;
+    }
+    const parents = this.#runRecordTable.filter(
+      (candidate) =>
+        candidate.recordType === "vendor_run" &&
+        candidate.recordId === record.parentRecordId,
+    );
+    const parent = parents[0];
+    if (
+      parents.length !== 1 ||
+      parent === undefined ||
+      parent.jobId !== record.jobId ||
+      parent.caseId !== record.caseId ||
+      parent.provenance !== record.provenance ||
+      parent.environmentOrigin !== record.environmentOrigin ||
+      parent.product !== record.product ||
+      parent.productVendorId !== record.productVendorId ||
+      parent.productPackageId !== record.productPackageId ||
+      parent.adapterVersion !== record.adapterVersion ||
+      !Number.isSafeInteger(record.attemptSeq) ||
+      (record.attemptSeq ?? 0) < 1
+    ) {
+      throw new Error(
+        "Evaluation Attempt relational lineage does not match its vendor Run parent",
       );
     }
   }
@@ -649,6 +859,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       const linkedPages = evidence.links.map(
         ({ pageNumber }) => pageNumber,
       );
+      const availablePages = renderedPageNumbers(
+        score.renderManifest,
+      );
       const matchesPersistedAssessment =
         modelDimension !== undefined &&
         [
@@ -687,6 +900,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         modelDimension === undefined ||
         !matchesPersistedAssessment ||
         !isDeepStrictEqual(keyPages, linkedPages) ||
+        linkedPages.some(
+          (pageNumber) => !availablePages.has(pageNumber),
+        ) ||
         evidence.links.some(
           ({ url }) =>
             typeof url !== "string" || url.trim().length === 0,
@@ -829,9 +1045,34 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       ({ recordId }) => recordId === record.recordId,
     );
     if (existingIndex === -1) {
+      if (
+        this.#caseTable.some(
+          ({ caseId }) => caseId === record.caseId,
+        )
+      ) {
+        throw new Error(
+          `Evaluation Case logical identity conflict: ${record.caseId}`,
+        );
+      }
       this.#caseTable.push(record);
       this.#mutationVersion += 1;
       return;
+    }
+    const existing = this.#caseTable[existingIndex]!;
+    if (
+      this.#caseTable.some(
+        (candidate, index) =>
+          index !== existingIndex &&
+          candidate.caseId === record.caseId,
+      ) ||
+      (!isDeepStrictEqual(existing, record) &&
+        this.#runRecordTable.some(
+          ({ caseId }) => caseId === existing.caseId,
+        ))
+    ) {
+      throw new Error(
+        `Referenced Evaluation Case rejects non-idempotent identity overwrite: ${record.recordId}`,
+      );
     }
     this.#caseTable[existingIndex] = record;
     this.#mutationVersion += 1;
@@ -854,6 +1095,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       }
       return;
     }
+    this.#assertRunRecordRelationsForAppend(record);
     this.#runRecordTable.push(record);
     this.#mutationVersion += 1;
   }
@@ -908,6 +1150,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       "Render manifest",
     );
     this.#assertAllowed(record.scorecard.environmentOrigin, "Evaluation");
+    assertArtifactRenderManifestIntegrity(record);
     if (record.recordId !== record.scorecard.scorecardId) {
       throw new Error(
         "Artifact Score recordId must equal its logical Scorecard ID",
@@ -979,6 +1222,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   ): Promise<void> {
     this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Adjudication Event");
+    assertValidAdjudicationEventFields(record);
     const existing = this.#adjudicationEventTable.find(
       ({ adjudicationEventId }) =>
         adjudicationEventId === record.adjudicationEventId,
@@ -997,6 +1241,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     const dimension = score?.scorecard.dimensions.find(
       (candidate) => candidate.dimension === record.dimension,
     );
+    const availablePages =
+      score === undefined
+        ? new Set<number>()
+        : renderedPageNumbers(score.renderManifest);
     if (
       score === undefined ||
       dimension === undefined ||
@@ -1017,7 +1265,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         (pageNumber) =>
           !Number.isInteger(pageNumber) ||
           pageNumber < 1 ||
-          pageNumber > score.artifact.pageCount,
+          !availablePages.has(pageNumber),
       )
     ) {
       throw new Error(
@@ -1160,6 +1408,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       record.renderManifest.environmentOrigin,
       "Render manifest",
     );
+    assertArtifactRenderManifestIntegrity(record);
     const captureProvenance = captureExecutionProvenance(
       record.artifact,
       record.renderManifest,
@@ -1618,10 +1867,14 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     const captured = this.#capturedArtifactTable.find(
       (record) => record.artifactId === artifactId,
     );
+    const availablePages =
+      captured === undefined
+        ? new Set<number>()
+        : renderedPageNumbers(captured.renderManifest);
     if (
       captured === undefined ||
       pageNumber < 1 ||
-      pageNumber > captured.artifact.pageCount
+      !availablePages.has(pageNumber)
     ) {
       throw new Error(
         `Artifact page evidence not found: ${artifactId}#${pageNumber}`,
@@ -1839,6 +2092,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         this.#clock,
       );
       await this.#assertSnapshotRelationalIntegrity(snapshot);
+      assertCompleteProjectionGraph(snapshot);
       assertApprovedEgressAuthorizationCurrent(
         authorization,
         this.#clock,
@@ -1852,6 +2106,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       await this.#assertSnapshotRelationalIntegrity(
         materializedSnapshot,
       );
+      assertCompleteProjectionGraph(materializedSnapshot);
       assertApprovedEgressAuthorizationCurrent(
         authorization,
         this.#clock,

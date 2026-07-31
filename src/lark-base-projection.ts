@@ -1,16 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   mkdtempSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import {
+  chmod,
   mkdir,
   lstat,
   mkdtemp,
+  open,
   readFile,
   readlink,
-  realpath,
   rm,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -68,6 +70,9 @@ export interface LarkBaseProjectionTransportPort {
   withProjectionMutex?<T>(
     jobId: string,
     operation: () => Promise<T>,
+    options?: {
+      readonly requireReportDocument?: boolean;
+    },
   ): Promise<T>;
   preflight(options?: {
     readonly requireReportDocument?: boolean;
@@ -829,6 +834,7 @@ async function acquireLarkSingleWorkstationMutex(
   options: {
     readonly waitTimeoutMs?: number;
     readonly resourceIdentityForTest?: string;
+    readonly resourceIdentities?: readonly string[];
     readonly includeReportDocument?: boolean;
   } = {},
 ): Promise<() => Promise<void>> {
@@ -840,10 +846,13 @@ async function acquireLarkSingleWorkstationMutex(
       "Lark production concurrency requires the declared single-workstation durable mutex boundary",
     );
   }
+  nonEmpty(scope, "mutex operation scope");
   const root = larkMutexRoot(configuration);
   await mkdir(root, { recursive: true, mode: 0o700 });
   const resourceIdentities =
-    options.resourceIdentityForTest === undefined
+    options.resourceIdentities !== undefined
+      ? [...new Set(options.resourceIdentities)].sort()
+      : options.resourceIdentityForTest === undefined
       ? [
           ...larkBaseConcurrencyIdentities(configuration),
           ...(options.includeReportDocument === true
@@ -856,10 +865,7 @@ async function acquireLarkSingleWorkstationMutex(
     for (const resourceIdentity of resourceIdentities) {
       const lockPath = join(
         root,
-        `${sha256(canonicalPayload({
-          resourceIdentity,
-          operationScope: scope,
-        })).slice("sha256:".length)}.lock`,
+        `${sha256(canonicalPayload({ resourceIdentity })).slice("sha256:".length)}.lock`,
       );
       releases.push(
         await acquireMacOsAdvisoryLock(
@@ -1902,14 +1908,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       release = resolveRelease;
     });
     await previous;
-    let releaseProjectionMutex = async () => {};
-    try {
-      if (this.#transport.acquireProjectionMutex !== undefined) {
-        releaseProjectionMutex =
-          await this.#transport.acquireProjectionMutex(jobId, {
-            requireReportDocument: snapshot.reports.length > 0,
-          });
-      }
+    const materialize = async (): Promise<FeishuProjectionSnapshot> => {
       const assertAuthorizationCurrent = () =>
         assertApprovedEgressAuthorizationCurrent(
           authorization,
@@ -2469,12 +2468,31 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       });
       assertAuthorizationCurrent();
       return materializedSnapshot;
-    } finally {
-      try {
-        await releaseProjectionMutex();
-      } finally {
-        release();
+    };
+    try {
+      if (this.#transport.withProjectionMutex !== undefined) {
+        return await this.#transport.withProjectionMutex(
+          jobId,
+          materialize,
+          {
+            requireReportDocument: snapshot.reports.length > 0,
+          },
+        );
       }
+      let releaseProjectionMutex = async () => {};
+      try {
+        if (this.#transport.acquireProjectionMutex !== undefined) {
+          releaseProjectionMutex =
+            await this.#transport.acquireProjectionMutex(jobId, {
+              requireReportDocument: snapshot.reports.length > 0,
+            });
+        }
+        return await materialize();
+      } finally {
+        await releaseProjectionMutex();
+      }
+    } finally {
+      release();
     }
   }
 }
@@ -2762,6 +2780,7 @@ function collectRecords(value: unknown): readonly Record<string, unknown>[] {
 interface LarkCliRunOptions {
   readonly cwd?: string;
   readonly stdin?: string | Uint8Array;
+  readonly signal?: AbortSignal;
 }
 
 type LarkCliJsonRunner = (
@@ -2770,6 +2789,9 @@ type LarkCliJsonRunner = (
 ) => Promise<unknown>;
 
 type LarkCliExecutableAttestor = () => Promise<void>;
+type LarkCliIdentityAttestor = (
+  signal?: AbortSignal,
+) => Promise<void>;
 
 interface LarkCliInvocationOptions extends LarkCliRunOptions {
   readonly inputSnapshot?: {
@@ -2822,14 +2844,98 @@ async function spawnFrozenLarkCliJson(
   args: readonly string[],
   options: LarkCliRunOptions = {},
 ): Promise<unknown> {
-  const output = await new Promise<string>((resolveOutput, rejectOutput) => {
-    const child = spawn(binaryPath, [...args], {
+  return await spawnLarkCliJsonWithLimits({
+    executablePath: binaryPath,
+    args,
+    ...options,
+    deadlineMs: 30 * 60 * 1_000,
+    stdoutByteCap: 16 * 1024 * 1024,
+    stderrByteCap: 1024 * 1024,
+  });
+}
+
+interface LarkCliSubprocessLimits extends LarkCliRunOptions {
+  readonly executablePath: string;
+  readonly args: readonly string[];
+  readonly deadlineMs: number;
+  readonly stdoutByteCap: number;
+  readonly stderrByteCap: number;
+}
+
+function signalProcessGroup(
+  processId: number,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    process.kill(-processId, signal);
+  } catch (error) {
+    if (
+      error === null ||
+      typeof error !== "object" ||
+      !("code" in error) ||
+      (error as { readonly code?: unknown }).code !== "ESRCH"
+    ) {
+      throw error;
+    }
+  }
+}
+
+function processGroupExists(processId: number): boolean {
+  try {
+    process.kill(-processId, 0);
+    return true;
+  } catch (error) {
+    if (
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { readonly code?: unknown }).code === "ESRCH"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function confirmProcessGroupAbsent(
+  processId: number,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (processGroupExists(processId) && Date.now() < deadline) {
+    signalProcessGroup(processId, "SIGKILL");
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 10);
+      timer.unref();
+    });
+  }
+  if (processGroupExists(processId)) {
+    throw new Error(
+      "lark-cli process group remained active after termination",
+    );
+  }
+}
+
+async function spawnLarkCliBytesWithLimits(
+  input: LarkCliSubprocessLimits,
+): Promise<Buffer> {
+  for (const [label, value] of Object.entries({
+    deadlineMs: input.deadlineMs,
+    stdoutByteCap: input.stdoutByteCap,
+    stderrByteCap: input.stderrByteCap,
+  })) {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`lark-cli ${label} must be a positive integer`);
+    }
+  }
+  const output = await new Promise<Buffer>((resolveOutput, rejectOutput) => {
+    const child = spawn(input.executablePath, [...input.args], {
       stdio: [
-        options.stdin === undefined ? "ignore" : "pipe",
+        input.stdin === undefined ? "ignore" : "pipe",
         "pipe",
         "pipe",
       ],
-      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      detached: true,
+      ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
       env: {
         PATH: "/usr/bin:/bin",
         HOME: process.env.HOME,
@@ -2838,44 +2944,121 @@ async function spawnFrozenLarkCliJson(
         LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
       },
     });
-    if (options.stdin !== undefined) {
+    const processId = child.pid;
+    if (processId === undefined) {
+      child.kill("SIGKILL");
+      rejectOutput(new Error("lark-cli process ID is unavailable"));
+      return;
+    }
+    let settled = false;
+    let terminationError: Error | null = null;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    const stdoutChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const requestTermination = (error: Error) => {
+      if (terminationError !== null) return;
+      terminationError = error;
+      signalProcessGroup(processId, "SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        signalProcessGroup(processId, "SIGKILL");
+      }, 250);
+      forceKillTimer.unref();
+    };
+    const deadlineTimer = setTimeout(() => {
+      requestTermination(
+        new Error(
+          `lark-cli exceeded hard deadline of ${input.deadlineMs}ms`,
+        ),
+      );
+    }, input.deadlineMs);
+    deadlineTimer.unref();
+    const abort = () => {
+      requestTermination(
+        new Error("lark-cli invocation was aborted during disposal"),
+      );
+    };
+    input.signal?.addEventListener("abort", abort, { once: true });
+    if (input.signal?.aborted === true) abort();
+    if (input.stdin !== undefined) {
       if (child.stdin === null) {
-        child.kill();
-        rejectOutput(
+        requestTermination(
           new Error("lark-cli stdin pipe was not created"),
         );
         return;
       }
-      child.stdin.end(options.stdin);
+      child.stdin.end(input.stdin);
     }
     if (child.stdout === null || child.stderr === null) {
-      child.kill();
-      rejectOutput(
+      requestTermination(
         new Error("lark-cli output pipes were not created"),
       );
       return;
     }
-    let stdout = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.resume();
-    child.once("error", rejectOutput);
-    child.once("close", (code) => {
-      if (code !== 0) {
-        rejectOutput(
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdoutBytes += chunk.byteLength;
+      if (stdoutBytes > input.stdoutByteCap) {
+        requestTermination(
           new Error(
-            `lark-cli fixed command failed with code ${code}; stderr withheld to avoid credential-bearing diagnostics`,
+            `lark-cli stdout exceeded raw byte cap of ${input.stdoutByteCap}`,
           ),
         );
         return;
       }
-      resolveOutput(stdout);
+      stdoutChunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrBytes += chunk.byteLength;
+      if (stderrBytes > input.stderrByteCap) {
+        requestTermination(
+          new Error(
+            `lark-cli stderr exceeded raw byte cap of ${input.stderrByteCap}`,
+          ),
+        );
+      }
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadlineTimer);
+      if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
+      input.signal?.removeEventListener("abort", abort);
+      rejectOutput(error);
+    });
+    child.once("close", (code) => {
+      void (async () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadlineTimer);
+        if (forceKillTimer !== undefined) clearTimeout(forceKillTimer);
+        input.signal?.removeEventListener("abort", abort);
+        await confirmProcessGroupAbsent(processId);
+        if (terminationError !== null) {
+          rejectOutput(terminationError);
+          return;
+        }
+        if (code !== 0) {
+          rejectOutput(
+            new Error(
+              `lark-cli fixed command failed with code ${code}; stderr withheld to avoid credential-bearing diagnostics`,
+            ),
+          );
+          return;
+        }
+        resolveOutput(Buffer.concat(stdoutChunks, stdoutBytes));
+      })().catch(rejectOutput);
     });
   });
+  return output;
+}
+
+async function spawnLarkCliJsonWithLimits(
+  input: LarkCliSubprocessLimits,
+): Promise<unknown> {
+  const output = await spawnLarkCliBytesWithLimits(input);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(output) as unknown;
+    parsed = JSON.parse(output.toString("utf8")) as unknown;
   } catch {
     throw new Error("lark-cli returned non-JSON output");
   }
@@ -2890,54 +3073,139 @@ async function spawnFrozenLarkCliJson(
   return parsed;
 }
 
-async function frozenLarkCliVersion(binaryPath: string): Promise<string> {
-  return await new Promise<string>((resolveVersion, rejectVersion) => {
-    const child = spawn(binaryPath, ["--version"], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        PATH: "/usr/bin:/bin",
-        HOME: process.env.HOME,
-        TMPDIR: process.env.TMPDIR,
-        LARKSUITE_CLI_NO_UPDATE_NOTIFIER: "1",
-        LARKSUITE_CLI_NO_SKILLS_NOTIFIER: "1",
-      },
-    });
-    let stdout = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.resume();
-    child.once("error", rejectVersion);
-    child.once("close", (code) => {
-      if (code !== 0) {
-        rejectVersion(
-          new Error(`Frozen lark-cli version probe failed with code ${code}`),
-        );
-        return;
-      }
-      resolveVersion(stdout.trim());
-    });
-  });
+export async function runLarkCliSubprocessForTest(options: {
+  readonly executablePath: string;
+  readonly args: readonly string[];
+  readonly deadlineMs: number;
+  readonly stdoutByteCap: number;
+  readonly stderrByteCap: number;
+}): Promise<unknown> {
+  return await spawnLarkCliJsonWithLimits(options);
 }
 
-async function attestFrozenLarkCliExecutable(
-  binaryPath: string,
-): Promise<void> {
-  const [resolvedPath, metadata, bytes] = await Promise.all([
-    realpath(binaryPath),
-    lstat(binaryPath),
-    readFile(binaryPath),
-  ]);
-  if (
-    resolvedPath !== binaryPath ||
-    metadata.isSymbolicLink() ||
-    !metadata.isFile() ||
-    sha256(Uint8Array.from(bytes)) !== FROZEN_LARK_CLI_SHA256
-  ) {
-    throw new Error(
-      "Frozen lark-cli executable path or bytes drifted before egress",
-    );
+interface VerifiedExecutableSnapshot {
+  readonly executablePath: string;
+  readonly contentHash: `sha256:${string}`;
+  attest(): Promise<void>;
+  dispose(): Promise<void>;
+}
+
+async function createVerifiedExecutableSnapshot(options: {
+  readonly sourcePath: string;
+  readonly expectedHash: `sha256:${string}`;
+}): Promise<VerifiedExecutableSnapshot> {
+  const sourcePath = resolve(options.sourcePath);
+  const sourceHandle = await open(sourcePath, "r");
+  let sourceBytes: Buffer;
+  try {
+    const metadata = await sourceHandle.stat();
+    sourceBytes = await sourceHandle.readFile();
+    if (
+      !metadata.isFile() ||
+      sha256(Uint8Array.from(sourceBytes)) !== options.expectedHash
+    ) {
+      throw new Error(
+        "Verified executable source object does not match the expected bytes",
+      );
+    }
+  } finally {
+    await sourceHandle.close();
   }
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-lark-cli-snapshot-"),
+  );
+  const executablePath = join(directory, "lark-cli");
+  try {
+    const snapshotHandle = await open(
+      executablePath,
+      "wx",
+      0o500,
+    );
+    try {
+      await snapshotHandle.writeFile(sourceBytes);
+      await snapshotHandle.sync();
+      const metadata = await snapshotHandle.stat();
+      if (!metadata.isFile()) {
+        throw new Error(
+          "Verified executable snapshot is not a regular file",
+        );
+      }
+    } finally {
+      await snapshotHandle.close();
+    }
+    await chmod(directory, 0o500);
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+  let disposed = false;
+  const attest = async (): Promise<void> => {
+    if (disposed) {
+      throw new Error("Verified executable snapshot is disposed");
+    }
+    const handle = await open(executablePath, "r");
+    try {
+      const metadata = await handle.stat();
+      const bytes = await handle.readFile();
+      if (
+        !metadata.isFile() ||
+        sha256(Uint8Array.from(bytes)) !== options.expectedHash
+      ) {
+        throw new Error(
+          "Verified executable snapshot object drifted before egress",
+        );
+      }
+    } finally {
+      await handle.close();
+    }
+  };
+  return {
+    executablePath,
+    contentHash: options.expectedHash,
+    attest,
+    async dispose() {
+      if (disposed) return;
+      disposed = true;
+      await chmod(directory, 0o700).catch(() => undefined);
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
+}
+
+export async function createLarkCliExecutableSnapshotForTest(options: {
+  readonly sourcePath: string;
+  readonly expectedHash: `sha256:${string}`;
+}): Promise<{
+  run(args: readonly string[]): Promise<unknown>;
+  dispose(): Promise<void>;
+}> {
+  const snapshot = await createVerifiedExecutableSnapshot(options);
+  return {
+    async run(args) {
+      await snapshot.attest();
+      return await spawnLarkCliJsonWithLimits({
+        executablePath: snapshot.executablePath,
+        args,
+        deadlineMs: 2_000,
+        stdoutByteCap: 1024 * 1024,
+        stderrByteCap: 1024 * 1024,
+      });
+    },
+    async dispose() {
+      await snapshot.dispose();
+    },
+  };
+}
+
+async function frozenLarkCliVersion(binaryPath: string): Promise<string> {
+  const output = await spawnLarkCliBytesWithLimits({
+    executablePath: binaryPath,
+    args: ["--version"],
+    deadlineMs: 30_000,
+    stdoutByteCap: 64 * 1024,
+    stderrByteCap: 64 * 1024,
+  });
+  return output.toString("utf8").trim();
 }
 
 export function assertFrozenLarkCliInstallation(input: {
@@ -2967,6 +3235,66 @@ export function assertFrozenLarkCliInstallation(input: {
   }
 }
 
+async function attestLarkCliIdentity(
+  runner: LarkCliJsonRunner,
+  binding: NonNullable<
+    LarkCliProjectionConfiguration["cliIdentityBinding"]
+  >,
+  signal?: AbortSignal,
+): Promise<void> {
+  const identity = await runner(
+    ["whoami"],
+    signal === undefined ? {} : { signal },
+  );
+  const identityRecord =
+    identity !== null && typeof identity === "object"
+      ? (identity as Record<string, unknown>)
+      : {};
+  const onBehalfOf =
+    identityRecord.onBehalfOf !== null &&
+    typeof identityRecord.onBehalfOf === "object"
+      ? (identityRecord.onBehalfOf as Record<string, unknown>)
+      : {};
+  if (
+    identityRecord.available !== true ||
+    identityRecord.identity !== "user" ||
+    identityRecord.profile !== binding.profile ||
+    identityRecord.appId !== binding.appId ||
+    identityRecord.brand !== binding.brand ||
+    identityRecord.defaultAs !== binding.defaultAs ||
+    identityRecord.identitySource !== binding.identitySource ||
+    onBehalfOf.openId !== binding.userOpenId
+  ) {
+    throw new Error(
+      "lark-cli user, app, or profile identity drifted before egress",
+    );
+  }
+  const currentUserEnvelope = await runner(
+    [
+      "contact",
+      "+get-user",
+      "--format",
+      "json",
+      "--as",
+      "user",
+    ],
+    signal === undefined ? {} : { signal },
+  );
+  const currentUser = collectRecords(currentUserEnvelope).find(
+    (record) =>
+      typeof record.open_id === "string" &&
+      typeof record.tenant_key === "string",
+  );
+  if (
+    currentUser?.open_id !== binding.userOpenId ||
+    currentUser.tenant_key !== binding.tenantKey
+  ) {
+    throw new Error(
+      "lark-cli user or tenant identity drifted before egress",
+    );
+  }
+}
+
 class VerifiedLarkCliTransport
   implements LarkBaseProjectionTransportPort
 {
@@ -2980,8 +3308,15 @@ class VerifiedLarkCliTransport
   readonly #runner: LarkCliJsonRunner;
   readonly #executionLease: LarkExecutionLeasePort;
   readonly #attestExecutable: LarkCliExecutableAttestor;
+  readonly #attestIdentity: LarkCliIdentityAttestor;
+  readonly #disposeExecutableSnapshot: () => Promise<void>;
+  readonly #mutexContext =
+    new AsyncLocalStorage<ReadonlySet<string>>();
+  readonly #activeInvocations = new Set<Promise<unknown>>();
+  readonly #invocationControllers = new Set<AbortController>();
   #executionLeaseReleased = false;
   #disposed = false;
+  #disposePromise: Promise<void> | null = null;
 
   constructor(
     binaryPath: string,
@@ -2992,6 +3327,9 @@ class VerifiedLarkCliTransport
     runner?: LarkCliJsonRunner,
     executionLease?: LarkExecutionLeasePort,
     attestExecutable: LarkCliExecutableAttestor = async () => undefined,
+    attestIdentity: LarkCliIdentityAttestor = async () => undefined,
+    disposeExecutableSnapshot: () => Promise<void> =
+      async () => undefined,
   ) {
     this.#binaryPath = binaryPath;
     this.#egressAuthorization = egressAuthorization;
@@ -3007,6 +3345,8 @@ class VerifiedLarkCliTransport
         lockRoot: configuration.lockRootPath,
       });
     this.#attestExecutable = attestExecutable;
+    this.#attestIdentity = attestIdentity;
+    this.#disposeExecutableSnapshot = disposeExecutableSnapshot;
     this.#configuration = Object.freeze({
       ...configuration,
       tables: Object.freeze({ ...configuration.tables }),
@@ -3030,10 +3370,35 @@ class VerifiedLarkCliTransport
     args: readonly string[],
     options: LarkCliInvocationOptions = {},
   ): Promise<unknown> {
+    return await this.#trackInvocation(async (signal) => {
+      await this.#attestExecutable();
+      this.#assertActive();
+      await this.#attestIdentity(signal);
+      this.#assertActive();
+      const result = await invokeLarkCliRunner(
+        this.#runner,
+        args,
+        { ...options, signal },
+      );
+      this.#assertActive();
+      return result;
+    });
+  }
+
+  async #trackInvocation<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
     this.#assertActive();
-    await this.#attestExecutable();
-    this.#assertActive();
-    return await invokeLarkCliRunner(this.#runner, args, options);
+    const controller = new AbortController();
+    this.#invocationControllers.add(controller);
+    const pending = operation(controller.signal);
+    this.#activeInvocations.add(pending);
+    try {
+      return await pending;
+    } finally {
+      this.#activeInvocations.delete(pending);
+      this.#invocationControllers.delete(controller);
+    }
   }
 
   #assertActive(): void {
@@ -3049,8 +3414,20 @@ class VerifiedLarkCliTransport
   }
 
   async dispose(): Promise<void> {
+    if (this.#disposePromise !== null) {
+      await this.#disposePromise;
+      return;
+    }
     this.#disposed = true;
-    await this.#releaseExecutionLease();
+    for (const controller of this.#invocationControllers) {
+      controller.abort();
+    }
+    this.#disposePromise = (async () => {
+      await Promise.allSettled([...this.#activeInvocations]);
+      await this.#releaseExecutionLease();
+      await this.#disposeExecutableSnapshot();
+    })();
+    await this.#disposePromise;
   }
 
   async #withMutex<T>(
@@ -3058,17 +3435,46 @@ class VerifiedLarkCliTransport
     identity: string,
     operation: () => Promise<T>,
   ): Promise<T> {
+    return await this.#withPhysicalResourceMutex(
+      larkOperationMutexScope(kind, identity),
+      kind === "claim",
+      operation,
+    );
+  }
+
+  async #withPhysicalResourceMutex<T>(
+    scope: string,
+    includeReportDocument: boolean,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     this.#assertActive();
+    const requiredResources = [
+      ...larkBaseConcurrencyIdentities(this.#configuration),
+      ...(includeReportDocument
+        ? [larkReportConcurrencyIdentity(this.#configuration)]
+        : []),
+    ].sort();
+    const heldResources =
+      this.#mutexContext.getStore() ?? new Set<string>();
+    const missingResources = requiredResources.filter(
+      (resourceIdentity) => !heldResources.has(resourceIdentity),
+    );
+    if (missingResources.length === 0) {
+      return await operation();
+    }
     const release = await acquireLarkSingleWorkstationMutex(
       this.#configuration,
-      larkOperationMutexScope(kind, identity),
+      scope,
       {
-        includeReportDocument: kind === "claim",
+        resourceIdentities: missingResources,
       },
     );
     try {
       this.#assertActive();
-      return await operation();
+      return await this.#mutexContext.run(
+        new Set([...heldResources, ...missingResources]),
+        operation,
+      );
     } finally {
       await release();
     }
@@ -3077,15 +3483,17 @@ class VerifiedLarkCliTransport
   async withProjectionMutex<T>(
     jobId: string,
     operation: () => Promise<T>,
+    options: {
+      readonly requireReportDocument?: boolean;
+    } = {},
   ): Promise<T> {
     this.#assertActive();
     nonEmpty(jobId, "Lark projection mutex Job ID");
-    const release = await this.acquireProjectionMutex(jobId);
-    try {
-      return await operation();
-    } finally {
-      await release();
-    }
+    return await this.#withPhysicalResourceMutex(
+      larkOperationMutexScope("projection", jobId),
+      options.requireReportDocument === true,
+      operation,
+    );
   }
 
   async acquireProjectionMutex(
@@ -3120,47 +3528,54 @@ class VerifiedLarkCliTransport
     args: readonly string[],
     options: LarkCliInvocationOptions = {},
   ): Promise<unknown> {
-    this.#assertActive();
-    assertApprovedEgressAuthorizationCurrent(
-      parentAuthorization,
-      this.#clock,
-    );
-    const authorization = await requireEgressAuthorization(
-      this.#egressAuthorization,
-      {
-        requestId:
-          `lark-mutation:${operation}:${parentAuthorization.request.jobId}:${payloadHash}`,
-        jobId: parentAuthorization.request.jobId,
-        runId: parentAuthorization.request.runId,
-        attemptId: parentAuthorization.request.attemptId,
-        dataClassification:
-          parentAuthorization.request.dataClassification,
-        sourceOwner: parentAuthorization.request.sourceOwner,
-        processingPurpose: "operational_ledger_projection_storage",
-        targetKind: "storage",
-        targetService: "lark-base-operational-ledger",
-        targetAccount: this.#configuration.targetAccount,
-        targetRegion: this.#configuration.targetRegion,
-        subprocessors: [],
-        contentFields: [`lark_mutation:${operation}`],
-        payloadHash,
-        requiredRedactions: [],
-      },
-      this.#clock,
-    );
-    await this.#egressAudit.append(authorization);
-    await this.#egressAudit.assertRecorded(authorization);
-    await this.#attestExecutable();
-    assertApprovedEgressAuthorizationCurrent(authorization, this.#clock);
-    this.#assertActive();
-    // The runner is invoked synchronously after the final currentness check.
-    // The production runner synchronously spawns the frozen native binary.
-    const pending = invokeLarkCliRunner(
-      this.#runner,
-      args,
-      options,
-    );
-    return await pending;
+    return await this.#trackInvocation(async (signal) => {
+      assertApprovedEgressAuthorizationCurrent(
+        parentAuthorization,
+        this.#clock,
+      );
+      const authorization = await requireEgressAuthorization(
+        this.#egressAuthorization,
+        {
+          requestId:
+            `lark-mutation:${operation}:${parentAuthorization.request.jobId}:${payloadHash}`,
+          jobId: parentAuthorization.request.jobId,
+          runId: parentAuthorization.request.runId,
+          attemptId: parentAuthorization.request.attemptId,
+          dataClassification:
+            parentAuthorization.request.dataClassification,
+          sourceOwner: parentAuthorization.request.sourceOwner,
+          processingPurpose: "operational_ledger_projection_storage",
+          targetKind: "storage",
+          targetService: "lark-base-operational-ledger",
+          targetAccount: this.#configuration.targetAccount,
+          targetRegion: this.#configuration.targetRegion,
+          subprocessors: [],
+          contentFields: [`lark_mutation:${operation}`],
+          payloadHash,
+          requiredRedactions: [],
+        },
+        this.#clock,
+      );
+      await this.#egressAudit.append(authorization);
+      await this.#egressAudit.assertRecorded(authorization);
+      await this.#attestExecutable();
+      this.#assertActive();
+      await this.#attestIdentity(signal);
+      assertApprovedEgressAuthorizationCurrent(
+        authorization,
+        this.#clock,
+      );
+      this.#assertActive();
+      // The final identity/currentness checks are immediately followed by
+      // spawning the immutable verified CLI snapshot.
+      const result = await invokeLarkCliRunner(
+        this.#runner,
+        args,
+        { ...options, signal },
+      );
+      this.#assertActive();
+      return result;
+    });
   }
 
   #baseToken(): string {
@@ -4870,14 +5285,6 @@ export async function createVerifiedLarkCliTransport(options: {
       "lark-cli wrapper does not match the reviewed native installation; wrapper execution is prohibited",
     );
   }
-  const nativeVersionOutput = await frozenLarkCliVersion(binaryPath);
-  assertFrozenLarkCliInstallation({
-    nativeHash,
-    nativeVersionOutput,
-    wrapperIsSymbolicLink: wrapperMetadata.isSymbolicLink(),
-    wrapperTarget,
-    wrapperScriptHash,
-  });
   if (
     options.configuration.concurrencyBoundary !==
     "single_workstation_durable_mutex"
@@ -4913,25 +5320,25 @@ export async function createVerifiedLarkCliTransport(options: {
   })) {
     nonEmpty(value, label);
   }
-  if (options.configuration.cliIdentityBinding !== undefined) {
-    for (const [label, value] of Object.entries(
-      options.configuration.cliIdentityBinding,
-    )) {
-      nonEmpty(value, `cliIdentityBinding.${label}`);
-    }
-    const expectedRegion =
-      options.configuration.cliIdentityBinding.brand === "feishu"
-        ? "cn"
-        : "global";
-    if (
-      options.configuration.targetAccount !==
-        options.configuration.cliIdentityBinding.userOpenId ||
-      options.configuration.targetRegion !== expectedRegion
-    ) {
-      throw new Error(
-        "Lark target account or region does not match the configured CLI identity binding",
-      );
-    }
+  const identityBinding = options.configuration.cliIdentityBinding;
+  if (identityBinding === undefined) {
+    throw new Error(
+      "Verified Lark production requires an explicit CLI identity binding",
+    );
+  }
+  for (const [label, value] of Object.entries(identityBinding)) {
+    nonEmpty(value, `cliIdentityBinding.${label}`);
+  }
+  const expectedRegion =
+    identityBinding.brand === "feishu" ? "cn" : "global";
+  if (
+    options.configuration.targetAccount !==
+      identityBinding.userOpenId ||
+    options.configuration.targetRegion !== expectedRegion
+  ) {
+    throw new Error(
+      "Lark target account or region does not match the configured CLI identity binding",
+    );
   }
   for (const [tableKey, tableId] of Object.entries(
     options.configuration.tables,
@@ -4967,22 +5374,57 @@ export async function createVerifiedLarkCliTransport(options: {
     options.configuration.baseWebUrl,
     reportOrigin.origin,
   );
-  const transport = new VerifiedLarkCliTransport(
-    binaryPath,
-    options.configuration,
-    options.egressAuthorization,
-    options.egressAudit,
-    options.clock ?? SYSTEM_CLOCK,
-    undefined,
-    undefined,
-    async () => await attestFrozenLarkCliExecutable(binaryPath),
-  );
-  VERIFIED_LARK_TRANSPORTS.add(transport);
-  VERIFIED_LARK_DESTINATIONS.set(transport, {
-    targetAccount: options.configuration.targetAccount,
-    targetRegion: options.configuration.targetRegion,
+  const executableSnapshot = await createVerifiedExecutableSnapshot({
+    sourcePath: binaryPath,
+    expectedHash: FROZEN_LARK_CLI_SHA256,
   });
-  return transport;
+  try {
+    const nativeVersionOutput = await frozenLarkCliVersion(
+      executableSnapshot.executablePath,
+    );
+    assertFrozenLarkCliInstallation({
+      nativeHash,
+      nativeVersionOutput,
+      wrapperIsSymbolicLink: wrapperMetadata.isSymbolicLink(),
+      wrapperTarget,
+      wrapperScriptHash,
+    });
+    const productionRunner: LarkCliJsonRunner = async (
+      args,
+      runOptions,
+    ) =>
+      await spawnFrozenLarkCliJson(
+        executableSnapshot.executablePath,
+        args,
+        runOptions,
+      );
+    const transport = new VerifiedLarkCliTransport(
+      executableSnapshot.executablePath,
+      options.configuration,
+      options.egressAuthorization,
+      options.egressAudit,
+      options.clock ?? SYSTEM_CLOCK,
+      productionRunner,
+      undefined,
+      executableSnapshot.attest,
+      async (signal) =>
+        await attestLarkCliIdentity(
+          productionRunner,
+          identityBinding,
+          signal,
+        ),
+      executableSnapshot.dispose,
+    );
+    VERIFIED_LARK_TRANSPORTS.add(transport);
+    VERIFIED_LARK_DESTINATIONS.set(transport, {
+      targetAccount: options.configuration.targetAccount,
+      targetRegion: options.configuration.targetRegion,
+    });
+    return transport;
+  } catch (error) {
+    await executableSnapshot.dispose();
+    throw error;
+  }
 }
 
 /**
@@ -4997,6 +5439,7 @@ export function createLarkCliTransportForMutationBoundaryTest(options: {
   readonly run: LarkCliJsonRunner;
   readonly claimLeaseForTest?: LarkExecutionLeasePort;
   readonly attestExecutableForTest?: LarkCliExecutableAttestor;
+  readonly attestIdentityForTest?: LarkCliIdentityAttestor;
 }): LarkBaseProjectionTransportPort {
   return new VerifiedLarkCliTransport(
     FROZEN_LARK_CLI_BINARY,
@@ -5007,5 +5450,6 @@ export function createLarkCliTransportForMutationBoundaryTest(options: {
     options.run,
     options.claimLeaseForTest,
     options.attestExecutableForTest,
+    options.attestIdentityForTest,
   );
 }

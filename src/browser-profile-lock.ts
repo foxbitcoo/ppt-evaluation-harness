@@ -117,67 +117,95 @@ export class FileSystemBrowserProfileLock
         env: { PATH: "/usr/bin:/bin" },
       },
     );
-    await new Promise<void>((resolveAcquired, rejectAcquired) => {
-      let settled = false;
-      let stdout = "";
-      let stderr = "";
-      const reject = (error: Error) => {
-        if (settled) return;
-        settled = true;
-        rejectAcquired(error);
-      };
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (value: string) => {
-        if (settled) return;
-        stdout += value;
-        if (Buffer.byteLength(stdout, "utf8") > 256) {
-          child.kill("SIGKILL");
-          reject(new Error("Browser profile lock handshake exceeded its bound"));
+    let acquired = false;
+    let releaseRequested = false;
+    let stdout = "";
+    let stderr = "";
+    let resolveAcquired!: () => void;
+    let rejectAcquired!: (error: unknown) => void;
+    const acquiredPromise = new Promise<void>((resolve, reject) => {
+      resolveAcquired = resolve;
+      rejectAcquired = reject;
+    });
+    const closedPromise = new Promise<{
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }>((resolveClosed, rejectClosed) => {
+      child.once("error", (error) => {
+        if (acquired && !releaseRequested) {
+          process.kill(process.pid, "SIGKILL");
           return;
         }
-        if (stdout === handshake) {
-          settled = true;
-          resolveAcquired();
-        }
+        rejectAcquired(error);
+        rejectClosed(error);
       });
-      child.stderr.on("data", (value: string) => {
-        stderr += value;
-        if (Buffer.byteLength(stderr, "utf8") > 4_096) {
-          child.kill("SIGKILL");
-          reject(new Error("Browser profile lock error output exceeded its bound"));
+      child.once("close", (code, signal) => {
+        if (!acquired) {
+          rejectAcquired(
+            new Error(
+              stderr.trim().length === 0
+                ? "Timed out acquiring WPS browser profile lock"
+                : `Timed out acquiring WPS browser profile lock: ${stderr.trim()}`,
+            ),
+          );
+        } else if (!releaseRequested) {
+          // Once a second process can acquire this profile, the original
+          // critical section cannot safely continue. Arbitrary operations
+          // cannot be cancelled in-process, so fail the whole owner closed.
+          process.kill(process.pid, "SIGKILL");
+          return;
         }
-      });
-      child.once("error", (error) => reject(error));
-      child.once("close", () => {
-        reject(
-          new Error(
-            stderr.trim().length === 0
-              ? "Timed out acquiring WPS browser profile lock"
-              : `Timed out acquiring WPS browser profile lock: ${stderr.trim()}`,
-          ),
-        );
+        resolveClosed({ code, signal });
       });
     });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (value: string) => {
+      if (acquired) return;
+      stdout += value;
+      if (
+        Buffer.byteLength(stdout, "utf8") >
+          Buffer.byteLength(handshake, "utf8") ||
+        !handshake.startsWith(stdout)
+      ) {
+        child.kill("SIGKILL");
+        rejectAcquired(
+          new Error("Browser profile lock handshake exceeded its bound"),
+        );
+        return;
+      }
+      if (stdout === handshake) {
+        acquired = true;
+        resolveAcquired();
+      }
+    });
+    child.stderr.on("data", (value: string) => {
+      stderr += value;
+      if (Buffer.byteLength(stderr, "utf8") > 4_096) {
+        child.kill("SIGKILL");
+        rejectAcquired(
+          new Error("Browser profile lock error output exceeded its bound"),
+        );
+      }
+    });
+    try {
+      await acquiredPromise;
+    } catch (error) {
+      child.stdin.destroy();
+      await closedPromise.catch(() => undefined);
+      throw error;
+    }
     try {
       return await operation();
     } finally {
-      const closed = new Promise<void>((resolveClosed, rejectClosed) => {
-        child.once("error", rejectClosed);
-        child.once("close", (code, signal) => {
-          if (code === 0 && signal === null) {
-            resolveClosed();
-            return;
-          }
-          rejectClosed(
-            new Error(
-              `Browser profile lock holder exited unexpectedly: ${code}/${signal}`,
-            ),
-          );
-        });
-      });
+      releaseRequested = true;
       child.stdin.end(releaseCommand);
-      await closed;
+      const { code, signal } = await closedPromise;
+      if (code !== 0 || signal !== null || stderr !== "") {
+        throw new Error(
+          `Browser profile lock holder exited unexpectedly: ${code}/${signal}`,
+        );
+      }
     }
   }
 }

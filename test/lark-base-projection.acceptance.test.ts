@@ -65,6 +65,15 @@ const LARK_TEST_CONFIGURATION = {
   reportDocumentExpectedOrigin: "https://example.feishu.cn",
   targetAccount: "test-account",
   targetRegion: "cn",
+  cliIdentityBinding: {
+    profile: "test-profile",
+    appId: "test-app",
+    brand: "feishu",
+    defaultAs: "auto",
+    identitySource: "auto_detect",
+    userOpenId: "test-account",
+    tenantKey: "test-tenant",
+  },
 } as const;
 
 const allowLarkMutation = {

@@ -10,6 +10,7 @@ import type {
   RenderManifest,
   ScoreDimension,
 } from "./domain.ts";
+import { renderedPageNumbers } from "./artifact-projection-validation.ts";
 
 export const REQUIRED_SCORE_DIMENSIONS = Object.freeze([
   "requirement_understanding_and_content_coverage",
@@ -36,6 +37,13 @@ const NOT_ASSESSABLE_DEDUCTION_BASES = new Set([
   "not_assessable_no_reference_pack",
   "not_assessable_degraded_render",
 ]);
+
+const DEGRADED_RENDER_NOT_ASSESSABLE_DIMENSIONS =
+  new Set<ScoreDimension>([
+    "visual_aesthetics_and_professional_finish",
+    "layout_hierarchy_and_readability",
+    "imagery_chart_and_information_expression",
+  ]);
 
 const SCORE_DIMENSION_FIELDS = new Set([
   "dimension",
@@ -170,8 +178,12 @@ export function assertCompleteScoreDimensions(
 
 function assertScoreDimensionValues(
   scorecard: ArtifactScorecard,
-  artifactPageCount: number,
+  renderManifest: RenderManifest,
 ): void {
+  const availablePages = renderedPageNumbers(renderManifest);
+  const faithfulVisualGate = scorecard.deliveryQualityGates.find(
+    ({ gate }) => gate === "sufficient_faithful_visual_input",
+  );
   for (const dimension of scorecard.dimensions) {
     const dimensionFields = Object.keys(dimension);
     if (
@@ -213,6 +225,29 @@ function assertScoreDimensionValues(
         "Scorecard deduction basis does not match its assessment status field combination",
       );
     }
+    const invalidNoReferencePackOwnership =
+      dimension.assessmentStatus === "NOT_ASSESSABLE" &&
+      dimension.deductionBasis ===
+        "not_assessable_no_reference_pack" &&
+      dimension.dimension !==
+        "factual_accuracy_and_content_quality";
+    const invalidDegradedRenderOwnership =
+      dimension.assessmentStatus === "NOT_ASSESSABLE" &&
+      dimension.deductionBasis ===
+        "not_assessable_degraded_render" &&
+      (!DEGRADED_RENDER_NOT_ASSESSABLE_DIMENSIONS.has(
+        dimension.dimension,
+      ) ||
+        renderManifest.renderOutcome === "faithful" ||
+        faithfulVisualGate?.status === "PASS");
+    if (
+      invalidNoReferencePackOwnership ||
+      invalidDegradedRenderOwnership
+    ) {
+      throw new Error(
+        "Scorecard NOT_ASSESSABLE ownership does not match its Reference Pack or persisted degraded render gate",
+      );
+    }
     if (
       dimension.assessmentStatus === "ASSESSED" &&
       dimension.deductionBasis !==
@@ -238,7 +273,7 @@ function assertScoreDimensionValues(
         (pageNumber) =>
           !Number.isInteger(pageNumber) ||
           pageNumber < 1 ||
-          pageNumber > artifactPageCount,
+          !availablePages.has(pageNumber),
       )
     ) {
       throw new Error(
@@ -286,7 +321,7 @@ export function assertArtifactScoreCompatibility(
   assertCompleteScoreDimensions(record.scorecard.dimensions);
   assertScoreDimensionValues(
     record.scorecard,
-    record.artifact.pageCount,
+    record.renderManifest,
   );
   const expected = expectedComparisonCompatibilityFingerprint(
     record.scorecard,

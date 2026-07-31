@@ -44,9 +44,13 @@ stale-file deletion. If an acquired holder exits before an explicit release,
 the owner process immediately fail-stops; it cannot continue a critical
 section after another worker can acquire the OS lock.
 
-Lock names do not depend on caller labels such as `targetAccount` or on a raw
-URL spelling. The Base resource boundary acquires one deterministic lock for
-each configured Base-token/physical-table-ID pair, in sorted order. Two
+Lock names do not depend on operation scope, Job ID, caller labels such as
+`targetAccount`, or on a raw URL spelling. Claim, whole-projection, and
+stable-record operations therefore contend on the same physical resource
+locks even across different Jobs. The Base resource boundary acquires one
+deterministic lock for each configured Base-token/physical-table-ID pair, in
+sorted order; reentrant calls inside the same critical section reuse the
+already-held physical locks. Two
 configurations with only a partially overlapping table mapping therefore still
 serialize on every shared physical table. Claim and report-bearing projection
 locks also acquire a deterministically ordered Docx resource lock bound to the
@@ -195,14 +199,23 @@ real WPS, Qwen, or Doubao run has not yet been accepted.
   - SHA-256:
     `b6b575a31d62ea45f55155f1090a49d31e79a1b0e5c70af15f9431ab850ca577`
 
-Production spawns the 43 MB native binary directly. It never executes the
+Production first opens and hashes the 43 MB native binary as one file object,
+copies those reviewed bytes into a private read-only executable snapshot, and
+then executes only that snapshot. It never executes the
 `bin/lark-cli` symlink or its download-capable JavaScript wrapper and never
 runs `lark-cli update`. Native hash, exact `--version` output, symlink target,
 and wrapper-script hash must all match the reviewed installation; any drift
-fails closed. Immediately before every read or mutation egress, the native
-path is resolved again, must remain a regular non-symlink file at the reviewed
-canonical path, and its complete bytes are rehashed. A path or byte drift
-prevents that command from executing.
+fails closed. Immediately before every read or mutation egress, one handle to
+the executable snapshot supplies both `fstat` metadata and the complete bytes
+for rehashing; the target process is spawned from that same immutable snapshot.
+Replacing or upgrading the original package path cannot change an in-flight
+transport.
+
+Every Lark CLI subprocess, including identity checks and the version probe, has
+a hard deadline, a 16 MiB stdout raw-byte cap, and a 1 MiB stderr raw-byte cap
+(the version probe uses smaller 64 KiB caps). A deadline, abort, or cap breach
+terminates the whole process group and does not return until that group is
+confirmed absent. Output is bounded before UTF-8 decoding or JSON parsing.
 
 The Artifact renderer runs each fixed LibreOffice or Poppler command under a
 deny-default Seatbelt profile. The profile grants no network operation,
@@ -299,14 +312,19 @@ payload hash, is audited, and is checked for currentness again with no await
 between the final check and runner invocation.
 
 Attachment authorization hashes a cloned immutable byte snapshot; only after
-the final authorization and executable attestation does the transport
+the final authorization, executable attestation, and current CLI
+profile/app/user/tenant revalidation does the transport
 materialize that snapshot in a private read-only invocation directory and
 synchronously spawn the runner. Docx writes use the equally bound stdin path.
-Transport disposal is irreversible: it releases the execution lease once and
-all later reads, mutex acquisition, claims, commits, and other egress fail
-closed.
+Transport disposal is irreversible: it aborts all active process groups,
+waits for every in-flight invocation to reject and disappear, then releases
+the execution lease and removes the executable snapshot. All later reads,
+mutex acquisition, claims, commits, and other egress fail closed; a running
+mutation cannot silently report success after disposal.
 
-Production preflight also binds `whoami` to the configured CLI profile,
+An explicit CLI identity binding is mandatory for a verified production
+transport. Production preflight and every subsequent target egress bind
+`whoami` to the configured CLI profile,
 application ID, Feishu/Lark brand, identity source, and user Open ID. The
 current-user contact read must return that same Open ID and the configured
 tenant key. The projection destination must exactly match that verified user

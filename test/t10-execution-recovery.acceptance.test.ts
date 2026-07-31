@@ -13,6 +13,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { FileSystemBrowserProfileLock } from "../src/browser-profile-lock.ts";
+import { BUILD_IDENTITY } from "../src/build-identity.ts";
 import type { ObservableAttemptEvent } from "../src/domain.ts";
 import {
   FileSystemImmutableBlobStore,
@@ -53,7 +54,7 @@ const WPS_TRUSTED_CHECKPOINT =
   trustedWpsRecoveryCheckpoint(
     "wps-real-provider-20260728-round5-resolution-final",
   );
-const TEST_VERIFIER_BUILD_IDENTITY = Object.freeze({
+const FORGED_VERIFIER_BUILD_IDENTITY = Object.freeze({
   schemaVersion: "ppt-evaluation-build-identity-v1" as const,
   specCommitSha: "9bcaa7708934ad5c67e275bc5863e81efad7bec0",
   source: "EMBEDDED_VERIFIED_BUILD_MANIFEST" as const,
@@ -119,8 +120,6 @@ async function knownWpsRecoveryPayloads() {
     runSpecification,
     checkpoints,
     readArtifactPayload: (key: string) => artifactStore.read(key),
-    trustedCheckpoint: WPS_TRUSTED_CHECKPOINT,
-    verifierBuildIdentity: TEST_VERIFIER_BUILD_IDENTITY,
   };
 }
 
@@ -203,6 +202,40 @@ test(
         },
       }),
       /Render manifest.*JSON|Render manifest.*checkpoint/i,
+    );
+  },
+);
+
+test(
+  "WPS public recovery ignores caller-supplied trust anchors and verifier identities",
+  { skip: !WPS_RECOVERY_AVAILABLE },
+  async () => {
+    const payloads = await knownWpsRecoveryPayloads();
+    const forgedRegistryHash =
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const;
+    const forgedTrustPayloads = {
+      ...payloads,
+      registryHash: forgedRegistryHash,
+      trustedCheckpoint: {
+        ...WPS_TRUSTED_CHECKPOINT,
+        registryHash: forgedRegistryHash,
+      },
+    };
+    await assert.rejects(
+      validateWpsProductionRecoveryPayloads(forgedTrustPayloads),
+      /root registry.*trusted checkpoint/i,
+    );
+
+    const forgedIdentityPayloads = {
+      ...payloads,
+      verifierBuildIdentity: FORGED_VERIFIER_BUILD_IDENTITY,
+    };
+    const result = await validateWpsProductionRecoveryPayloads(
+      forgedIdentityPayloads,
+    );
+    assert.deepEqual(
+      result.verifierBuildIdentity,
+      BUILD_IDENTITY,
     );
   },
 );

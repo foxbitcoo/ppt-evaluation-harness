@@ -1,4 +1,3 @@
-import { BUILD_IDENTITY } from "../src/build-identity.ts";
 import {
   loadDurableRootRegistry,
   resolveDurableRoot,
@@ -13,9 +12,6 @@ import {
   validateWpsProductionRecoveryPayloads,
   type WpsProductionRecoveryCommand,
 } from "../src/wps-production-recovery.ts";
-import {
-  trustedWpsRecoveryCheckpoint,
-} from "../src/wps-recovery-checkpoints.ts";
 
 const values = process.argv.slice(2);
 if (values.length !== 11 || values.some((value) => value.length === 0)) {
@@ -63,7 +59,6 @@ const command: WpsProductionRecoveryCommand = Object.freeze({
   checkpointStoreId,
   attemptId,
 });
-const trustedCheckpoint = trustedWpsRecoveryCheckpoint(registryId);
 const registry = await loadDurableRootRegistry(registryId);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
@@ -108,8 +103,6 @@ const result = await validateWpsProductionRecoveryPayloads({
   runSpecification,
   checkpoints,
   readArtifactPayload: (key) => artifactStore.read(key),
-  trustedCheckpoint,
-  verifierBuildIdentity: BUILD_IDENTITY,
 });
 
 process.stdout.write(`${JSON.stringify(result)}\n`);

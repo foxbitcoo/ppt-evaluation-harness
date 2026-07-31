@@ -1247,13 +1247,18 @@ function createWpsAiPptProductAdapterExecutor(
           eventType === "task_reconciliation_result",
       );
       const alreadyReconciled = latestReconciliation !== undefined;
-      const latestTaskCheckpoint = [...persistedEvents].reverse().find(
-        (event) =>
-          event.vendorTaskId !== null &&
-          event.vendorTaskId !== undefined &&
-          event.taskStateVersion !== null &&
-          event.taskStateVersion !== undefined,
-      );
+      const recoveredSubmissionState =
+        attemptSubmissionState(persistedEvents);
+      const latestTaskCheckpoint =
+        recoveredSubmissionState === "not_submitted"
+          ? undefined
+          : [...persistedEvents].reverse().find(
+              (event) =>
+                event.vendorTaskId !== null &&
+                event.vendorTaskId !== undefined &&
+                event.taskStateVersion !== null &&
+                event.taskStateVersion !== undefined,
+            );
       if (latestTaskCheckpoint !== undefined && !alreadyReconciled) {
         const reconciliation =
           await reconcileRegisteredWpsAiPptTask(browserDriver, {

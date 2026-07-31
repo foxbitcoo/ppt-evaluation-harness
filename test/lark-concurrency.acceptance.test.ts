@@ -17,9 +17,11 @@ import test from "node:test";
 
 import {
   acquireLarkSingleWorkstationMutexForTest,
+  createLarkCliExecutableSnapshotForTest,
   createLarkExecutionLeaseForTest,
   createLarkCliTransportForMutationBoundaryTest,
   createVerifiedLarkCliTransport,
+  runLarkCliSubprocessForTest,
   type LarkCliProjectionConfiguration,
 } from "../src/lark-base-projection.ts";
 import {
@@ -58,6 +60,15 @@ const LARK_TEST_CONFIGURATION = {
   reportDocumentExpectedOrigin: "https://example.feishu.cn",
   targetAccount: "test-account",
   targetRegion: "cn",
+  cliIdentityBinding: {
+    profile: "test-profile",
+    appId: "test-app",
+    brand: "feishu",
+    defaultAs: "auto",
+    identitySource: "auto_detect",
+    userOpenId: "test-account",
+    tenantKey: "test-tenant",
+  },
 } as const satisfies LarkCliProjectionConfiguration;
 
 const allowLarkMutation = {
@@ -130,6 +141,47 @@ test("the single-workstation advisory mutex is released after its owner crashes"
       child.kill("SIGKILL");
     } catch {
       // The expected crash path already terminated it.
+    }
+    await rm(lockRoot, { recursive: true, force: true });
+  }
+});
+
+test("one physical Lark resource serializes claim, projection, and stable-record scopes across Jobs", async () => {
+  const lockRoot = await mkdtemp(
+    join(tmpdir(), "ppt-lark-cross-scope-mutex-test-"),
+  );
+  const firstRelease =
+    await acquireLarkSingleWorkstationMutexForTest({
+      lockRoot,
+      scope: "claim:job-a",
+      waitTimeoutMs: 3_000,
+    });
+  let secondAcquired = false;
+  const secondAcquisition =
+    acquireLarkSingleWorkstationMutexForTest({
+      lockRoot,
+      scope: "projection:job-b",
+      waitTimeoutMs: 3_000,
+    }).then((release) => {
+      secondAcquired = true;
+      return release;
+    });
+  try {
+    await new Promise<void>((resolveWait) => {
+      setTimeout(resolveWait, 150);
+    });
+    assert.equal(
+      secondAcquired,
+      false,
+      "operation and Job labels must not split one physical resource lock",
+    );
+    await firstRelease();
+    const secondRelease = await secondAcquisition;
+    await secondRelease();
+  } finally {
+    await firstRelease();
+    if (secondAcquired) {
+      await (await secondAcquisition)();
     }
     await rm(lockRoot, { recursive: true, force: true });
   }
@@ -812,6 +864,79 @@ test("disposing a transport is terminal for every later read and write", async (
   assert.equal(runnerCalls, 0);
 });
 
+test("dispose aborts and waits for an in-flight Lark child before releasing its lease", async (context) => {
+  const tokenVariable =
+    LARK_TEST_CONFIGURATION.baseTokenEnvironmentVariable;
+  const previousToken = process.env[tokenVariable];
+  process.env[tokenVariable] = "basDisposeInflight";
+  context.after(() => {
+    if (previousToken === undefined) {
+      delete process.env[tokenVariable];
+    } else {
+      process.env[tokenVariable] = previousToken;
+    }
+  });
+  let signalStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolveStarted) => {
+    signalStarted = resolveStarted;
+  });
+  let childStopped = false;
+  let leaseReleasedAfterChild = false;
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: LARK_TEST_CONFIGURATION,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock: {
+        clockId: "dispose-inflight-clock",
+        now: () => FIXED_TIME,
+      },
+      claimLeaseForTest: {
+        leaseId: "dispose-inflight-lease",
+        processId: 7002,
+        processStartIdentity: "dispose-inflight-process",
+        async isActive() {
+          return true;
+        },
+        async release() {
+          leaseReleasedAfterChild = childStopped;
+        },
+      },
+      async run(_args, options) {
+        signalStarted?.();
+        return await new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener(
+            "abort",
+            () => {
+              setTimeout(() => {
+                childStopped = true;
+                reject(new Error("test child aborted"));
+              }, 25);
+            },
+            { once: true },
+          );
+        });
+      },
+    });
+  const payload = '{"caseId":"dispose-inflight"}';
+  const operation = transport.verifyRecord({
+    tableKey: "cases",
+    stableId: "case:dispose-inflight",
+    payload,
+    payloadHash: sha256Bytes(new TextEncoder().encode(payload)),
+  });
+  await started;
+  const disposing = transport.dispose!();
+  await assert.rejects(operation, /aborted|disposed/i);
+  await disposing;
+  assert.equal(childStopped, true);
+  assert.equal(
+    leaseReleasedAfterChild,
+    true,
+    "the execution lease must remain held until every child is absent",
+  );
+});
+
 test("every Lark egress re-attests the frozen executable before invocation", async (context) => {
   const baseTokenVariable = "PPT_EVAL_CLI_REATTEST_BASE";
   const previousBaseToken = process.env[baseTokenVariable];
@@ -911,6 +1036,142 @@ test("every Lark egress re-attests the frozen executable before invocation", asy
     mutationRunnerCalls,
     0,
     "no mutation may execute after path or byte drift",
+  );
+});
+
+test("identity drift between Lark egresses fail-stops before the next CLI command", async (context) => {
+  const tokenVariable =
+    LARK_TEST_CONFIGURATION.baseTokenEnvironmentVariable;
+  const previousToken = process.env[tokenVariable];
+  process.env[tokenVariable] = "basIdentityDrift";
+  context.after(() => {
+    if (previousToken === undefined) {
+      delete process.env[tokenVariable];
+    } else {
+      process.env[tokenVariable] = previousToken;
+    }
+  });
+  let identityMatchesBinding = true;
+  let runnerCalls = 0;
+  const payload = '{"caseId":"identity-drift"}';
+  const payloadHash = sha256Bytes(new TextEncoder().encode(payload));
+  const transport =
+    createLarkCliTransportForMutationBoundaryTest({
+      configuration: LARK_TEST_CONFIGURATION,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+      clock: {
+        clockId: "identity-drift-clock",
+        now: () => FIXED_TIME,
+      },
+      async attestIdentityForTest() {
+        if (!identityMatchesBinding) {
+          throw new Error(
+            "lark-cli user, tenant, or profile identity drifted",
+          );
+        }
+      },
+      async run() {
+        runnerCalls += 1;
+        return {
+          ok: true,
+          data: {
+            data: [[
+              "case:identity-drift",
+              payload,
+              payloadHash,
+            ]],
+            field_id_list: ["fldStable", "fldPayload", "fldHash"],
+            fields: ["稳定ID", "载荷", "载荷哈希"],
+            has_more: false,
+            record_id_list: ["recIdentityDrift"],
+          },
+        };
+      },
+    });
+
+  await transport.verifyRecord({
+    tableKey: "cases",
+    stableId: "case:identity-drift",
+    payload,
+    payloadHash,
+  });
+  identityMatchesBinding = false;
+  await assert.rejects(
+    transport.verifyRecord({
+      tableKey: "cases",
+      stableId: "case:identity-drift",
+      payload,
+      payloadHash,
+    }),
+    /identity drifted/i,
+  );
+  assert.equal(
+    runnerCalls,
+    1,
+    "the drifted identity must be rejected before the next target egress",
+  );
+});
+
+test("the verified CLI executes an immutable snapshot after the source path is replaced", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "ppt-lark-cli-snapshot-test-"),
+  );
+  const sourcePath = join(directory, "lark-cli-test");
+  const original =
+    '#!/bin/sh\nprintf \'{"ok":true,"value":"original"}\'\n';
+  const replacement =
+    '#!/bin/sh\nprintf \'{"ok":true,"value":"replacement"}\'\n';
+  await writeFile(sourcePath, original, { mode: 0o700 });
+  const snapshot = await createLarkCliExecutableSnapshotForTest({
+    sourcePath,
+    expectedHash: sha256Bytes(new TextEncoder().encode(original)),
+  });
+  try {
+    await writeFile(sourcePath, replacement, { mode: 0o700 });
+    assert.deepEqual(await snapshot.run([]), {
+      ok: true,
+      value: "original",
+    });
+  } finally {
+    await snapshot.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the Lark CLI supervisor enforces a hard deadline and raw output byte caps", async () => {
+  await assert.rejects(
+    runLarkCliSubprocessForTest({
+      executablePath: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1_000)"],
+      deadlineMs: 75,
+      stdoutByteCap: 1_024,
+      stderrByteCap: 1_024,
+    }),
+    /deadline/i,
+  );
+  await assert.rejects(
+    runLarkCliSubprocessForTest({
+      executablePath: process.execPath,
+      args: [
+        "-e",
+        'process.stdout.write(JSON.stringify({ok:true,value:"€".repeat(100)}))',
+      ],
+      deadlineMs: 2_000,
+      stdoutByteCap: 100,
+      stderrByteCap: 1_024,
+    }),
+    /stdout.*byte cap/i,
+  );
+  await assert.rejects(
+    runLarkCliSubprocessForTest({
+      executablePath: process.execPath,
+      args: ["-e", 'process.stderr.write("x".repeat(200))'],
+      deadlineMs: 2_000,
+      stdoutByteCap: 1_024,
+      stderrByteCap: 100,
+    }),
+    /stderr.*byte cap/i,
   );
 });
 
@@ -1190,6 +1451,22 @@ test("verified Lark production rejects a configuration without one fixed machine
       egressAudit: new InMemoryEgressAuthorizationAudit(),
     }),
     /fixed machine lock root/i,
+  );
+});
+
+test("verified Lark production requires an explicit CLI identity binding", async () => {
+  const {
+    cliIdentityBinding: _cliIdentityBinding,
+    ...configurationWithoutIdentity
+  } = LARK_TEST_CONFIGURATION;
+  await assert.rejects(
+    createVerifiedLarkCliTransport({
+      configuration:
+        configurationWithoutIdentity as unknown as LarkCliProjectionConfiguration,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+    }),
+    /requires an explicit CLI identity binding/i,
   );
 });
 
