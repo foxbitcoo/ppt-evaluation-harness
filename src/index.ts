@@ -24,6 +24,8 @@ export {
   assertHarnessOwnedDurableEgressAuthorizationAudit,
   assertHarnessOwnedDurableJudgeEgressAudit,
   assertHarnessOwnedDurableReferencePackStore,
+  createHarnessOwnedProductionOperationalDurability,
+  type HarnessOwnedProductionOperationalDurability,
 } from "./file-system-operational-durability.ts";
 export {
   FileSystemBrowserProfileLock,

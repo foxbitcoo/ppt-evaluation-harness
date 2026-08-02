@@ -1185,6 +1185,8 @@ test("two independent Lark projections merge different auxiliary pairs after a d
     readonly title: string;
     readonly markdown: string;
     readonly payloadHash: `sha256:${string}`;
+    readonly comparisonIds: readonly string[];
+    readonly gapCardIds: readonly string[];
   }[] = [];
   let reportRevision = 0;
   let durableStateReadCount = 0;
@@ -1192,6 +1194,7 @@ test("two independent Lark projections merge different auxiliary pairs after a d
   let committedBatchCount = 0;
   let corruptDurableEnvironmentOrigin = false;
   let corruptDurableGapEnvironmentOrigin = false;
+  let failNextCommitAfterWrites = false;
   let exclusiveTail = Promise.resolve();
   let pauseNextMaterialization = false;
   let resolvePaused!: () => void;
@@ -1230,14 +1233,27 @@ test("two independent Lark projections merge different auxiliary pairs after a d
       return {
         marker: null,
         bakeoffJob: null,
+        adjudicationEventTable: [],
+        reviewEventTable: [],
         productGapCardTable: [],
         reportCollection: [],
       };
     }
-    const payloads = [...records.entries()].map(([key, value]) => ({
-      key,
-      value: JSON.parse(value.payload) as Record<string, unknown>,
-    }));
+    const committedMarker = marker;
+    const boundRecordKeys = new Set(
+      committedMarker.recordBindings.map(
+        ({ tableKey, stableId }) => `${tableKey}:${stableId}`,
+      ),
+    );
+    const payloads = [...records.entries()]
+      .filter(([key]) =>
+        committedMarker.recordBindings.length === 0 ||
+        boundRecordKeys.has(key),
+      )
+      .map(([key, value]) => ({
+        key,
+        value: JSON.parse(value.payload) as Record<string, unknown>,
+      }));
     const bakeoffJob = payloads.find(
       ({ key, value }) =>
         key.startsWith("runs:") &&
@@ -1264,11 +1280,17 @@ test("two independent Lark projections merge different auxiliary pairs after a d
           : record,
       ) as unknown as FeishuProjectionSnapshot["productGapCardTable"];
     }
+    const markerReportIds = new Set(
+      marker.reportUrls.map(({ reportId }) => reportId),
+    );
+    const committedReportCollection = reportCollection.filter(({ reportId }) =>
+      markerReportIds.has(reportId),
+    );
     const exactCollectionHash = sha256Bytes(
-      canonicalJsonBytes(reportCollection),
+      canonicalJsonBytes(committedReportCollection),
     );
     assert.equal(marker.reportCollectionHash, exactCollectionHash);
-    assert.equal(marker.reportDocumentRevision, reportRevision);
+    assert.ok(marker.reportDocumentRevision! <= reportRevision);
     const url = marker.reportUrls[0]?.url;
     assert.ok(url);
     const durableBakeoffJob = structuredClone(bakeoffJob);
@@ -1281,8 +1303,24 @@ test("two independent Lark projections merge different auxiliary pairs after a d
     return {
       marker: structuredClone(marker),
       bakeoffJob: durableBakeoffJob as unknown as FeishuProjectionSnapshot["runRecordTable"][number],
+      adjudicationEventTable: payloads
+        .filter(
+          ({ key, value }) =>
+            key.startsWith("workflow_events:") &&
+            value.recordType === "adjudication_event" &&
+            value.jobId === jobId,
+        )
+        .map(({ value }) => value) as unknown as FeishuProjectionSnapshot["adjudicationEventTable"],
+      reviewEventTable: payloads
+        .filter(
+          ({ key, value }) =>
+            key.startsWith("workflow_events:") &&
+            value.recordType === "review_event" &&
+            value.jobId === jobId,
+        )
+        .map(({ value }) => value) as unknown as FeishuProjectionSnapshot["reviewEventTable"],
       productGapCardTable,
-      reportCollection: reportCollection.map((report) => ({
+      reportCollection: committedReportCollection.map((report) => ({
         ...report,
         url,
       })),
@@ -1334,6 +1372,10 @@ test("two independent Lark projections merge different auxiliary pairs after a d
     assert.equal(command.expectedRevisionId, reportRevision);
   };
   transport.commitBatch = async (command) => {
+    if (failNextCommitAfterWrites) {
+      failNextCommitAfterWrites = false;
+      throw new Error("simulated generation marker failure");
+    }
     if (
       command.previousBatchHash !== (marker?.batchHash ?? null) ||
       command.revision !== (marker?.revision ?? 0) + 1
@@ -1380,6 +1422,18 @@ test("two independent Lark projections merge different auxiliary pairs after a d
       pairs: dynamicPair,
     });
     await paused;
+    await createScoreAdjudicationService({
+      feishu: firstProjection,
+    }).adjudicateDimension({
+      adjudicationEventId: "adj-concurrent-durable-refresh",
+      scorecardId: "MOCK-scorecard-wps-volcano-v1",
+      dimension: "visual_aesthetics_and_professional_finish",
+      humanFinalScore: 1,
+      actorId: "pm-concurrent",
+      occurredAt: "2026-08-02T00:00:00.000Z",
+      reason: "并发报告必须恢复已经提交的人工裁决。",
+      priorAdjudicationEventId: null,
+    });
     const first = await createComparisonReportService({
       feishu: firstProjection,
       egressAuthorization: allowLarkMutation,
@@ -1469,6 +1523,93 @@ test("two independent Lark projections merge different auxiliary pairs after a d
       /Comparison or Gap Card environment conflicts/i,
     );
     assert.equal(committedBatchCount, 2);
+
+    corruptDurableGapEnvironmentOrigin = false;
+    const adjudication = createScoreAdjudicationService({
+      feishu: secondProjection,
+    });
+    let priorAdjudicationEventId =
+      "adj-concurrent-durable-refresh";
+    for (let index = 1; index <= 6; index += 1) {
+      const adjudicationEventId = `adj-history-${index}`;
+      await adjudication.adjudicateDimension({
+        adjudicationEventId,
+        scorecardId: "MOCK-scorecard-wps-volcano-v1",
+        dimension: "visual_aesthetics_and_professional_finish",
+        humanFinalScore: index % 2 === 0 ? 1 : 5,
+        actorId: "pm-history",
+        occurredAt: `2026-08-02T00:0${index}:00.000Z`,
+        reason: `保留第 ${index} 次合法裁决后的历史报告。`,
+        priorAdjudicationEventId,
+      });
+      priorAdjudicationEventId = adjudicationEventId;
+      await createComparisonReportService({
+        feishu: secondProjection,
+        egressAuthorization: allowLarkMutation,
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }).createReport({
+        jobId: "MOCK-job-volcano-v1",
+        pairs: firstPair,
+      });
+    }
+    assert.ok(
+      secondProjection.snapshot().productGapCardTable.filter(
+        ({ recordType }) => recordType === "comparison",
+      ).length > 6,
+    );
+    await createComparisonReportService({
+      feishu: secondProjection,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+    }).createReport({
+      jobId: "MOCK-job-volcano-v1",
+      pairs: firstPair,
+    });
+    await adjudication.adjudicateDimension({
+      adjudicationEventId: "adj-generation-recovery",
+      scorecardId: "MOCK-scorecard-wps-volcano-v1",
+      dimension: "visual_aesthetics_and_professional_finish",
+      humanFinalScore: 3,
+      actorId: "pm-generation",
+      occurredAt: "2026-08-02T00:07:00.000Z",
+      reason: "marker 失败后必须从上一代快照恢复并重试。",
+      priorAdjudicationEventId,
+    });
+    const committedBeforeFailure = committedBatchCount;
+    failNextCommitAfterWrites = true;
+    await assert.rejects(
+      createComparisonReportService({
+        feishu: secondProjection,
+        egressAuthorization: allowLarkMutation,
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }).createReport({
+        jobId: "MOCK-job-volcano-v1",
+        pairs: firstPair,
+      }),
+      /simulated generation marker failure/i,
+    );
+    assert.equal(committedBatchCount, committedBeforeFailure);
+    const recoveredAfterMarkerFailure =
+      await createComparisonReportService({
+        feishu: secondProjection,
+        egressAuthorization: allowLarkMutation,
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }).createReport({
+        jobId: "MOCK-job-volcano-v1",
+        pairs: firstPair,
+      });
+    assert.equal(
+      committedBatchCount,
+      committedBeforeFailure + 1,
+    );
+    assert.equal(
+      recoveredAfterMarkerFailure.comparisons[0]?.dimensions.find(
+        ({ dimension }) =>
+          dimension ===
+          "visual_aesthetics_and_professional_finish",
+      )?.leftAdjudicationEventId,
+      "adj-generation-recovery",
+    );
   } finally {
     await transport.dispose?.();
   }

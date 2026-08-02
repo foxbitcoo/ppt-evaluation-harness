@@ -102,6 +102,79 @@ test("a comparison report keeps replay provenance visible and disclaims LIVE acc
   assert.doesNotMatch(report.markdown, /当前真实运行/);
 });
 
+test("the concise report shows total and available stage timing in minutes while keeping unavailable stages UNKNOWN", async () => {
+  const { feishu } = await seededThreeVendorProjection();
+  const snapshot = feishu.snapshot();
+  const job = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  const vendorRun = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "vendor_run",
+  );
+  const event = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "evaluation_attempt",
+  )?.observableEvents?.[0];
+  assert.ok(job);
+  assert.ok(vendorRun);
+  assert.ok(event);
+
+  const eventAt = (eventType: string, seconds: number) => ({
+    ...event,
+    eventId: `timing-${eventType}`,
+    eventType,
+    sourceAt: new Date(
+      Date.parse("2026-08-02T00:00:00.000Z") + seconds * 1_000,
+    ).toISOString(),
+    observedAt: new Date(
+      Date.parse("2026-08-02T00:00:00.000Z") + seconds * 1_000,
+    ).toISOString(),
+  });
+
+  const report = buildCanonicalComparisonReportDraft({
+    resolveEvidenceUrl: () => "mock-feishu://evidence",
+    job,
+    vendorRuns: [
+      {
+        ...vendorRun,
+        elapsedMs: 210_000,
+        vendorGenerationMs: 90_000,
+        observableEvents: [
+          eventAt("preflight_observed", 0),
+          eventAt("query_submitted", 30),
+          eventAt("generation_ready", 90),
+          eventAt("artifact_exported", 120),
+          eventAt("static_render_completed", 180),
+        ],
+      },
+      {
+        ...vendorRun,
+        recordId: `${vendorRun.recordId}-unknown-timing`,
+        elapsedMs: null,
+        vendorGenerationMs: null,
+        observableEvents: null,
+      },
+    ],
+    capturedArtifacts: [],
+    comparisons: [],
+    gapCards: [],
+    vendorSummaries: [],
+    scores: [],
+  });
+
+  assert.match(
+    report.markdown,
+    /总计 3\.50 分钟；队列 0\.50 分钟；生成 1\.00 分钟；导出 0\.50 分钟；捕获 1\.00 分钟/,
+  );
+  assert.match(
+    report.markdown,
+    /总计 UNKNOWN；队列 UNKNOWN；生成 UNKNOWN；导出 UNKNOWN；捕获 UNKNOWN/,
+  );
+  assert.ok(
+    report.markdown.length < 5_000,
+    "timing should remain one concise delivery field",
+  );
+});
+
 async function projectionBeforeScores(): Promise<{
   readonly feishu: InMemoryFeishuProjection;
   readonly score: ArtifactScoreTableRecord;

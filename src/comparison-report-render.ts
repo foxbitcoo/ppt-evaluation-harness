@@ -14,6 +14,10 @@ import type {
   VendorComparisonSummary,
   VendorFinding,
 } from "./domain.ts";
+import {
+  conciseTimingMarkdown,
+  timingFromRun,
+} from "./report-timing.ts";
 
 export type EffectiveArtifactScoreTableRecord =
   ArtifactScoreTableRecord & {
@@ -361,7 +365,7 @@ ${comparison.dimensions
         run.status
       }\` | \`${
         run.terminalReason ?? run.waitingReason ?? "—"
-      }\` | ${artifact?.artifactId ?? "无"} | ${judgeStatus} |`;
+      }\` | ${conciseTimingMarkdown(timingFromRun(run))} | ${artifact?.artifactId ?? "无"} | ${judgeStatus} |`;
     })
     .join("\n");
   const gapCardSections =
@@ -435,8 +439,8 @@ ${executionNotice}
 - Bakeoff Job 状态：\`${job.status}\`
 - 执行血缘：\`${executionProvenance}\`
 
-| 产品 | Run | 状态 | 状态原因 | Artifact | Judge / 视觉评估 |
-|---|---|---|---|---|---|
+| 产品 | Run | 状态 | 状态原因 | 耗时（分钟） | Artifact | Judge / 视觉评估 |
+|---|---|---|---|---|---|---|
 ${deliveryRows}
 
 ${comparisonSections}

@@ -13,6 +13,10 @@ import type {
 import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import type { EnvironmentOrigin } from "./environment-origin.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
+import {
+  conciseTimingMarkdown,
+  type ConciseReportTiming,
+} from "./report-timing.ts";
 
 export interface MockReportVendorResult {
   readonly product: string;
@@ -23,6 +27,7 @@ export interface MockReportVendorResult {
   readonly scorecard: ArtifactScorecard | null;
   readonly judgeFailure: JudgeFailureLineage | null;
   readonly renderManifest?: RenderManifest | null;
+  readonly timing?: ConciseReportTiming;
 }
 
 const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
@@ -65,13 +70,16 @@ export function createMockReportDraft(
         scorecard,
         judgeFailure,
         renderManifest,
+        timing,
       }) => {
+        const timingLine = `- 耗时（分钟）：${conciseTimingMarkdown(timing)}`;
         if (artifact === null) {
           return `## ${product}
 
 - Run：\`${runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
+${timingLine}
 - Artifact：无`;
         }
         if (scorecard === null) {
@@ -84,6 +92,7 @@ export function createMockReportDraft(
 - Run：\`${runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
+${timingLine}
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
@@ -105,6 +114,7 @@ ${
 - Run：\`${scorecard.runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
+${timingLine}
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
@@ -117,7 +127,13 @@ ${scoreRows}`;
     .join("\n\n");
   const executionProvenance =
     lineage.executionProvenance ??
-    (lineage.provenance === "MOCK" ? "MOCK" : "LIVE_PRODUCTION");
+    (lineage.provenance === "MOCK"
+      ? "MOCK"
+      : (() => {
+          throw new Error(
+            "Production delivery report requires explicit LIVE_PRODUCTION or PRODUCTION_REPLAY execution provenance",
+          );
+        })());
   const reportPrefix =
     executionProvenance === "MOCK"
       ? "MOCK｜"

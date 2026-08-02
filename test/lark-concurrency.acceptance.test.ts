@@ -797,6 +797,7 @@ test("a durably committed marker releases its execution lease", async (context) 
     reportDocumentRevision: null,
     pageEvidenceUrls: [],
     attachments: [],
+    recordBindings: [],
     committedAt: FIXED_TIME,
     previousBatchHash: null,
     revision: 1,
@@ -1838,6 +1839,8 @@ test("Docx authorization binds the immutable Markdown read by the runner", async
     markdown: "# Docx Snapshot\n\nAuthorized report body.",
     payloadHash:
       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
+    comparisonIds: [],
+    gapCardIds: [],
   }];
   const collectionHash = sha256Bytes(canonicalJsonBytes(reports));
   const parentAuthorization = await requireEgressAuthorization(
@@ -3640,6 +3643,8 @@ test("a late rev1 marker cannot overwrite a concurrent rev2 Docx projection", as
     markdown: "# Report A\n\nAlpha.",
     payloadHash:
       "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" as const,
+    comparisonIds: [],
+    gapCardIds: [],
   }];
   const reportsB = [{
     reportId: "report-b",
@@ -3647,6 +3652,8 @@ test("a late rev1 marker cannot overwrite a concurrent rev2 Docx projection", as
     markdown: "# Report B\n\nBeta.",
     payloadHash:
       "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const,
+    comparisonIds: [],
+    gapCardIds: [],
   }];
   const hashA = sha256Bytes(canonicalJsonBytes(reportsA));
   const hashB = sha256Bytes(canonicalJsonBytes(reportsB));
@@ -3660,6 +3667,7 @@ test("a late rev1 marker cannot overwrite a concurrent rev2 Docx projection", as
     attachmentCount: 0,
     pageEvidenceUrls: [],
     attachments: [],
+    recordBindings: [],
     committedAt: FIXED_TIME,
   };
   const first = transportA.withProjectionMutex!(

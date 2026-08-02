@@ -18,11 +18,15 @@ import {
   assertHarnessOwnedDurableEgressAuthorizationAudit,
   assertHarnessOwnedDurableJudgeEgressAudit,
   assertHarnessOwnedDurableReferencePackStore,
-  createHarnessOwnedFileSystemEgressAuthorizationAudit,
-  createHarnessOwnedFileSystemJudgeEgressAudit,
-  createHarnessOwnedFileSystemReferencePackStore,
+  createHarnessOwnedProductionOperationalDurability,
 } from "../src/file-system-operational-durability.ts";
 import type { ApprovedEgressAuthorization } from "../src/egress-authorization.ts";
+
+type OperationalDurabilityModule = typeof import(
+  "../src/file-system-operational-durability.ts"
+);
+// @ts-expect-error Per-object production ownership registration is private.
+type ForbiddenOperationalOwnershipFactory = OperationalDurabilityModule["createHarnessOwnedFileSystemEgressAuthorizationAudit"];
 
 function decision(): ApprovedEgressAuthorization {
   return {
@@ -54,9 +58,50 @@ function decision(): ApprovedEgressAuthorization {
   };
 }
 
+test("deep imports cannot mint operational production ownership", async () => {
+  const implementationModule = await import(
+    "../src/file-system-operational-durability.ts"
+  );
+
+  for (const forbiddenExport of [
+    "createHarnessOwnedFileSystemEgressAuthorizationAudit",
+    "createHarnessOwnedFileSystemJudgeEgressAudit",
+    "createHarnessOwnedFileSystemReferencePackStore",
+  ]) {
+    assert.equal(forbiddenExport in implementationModule, false);
+  }
+
+  const forbiddenPackageSubpath = [
+    "ppt-evaluation-harness",
+    "file-system-operational-durability",
+  ].join("/");
+  await assert.rejects(
+    import(forbiddenPackageSubpath),
+    (error: unknown) => {
+      assert.equal(
+        (error as NodeJS.ErrnoException).code,
+        "ERR_PACKAGE_PATH_NOT_EXPORTED",
+      );
+      return true;
+    },
+  );
+});
+
 test("public operational durability constructors cannot mint production ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "operational-ownership-"));
   try {
+    const harnessOwned = createHarnessOwnedProductionOperationalDurability({
+      rootPath: join(root, "harness-owned"),
+    });
+    assert.equal(Object.isFrozen(harnessOwned), true);
+    assert.equal(
+      harnessOwned.egressAuthorizationAudit.auditId,
+      "production-egress-authorization-audit-v1",
+    );
+    assert.equal(
+      harnessOwned.judgeEgressAudit.auditId,
+      "production-judge-egress-audit-v1",
+    );
     assert.throws(
       () => assertHarnessOwnedDurableEgressAuthorizationAudit(
         new FileSystemEgressAuthorizationAudit({
@@ -68,25 +113,17 @@ test("public operational durability constructors cannot mint production ownershi
     );
     assert.doesNotThrow(() =>
       assertHarnessOwnedDurableEgressAuthorizationAudit(
-        createHarnessOwnedFileSystemEgressAuthorizationAudit({
-          auditId: "harness-egress-audit",
-          rootPath: join(root, "harness-egress"),
-        }),
+        harnessOwned.egressAuthorizationAudit,
       )
     );
     assert.doesNotThrow(() =>
       assertHarnessOwnedDurableJudgeEgressAudit(
-        createHarnessOwnedFileSystemJudgeEgressAudit({
-          auditId: "harness-judge-audit",
-          rootPath: join(root, "harness-judge"),
-        }),
+        harnessOwned.judgeEgressAudit,
       )
     );
     assert.doesNotThrow(() =>
       assertHarnessOwnedDurableReferencePackStore(
-        createHarnessOwnedFileSystemReferencePackStore({
-          rootPath: join(root, "harness-reference-pack"),
-        }),
+        harnessOwned.referencePackStore,
       )
     );
     assert.throws(

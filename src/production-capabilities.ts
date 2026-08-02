@@ -41,14 +41,15 @@ import type {
   EgressAuthorizationPort,
 } from "./egress-authorization.ts";
 import { FileSystemImmutableBlobStore } from "./file-system-blob-store.ts";
-import { FileSystemAttemptCheckpointStore } from "./file-system-checkpoint-store.ts";
 import type {
-  AttemptCheckpointAdapterClaim,
   AttemptCheckpointPort,
   AttemptCheckpointReadPort,
   SafeRasterCandidate,
   SafeRasterRendererPort,
 } from "./product-adapter.ts";
+import {
+  createHarnessOwnedProductionCheckpointReadFacade,
+} from "./bakeoff.ts";
 import type { PayloadInventoryPort } from "./retention.ts";
 import {
   createRunSpecificationVault,
@@ -117,21 +118,6 @@ export interface HarnessOwnedProductionCapabilities {
 }
 
 const capabilityBundleByObject = new WeakMap<object, string>();
-export interface HarnessOwnedProductionCheckpointAuthority {
-  readonly checkpointStore: AttemptCheckpointPort;
-  readonly adapterCheckpointStore: AttemptCheckpointPort;
-  authorizeAdapterClaim(claim: AttemptCheckpointAdapterClaim): Promise<void>;
-}
-const checkpointAuthorityByReadFacade = new WeakMap<
-  AttemptCheckpointReadPort,
-  HarnessOwnedProductionCheckpointAuthority
->();
-
-export function resolveHarnessOwnedProductionCheckpointAuthority(
-  facade: AttemptCheckpointReadPort,
-): HarnessOwnedProductionCheckpointAuthority | undefined {
-  return checkpointAuthorityByReadFacade.get(facade);
-}
 
 function safeIdentifier(value: string, label: string): void {
   if (!/^[a-z0-9][a-z0-9._:-]{2,127}$/i.test(value)) {
@@ -1175,66 +1161,12 @@ export function createHarnessOwnedProductionCapabilities(input: {
     egressAudit: input.egressAudit,
     payloadInventory: input.payloadInventory,
   });
-  const attemptCheckpointStore =
-    new FileSystemAttemptCheckpointStore({
+  const attemptCheckpointReadFacade =
+    createHarnessOwnedProductionCheckpointReadFacade({
       checkpointStoreId: input.checkpoint.storeId,
       rootPath: checkpointAttestation.canonicalPath,
       expectedRootIdentity: checkpointAttestation,
     });
-  const authorizedAdapterClaims = new Map<
-    string,
-    AttemptCheckpointAdapterClaim
-  >();
-  const attemptCheckpointReadFacade = Object.freeze<AttemptCheckpointReadPort>({
-    checkpointStoreId: attemptCheckpointStore.checkpointStoreId,
-    durability: attemptCheckpointStore.durability,
-    checkpointIntegrity: attemptCheckpointStore.checkpointIntegrity,
-    recoveryReferencePrefix: attemptCheckpointStore.recoveryReferencePrefix,
-    readAttempt: (attemptId) =>
-      attemptCheckpointStore.readAttempt(attemptId),
-  });
-  const adapterCheckpointStore = Object.freeze<AttemptCheckpointPort>({
-    checkpointStoreId: attemptCheckpointStore.checkpointStoreId,
-    durability: attemptCheckpointStore.durability,
-    checkpointIntegrity: attemptCheckpointStore.checkpointIntegrity,
-    recoveryReferencePrefix: attemptCheckpointStore.recoveryReferencePrefix,
-    readAttempt: (attemptId) =>
-      attemptCheckpointStore.readAttempt(attemptId),
-    async append(event) {
-      const claim = authorizedAdapterClaims.get(event.attemptId);
-      if (
-        claim === undefined ||
-        event.jobId !== claim.jobId ||
-        event.caseId !== claim.caseId ||
-        event.runId !== claim.runId ||
-        event.attemptSeq !== claim.attemptSeq ||
-        event.adapterVersion !== claim.adapterVersion ||
-        event.writerId !== claim.adapterVersion
-      ) {
-        throw new Error(
-          "Production checkpoint write has no matching harness-selected Attempt authority",
-        );
-      }
-      await attemptCheckpointStore.append(event);
-    },
-  });
-  const checkpointAuthority = Object.freeze<
-    HarnessOwnedProductionCheckpointAuthority
-  >({
-    checkpointStore: attemptCheckpointStore,
-    adapterCheckpointStore,
-    async authorizeAdapterClaim(claim) {
-      await attemptCheckpointStore.registerAdapterClaim(claim);
-      authorizedAdapterClaims.set(
-        claim.attemptId,
-        Object.freeze(structuredClone(claim)),
-      );
-    },
-  });
-  checkpointAuthorityByReadFacade.set(
-    attemptCheckpointReadFacade,
-    checkpointAuthority,
-  );
   const browserProfileLock = new FileSystemBrowserProfileLock({
     lockId: input.profileLock.lockId,
     rootPath: input.profileLock.rootPath,

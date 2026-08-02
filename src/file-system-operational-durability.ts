@@ -699,10 +699,7 @@ export function assertHarnessOwnedDurableReferencePackStore(
   }
 }
 
-// Package-internal production assembly seam. These factories are deliberately
-// not re-exported from index.ts: public filesystem constructors create durable
-// objects, but only the harness assembly path may attach production ownership.
-export function createHarnessOwnedFileSystemEgressAuthorizationAudit(
+function createHarnessOwnedFileSystemEgressAuthorizationAudit(
   options: ConstructorParameters<
     typeof FileSystemEgressAuthorizationAudit
   >[0],
@@ -712,7 +709,7 @@ export function createHarnessOwnedFileSystemEgressAuthorizationAudit(
   return audit;
 }
 
-export function createHarnessOwnedFileSystemJudgeEgressAudit(
+function createHarnessOwnedFileSystemJudgeEgressAudit(
   options: ConstructorParameters<typeof FileSystemJudgeEgressAudit>[0],
 ): FileSystemJudgeEgressAudit {
   const audit = new FileSystemJudgeEgressAudit(options);
@@ -720,10 +717,39 @@ export function createHarnessOwnedFileSystemJudgeEgressAudit(
   return audit;
 }
 
-export function createHarnessOwnedFileSystemReferencePackStore(
+function createHarnessOwnedFileSystemReferencePackStore(
   options: ConstructorParameters<typeof FileSystemReferencePackStore>[0],
 ): FileSystemReferencePackStore {
   const store = new FileSystemReferencePackStore(options);
   HARNESS_OWNED_REFERENCE_PACK_STORES.add(store);
   return store;
+}
+
+export interface HarnessOwnedProductionOperationalDurability {
+  readonly egressAuthorizationAudit: FileSystemEgressAuthorizationAudit;
+  readonly judgeEgressAudit: FileSystemJudgeEgressAudit;
+  readonly referencePackStore: FileSystemReferencePackStore;
+}
+
+// The only ownership-granting assembly seam. Production callers choose one
+// narrow root; the harness fixes every owned implementation, identifier, and
+// subdirectory as a single composition instead of registering caller objects.
+export function createHarnessOwnedProductionOperationalDurability(options: {
+  readonly rootPath: string;
+}): HarnessOwnedProductionOperationalDurability {
+  const root = safeRoot(options.rootPath).canonicalPath;
+  return Object.freeze({
+    egressAuthorizationAudit:
+      createHarnessOwnedFileSystemEgressAuthorizationAudit({
+        auditId: "production-egress-authorization-audit-v1",
+        rootPath: join(root, "egress-authorization-audit"),
+      }),
+    judgeEgressAudit: createHarnessOwnedFileSystemJudgeEgressAudit({
+      auditId: "production-judge-egress-audit-v1",
+      rootPath: join(root, "judge-egress-audit"),
+    }),
+    referencePackStore: createHarnessOwnedFileSystemReferencePackStore({
+      rootPath: join(root, "reference-pack"),
+    }),
+  });
 }

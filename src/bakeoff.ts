@@ -79,6 +79,10 @@ import {
   assertHarnessOwnedDurableReferencePackStore,
 } from "./file-system-operational-durability.ts";
 import {
+  FileSystemAttemptCheckpointStore,
+  type ExpectedCheckpointRootIdentity,
+} from "./file-system-checkpoint-store.ts";
+import {
   PRODUCTION_VOLCANO_EVALUATION_CASE,
   VOLCANO_CASE_ID,
   VOLCANO_EVALUATION_CASE,
@@ -98,6 +102,8 @@ import {
 import { createMockReportDraft } from "./mock-report.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
 import { scoreRenderedArtifact } from "./mock-score.ts";
+import { assertT10ProductionAcceptanceReady } from "./production-readiness.ts";
+import { timingFromAttempts } from "./report-timing.ts";
 import {
   OpenAiJudgeEvaluationError,
   type OpenAiJudgePort,
@@ -114,6 +120,7 @@ import {
   createHarnessProviderExecutionNotStartedCheckpoint,
   InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
+  type AttemptCheckpointAdapterClaim,
   type AttemptCheckpointPort,
   type AttemptCheckpointReadPort,
   type ProductAdapterExecutionConfiguration,
@@ -131,8 +138,6 @@ import {
 } from "./qwen-production-adapter.ts";
 import {
   assertHarnessOwnedProductionCapabilities,
-  resolveHarnessOwnedProductionCheckpointAuthority,
-  type HarnessOwnedProductionCheckpointAuthority,
 } from "./production-capabilities.ts";
 import {
   InMemoryReferencePackStore,
@@ -165,6 +170,85 @@ import {
 } from "./wps-aippt-driver.ts";
 
 export const VENDOR_GENERATION_TIMEOUT_MS = 30 * 60 * 1_000;
+
+interface PrivateProductionCheckpointAuthority {
+  readonly checkpointStore: AttemptCheckpointPort;
+  readonly adapterCheckpointStore: AttemptCheckpointPort;
+  authorizeAdapterClaim(claim: AttemptCheckpointAdapterClaim): Promise<void>;
+}
+
+const PRIVATE_PRODUCTION_CHECKPOINT_AUTHORITIES = new WeakMap<
+  AttemptCheckpointReadPort,
+  PrivateProductionCheckpointAuthority
+>();
+
+/**
+ * Creates the public read facade while retaining every writer capability in
+ * this module, where production Bakeoff execution consumes it. Deep importers
+ * can create or receive a facade, but cannot resolve its private authority.
+ */
+export function createHarnessOwnedProductionCheckpointReadFacade(input: {
+  readonly checkpointStoreId: string;
+  readonly rootPath: string;
+  readonly expectedRootIdentity: ExpectedCheckpointRootIdentity;
+}): AttemptCheckpointReadPort {
+  const checkpointStore = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: input.checkpointStoreId,
+    rootPath: input.rootPath,
+    expectedRootIdentity: input.expectedRootIdentity,
+  });
+  const authorizedAdapterClaims = new Map<
+    string,
+    AttemptCheckpointAdapterClaim
+  >();
+  const facade = Object.freeze<AttemptCheckpointReadPort>({
+    checkpointStoreId: checkpointStore.checkpointStoreId,
+    durability: checkpointStore.durability,
+    checkpointIntegrity: checkpointStore.checkpointIntegrity,
+    recoveryReferencePrefix: checkpointStore.recoveryReferencePrefix,
+    readAttempt: (attemptId) => checkpointStore.readAttempt(attemptId),
+  });
+  const adapterCheckpointStore = Object.freeze<AttemptCheckpointPort>({
+    checkpointStoreId: checkpointStore.checkpointStoreId,
+    durability: checkpointStore.durability,
+    checkpointIntegrity: checkpointStore.checkpointIntegrity,
+    recoveryReferencePrefix: checkpointStore.recoveryReferencePrefix,
+    readAttempt: (attemptId) => checkpointStore.readAttempt(attemptId),
+    async append(event) {
+      const claim = authorizedAdapterClaims.get(event.attemptId);
+      if (
+        claim === undefined ||
+        event.jobId !== claim.jobId ||
+        event.caseId !== claim.caseId ||
+        event.runId !== claim.runId ||
+        event.attemptSeq !== claim.attemptSeq ||
+        event.adapterVersion !== claim.adapterVersion ||
+        event.writerId !== claim.adapterVersion
+      ) {
+        throw new Error(
+          "Production checkpoint write has no matching harness-selected Attempt authority",
+        );
+      }
+      await checkpointStore.append(event);
+    },
+  });
+  PRIVATE_PRODUCTION_CHECKPOINT_AUTHORITIES.set(
+    facade,
+    Object.freeze<PrivateProductionCheckpointAuthority>({
+      checkpointStore,
+      adapterCheckpointStore,
+      async authorizeAdapterClaim(claim) {
+        await checkpointStore.registerAdapterClaim(claim);
+        authorizedAdapterClaims.set(
+          claim.attemptId,
+          Object.freeze(structuredClone(claim)),
+        );
+      },
+    }),
+  );
+  return facade;
+}
+
 const MOCK_RENDERER_DESTINATION: EgressDestinationMetadata = Object.freeze({
   targetService: "mock-static-svg-renderer",
   targetAccount: "mock-renderer-sandbox",
@@ -1733,7 +1817,7 @@ async function executeVendor(
   judgeDestination: EgressDestinationMetadata,
   attemptCheckpointStore: AttemptCheckpointPort,
   productionCheckpointAuthority:
-    | HarnessOwnedProductionCheckpointAuthority
+    | PrivateProductionCheckpointAuthority
     | undefined,
   onReferencePackUse: (evaluationAttemptId: string) => void,
   beforeVendorEgress?: (input: {
@@ -2449,7 +2533,7 @@ export function createBakeoffHarness({
   const productionCheckpointAuthority =
     configuredAttemptCheckpointStore === undefined
       ? undefined
-      : resolveHarnessOwnedProductionCheckpointAuthority(
+      : PRIVATE_PRODUCTION_CHECKPOINT_AUTHORITIES.get(
           configuredAttemptCheckpointStore as AttemptCheckpointReadPort,
         );
   const attemptCheckpointStore =
@@ -3024,6 +3108,9 @@ export function createBakeoffHarness({
         ...sharedRunFields(command.caseId, context),
       });
       for (const result of results) {
+        const reportTiming = timingFromAttempts(
+          result.attemptRecords,
+        );
         await projection.appendRunRecord({
           recordId: result.runId,
           recordType: "vendor_run",
@@ -3034,7 +3121,7 @@ export function createBakeoffHarness({
           adapterVersion: result.productPackage.adapterVersion,
           status: result.status,
           attemptSeq: null,
-          elapsedMs: null,
+          elapsedMs: reportTiming.totalMs,
           submissionEvidence: null,
           terminalReason:
             result.terminalReason === "human_wait"
@@ -3049,12 +3136,16 @@ export function createBakeoffHarness({
           selectedRunIds: null,
           protocolSnapshot: null,
           deadlineAt: null,
-          vendorGenerationMs: null,
+          vendorGenerationMs: reportTiming.generationMs,
           vendorReportedElapsedMs: null,
           humanWaitMs: null,
           timingPausedAt: null,
-          observableEvents: null,
-          manualActions: null,
+          observableEvents: result.attemptRecords.flatMap(
+            ({ observableEvents }) => observableEvents ?? [],
+          ),
+          manualActions: result.attemptRecords.flatMap(
+            ({ manualActions }) => manualActions ?? [],
+          ),
           costEvidence: null,
           artifactId: result.artifact?.artifactId ?? null,
           renderManifestId: result.renderManifest?.renderManifestId ?? null,
@@ -3146,6 +3237,7 @@ export function createBakeoffHarness({
               renderManifest: result.renderManifest,
               scorecard: result.scorecard,
               judgeFailure: result.judgeFailure ?? null,
+              timing: timingFromAttempts(result.attemptRecords),
             })),
             {
               provenance: context.provenance,
@@ -3213,6 +3305,7 @@ export function createBakeoffHarness({
         ),
       );
       let materializedReport: FeishuReport | null = null;
+      let materializedSource: ComparisonReportSource | null = null;
       if (command.executionMode !== "capture_only") {
         if (report === null) {
           throw new Error("Evaluation mode requires a staged report");
@@ -3220,6 +3313,7 @@ export function createBakeoffHarness({
         const readback = await feishu.loadComparisonReportSource(
           context.jobId,
         );
+        materializedSource = readback;
         materializedReport = readback.primaryReport;
         const committedReport = feishu
           .snapshot()
@@ -3281,11 +3375,27 @@ export function createBakeoffHarness({
           "Evaluation mode requires a materialized report readback",
         );
       }
-      return {
+      const outcome = {
         ...outcomeBase,
         scorecards: successful.map(({ scorecard }) => scorecard),
         report: materializedReport,
       };
+      if (
+        command.environment === "production" &&
+        context.executionProvenance === "LIVE_PRODUCTION" &&
+        jobStatus === "completed"
+      ) {
+        if (materializedSource === null) {
+          throw new Error(
+            "Completed LIVE production acceptance requires a post-commit projection readback",
+          );
+        }
+        assertT10ProductionAcceptanceReady(
+          outcome,
+          materializedSource,
+        );
+      }
+      return outcome;
     },
   };
   const startBakeoffJob = (

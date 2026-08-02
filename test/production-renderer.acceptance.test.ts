@@ -23,7 +23,6 @@ import {
   resolveHarnessProductAdapterExecutor,
 } from "../src/mock-wps.ts";
 import {
-  createProviderSubmissionIntentCheckpoint,
   parseAdapterExecutionConfiguration,
 } from "../src/product-adapter.ts";
 import {
@@ -32,12 +31,17 @@ import {
   rendererBundleClosureDigestForTest,
   rendererSystemRuntimeAttestationDigestForTest,
   createHarnessOwnedProductionCapabilities,
-  resolveHarnessOwnedProductionCheckpointAuthority,
 } from "../src/production-capabilities.ts";
 import {
   InMemoryPayloadInventory,
   InMemoryTombstoneLedger,
 } from "../src/retention.ts";
+
+type ProductionCapabilitiesModule = typeof import(
+  "../src/production-capabilities.ts"
+);
+// @ts-expect-error Writer authority resolution is not part of the module API.
+type ForbiddenCheckpointAuthorityResolver = ProductionCapabilitiesModule["resolveHarnessOwnedProductionCheckpointAuthority"];
 
 const PNG = Uint8Array.from(
   Buffer.from(
@@ -172,68 +176,54 @@ test("production capabilities expose only a read-only Attempt checkpoint facade"
       "registerAdapterClaim" in capabilities.attemptCheckpointStore,
       false,
     );
+    assert.equal(Object.isFrozen(capabilities.attemptCheckpointStore), true);
+    assert.deepEqual(
+      Object.getOwnPropertySymbols(capabilities.attemptCheckpointStore),
+      [],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("production adapter checkpoints require the exact harness-selected Attempt authority", async () => {
-  const root = await mkdtemp(
-    join(tmpdir(), "production-checkpoint-attempt-authority-"),
+test("a deep import cannot recover checkpoint writer authority from a production facade", async () => {
+  const implementationModule = await import(
+    "../src/production-capabilities.ts"
   );
-  try {
-    const capabilities = await capabilityFixture(root, {
-      rendererId: "production-checkpoint-attempt-authority-renderer",
-      slidesDirectory: join(root, "unused-slides"),
-      extractedTextPrefix: "page",
-      fontPack: "test",
-      resolution: "1x1",
-      colorProfile: "sRGB",
-      fidelityNotes: ["test"],
-    });
-    const authority = resolveHarnessOwnedProductionCheckpointAuthority(
-      capabilities.attemptCheckpointStore,
-    );
-    assert.ok(authority);
-    const command = Object.freeze({
-      jobId: "production-checkpoint-authority-job",
-      runId: "production-checkpoint-authority-run",
-      attemptId: "production-checkpoint-authority-attempt-1",
-      attemptSeq: 1,
-      timeoutMs: 30 * 60 * 1_000,
-      signal: new AbortController().signal,
-      evaluationCase: VOLCANO_EVALUATION_CASE,
-    });
-    const adapterVersion = "wps-aippt-browser@1";
-    const event = createProviderSubmissionIntentCheckpoint(
-      command,
-      adapterVersion,
-      "2026-08-02T00:00:00.000Z",
-    );
+  const bakeoffImplementationModule = await import("../src/bakeoff.ts");
+  assert.equal(
+    "resolveHarnessOwnedProductionCheckpointAuthority" in
+      implementationModule,
+    false,
+  );
+  assert.equal(
+    "HarnessOwnedProductionCheckpointAuthority" in implementationModule,
+    false,
+  );
+  assert.equal(
+    "PRIVATE_PRODUCTION_CHECKPOINT_AUTHORITIES" in
+      bakeoffImplementationModule,
+    false,
+  );
+  assert.equal(
+    "FileSystemAttemptCheckpointStore" in bakeoffImplementationModule,
+    false,
+  );
 
-    await assert.rejects(
-      authority.adapterCheckpointStore.append(event),
-      /no matching harness-selected Attempt authority/i,
-    );
-    await authority.authorizeAdapterClaim({
-      jobId: command.jobId,
-      caseId: command.evaluationCase.caseId,
-      runId: command.runId,
-      attemptId: command.attemptId,
-      attemptSeq: command.attemptSeq,
-      adapterVersion,
-      claimEpoch: command.attemptSeq,
-    });
-    await authority.adapterCheckpointStore.append(event);
-    const recovered = await capabilities.attemptCheckpointStore.readAttempt(
-      command.attemptId,
-    );
-    assert.equal(recovered.length, 1);
-    assert.equal(recovered[0]?.eventId, event.eventId);
-    assert.equal(recovered[0]?.writerId, adapterVersion);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+  const forbiddenPackageSubpath = [
+    "ppt-evaluation-harness",
+    "production-capabilities",
+  ].join("/");
+  await assert.rejects(
+    import(forbiddenPackageSubpath),
+    (error: unknown) => {
+      assert.equal(
+        (error as NodeJS.ErrnoException).code,
+        "ERR_PACKAGE_PATH_NOT_EXPORTED",
+      );
+      return true;
+    },
+  );
 });
 
 test("production capabilities reject two lexical roots that resolve to one directory identity", async () => {

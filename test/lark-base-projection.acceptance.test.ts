@@ -917,8 +917,13 @@ test("a Qwen–Doubao comparison advances the Lark marker and rewrites one compl
     ":comparison:",
     ":gap:",
   ]) {
+    const binding = transport.markers
+      .get(bakeoff.job.jobId)
+      ?.recordBindings.find(({ stableId }) =>
+        `:${stableId}`.includes(prefix),
+      );
     const key = [...transport.payloads.keys()].find((candidate) =>
-      candidate.includes(prefix),
+      candidate.endsWith(`:${binding?.stableId}`),
     );
     assert.ok(key, `missing committed core row ${prefix}`);
     const original = transport.payloads.get(key);
@@ -1325,7 +1330,7 @@ test("committed auxiliary state collects 201+ shared-table rows and retries a st
       pagedOffsets.set(key, [...(pagedOffsets.get(key) ?? []), offset]);
 
       let rows =
-        keyword === "job:"
+        keyword === "job:" || keyword === "run:"
           ? jobRows
           : keyword === "comparison:"
             ? comparisonRows
@@ -1381,6 +1386,20 @@ test("committed auxiliary state collects 201+ shared-table rows and retries a st
       `${LARK_TEST_CONFIGURATION.tables.comparisons}:comparison:`,
     ),
     [0, 200, 0, 200, 0, 200],
+  );
+
+  jobRows.splice(
+    200,
+    1,
+    encodedRow(
+      "run:physically-miskeyed-job",
+      { recordType: "bakeoff_job", recordId: jobId, jobId },
+      "recMiskeyedJob",
+    ),
+  );
+  await assert.rejects(
+    transport.readCommittedAuxiliaryReportState!({ jobId }),
+    /physical identity conflicts with its typed business key/i,
   );
 });
 
@@ -2581,6 +2600,8 @@ test("concurrent production Job claims have exactly one winner", async (context)
       markdown: "# Claim Race Report\n\nVerified.",
       payloadHash:
         "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" as const,
+      comparisonIds: [],
+      gapCardIds: [],
     },
   ];
   const collectionHash = sha256Bytes(canonicalJsonBytes(reports));

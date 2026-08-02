@@ -53,6 +53,7 @@ import {
   type EffectiveArtifactScoreTableRecord,
 } from "./comparison-report-render.ts";
 import { createMockReportDraft } from "./mock-report.ts";
+import { timingFromRun } from "./report-timing.ts";
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -1653,6 +1654,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
             });
           })()
         : (() => {
+            const jobExecutionProvenance =
+              explicitExecutionProvenance(job);
+            if (jobExecutionProvenance === null) {
+              throw new Error(
+                "Delivery Report derivation requires explicit execution provenance",
+              );
+            }
             const results = vendorRuns.map((run) => {
               if (run.product === null) {
                 throw new Error(
@@ -1682,6 +1690,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
                 judgeFailure: run.judgeFailure ?? null,
                 renderManifest:
                   capture?.renderManifest ?? null,
+                timing: timingFromRun(run),
               };
             });
             return createMockReportDraft(
@@ -1690,6 +1699,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
               results,
               {
                 provenance: job.provenance,
+                executionProvenance: jobExecutionProvenance,
                 environmentOrigin: job.environmentOrigin,
                 createdAt: job.createdAt,
               },

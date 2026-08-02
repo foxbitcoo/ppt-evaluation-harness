@@ -447,6 +447,59 @@ function browserDriverPackage(
   });
 }
 
+function productionCheckpointCapabilities(root: string) {
+  const tombstones = new InMemoryTombstoneLedger(
+    "wps-private-checkpoint-authority-tombstones",
+  );
+  return createHarnessOwnedProductionCapabilities({
+    artifactPrimary: {
+      operatorDomainLabel: "wps-private-checkpoint-primary",
+      rootPath: join(root, "primary"),
+      rootReference: "root:wps-private-checkpoint-primary",
+      storeId: "wps-private-checkpoint-primary",
+    },
+    artifactRecovery: {
+      operatorDomainLabel: "wps-private-checkpoint-recovery",
+      rootPath: join(root, "recovery"),
+      rootReference: "root:wps-private-checkpoint-recovery",
+      storeId: "wps-private-checkpoint-recovery",
+    },
+    runSpecification: {
+      operatorDomainLabel: "wps-private-checkpoint-run-spec",
+      rootPath: join(root, "run-spec"),
+      rootReference: "root:wps-private-checkpoint-run-spec",
+      storeId: "wps-private-checkpoint-run-spec",
+    },
+    checkpoint: {
+      rootPath: join(root, "checkpoints"),
+      rootReference: "root:wps-private-checkpoint-store",
+      storeId: "wps-private-checkpoint-store",
+    },
+    profileLock: {
+      rootPath: join(root, "locks"),
+      rootReference: "root:wps-private-checkpoint-lock",
+      lockId: "wps-private-checkpoint-lock",
+    },
+    renderer: {
+      rendererId: "wps-private-checkpoint-renderer",
+      slidesDirectory: join(root, "unused-slides"),
+      extractedTextPrefix: "page",
+      fontPack: "test",
+      resolution: "1x1",
+      colorProfile: "sRGB",
+      fidelityNotes: ["test"],
+    },
+    tombstones,
+    payloadInventory: new InMemoryPayloadInventory(tombstones),
+    egressAuthorization: {
+      async authorize() {
+        throw new Error("checkpoint fixture must not authorize storage");
+      },
+    },
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+  });
+}
+
 test("the public browser-driver fixture factory cannot mint PRODUCTION sessions", async () => {
   const pptx = await knownGoodPptxBytes();
 
@@ -674,8 +727,8 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:50aaf189ad74ea18cf6d98e2f0345377c74ce1cbc6fd8305348b7448040da63d",
-      sourceArchiveEntryCount: 129,
+        "sha256:7c86267fca584ea65126c75efe96cca17da0f275828cfcc55783503803f05972",
+      sourceArchiveEntryCount: 130,
     },
   );
 });
@@ -1673,7 +1726,7 @@ test("relationship validation ignores Relationship markup inside comments and CD
   }
 });
 
-test("the harness persists WPS observable Trace and the driver-provided 16-page static render", async () => {
+test("the harness gives the selected WPS adapter a private Attempt-scoped checkpoint writer and persists its Trace", async () => {
   const productionAdapter = new WpsAiPptProductAdapter();
   const pptx = await knownGoodPptxBytes();
   const driver = browserDriverPackage(capturedBrowserResult(pptx));
@@ -1697,33 +1750,49 @@ test("the harness persists WPS observable Trace and the driver-provided 16-page 
     },
   };
   const feishu = new InMemoryFeishuProjection();
-
-  const outcome = await createBakeoffHarness({
-    feishu,
-    productAdapter: testDescriptor,
-    wpsAiPptBrowserDriver: driver,
-  }).startBakeoffJob({
-    environment: "test",
-    caseId: VOLCANO_EVALUATION_CASE.caseId,
-  });
-
-  assert.equal(
-    outcome.renderManifest?.renderer,
-    "chrome-native-static-capture@1",
+  const root = await mkdtemp(
+    join(tmpdir(), "wps-private-checkpoint-authority-"),
   );
-  assert.equal(outcome.renderManifest?.slides.length, 16);
-  const attempt = feishu
-    .snapshot()
-    .runRecordTable.find(
-      ({ recordType }) => recordType === "evaluation_attempt",
+  try {
+    const capabilities = productionCheckpointCapabilities(root);
+    const outcome = await createBakeoffHarness({
+      feishu,
+      productAdapter: testDescriptor,
+      wpsAiPptBrowserDriver: driver,
+      attemptCheckpointStore: capabilities.attemptCheckpointStore,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_EVALUATION_CASE.caseId,
+    });
+
+    assert.equal(
+      outcome.renderManifest?.renderer,
+      "chrome-native-static-capture@1",
     );
-  assert.deepEqual(
-    attempt?.observableEvents?.map(({ eventType }) => eventType),
-    ["configuration_observed", "artifact_downloaded"],
-  );
-  assert.deepEqual(attempt?.manualActions, [
-    "selected professional mode",
-  ]);
+    assert.equal(outcome.renderManifest?.slides.length, 16);
+    const attempt = feishu
+      .snapshot()
+      .runRecordTable.find(
+        ({ recordType }) => recordType === "evaluation_attempt",
+      );
+    assert.deepEqual(
+      attempt?.observableEvents?.map(({ eventType }) => eventType),
+      ["configuration_observed", "artifact_downloaded"],
+    );
+    assert.deepEqual(attempt?.manualActions, [
+      "selected professional mode",
+    ]);
+    assert.deepEqual(
+      (
+        await capabilities.attemptCheckpointStore.readAttempt(
+          attempt?.recordId ?? "missing-attempt",
+        )
+      ).map(({ eventType }) => eventType),
+      ["configuration_observed", "artifact_downloaded"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the public WPS real-smoke fixture records one safe 16-page capture without browser secrets or local paths", () => {

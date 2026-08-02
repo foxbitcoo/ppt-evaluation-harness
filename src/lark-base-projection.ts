@@ -22,11 +22,17 @@ import { execFileSync, spawn } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
+  AdjudicationEventRecord,
   DynamicComparisonView,
   FeishuReport,
   ProductGapCardRecord,
+  ReviewEventRecord,
   RunRecord,
 } from "./domain.ts";
+import {
+  assertValidAdjudicationEventFields,
+  assertValidReviewEventFields,
+} from "./adjudication-validation.ts";
 import {
   InMemoryFeishuProjection,
   ProjectionStaleBaselineError,
@@ -156,6 +162,8 @@ export interface LarkBaseProjectionTransportPort {
       readonly title: string;
       readonly markdown: string;
       readonly payloadHash: `sha256:${string}`;
+      readonly comparisonIds: readonly string[];
+      readonly gapCardIds: readonly string[];
     }[];
     readonly collectionHash: `sha256:${string}`;
     readonly idempotencyKey: string;
@@ -172,6 +180,8 @@ export interface LarkBaseProjectionTransportPort {
       readonly title: string;
       readonly markdown: string;
       readonly payloadHash: `sha256:${string}`;
+      readonly comparisonIds: readonly string[];
+      readonly gapCardIds: readonly string[];
     }[];
     readonly collectionHash: `sha256:${string}`;
     readonly expectedUrl: string;
@@ -213,6 +223,7 @@ export interface LarkBaseProjectionTransportPort {
     readonly authorizationDecisionId: string;
     readonly recordCount: number;
     readonly attachmentCount: number;
+    readonly recordBindings: readonly LarkCommitMarkerRecordBinding[];
     readonly reportUrls: readonly {
       readonly reportId: string;
       readonly url: string;
@@ -235,6 +246,8 @@ export interface LarkBaseProjectionTransportPort {
 export interface LarkCommittedAuxiliaryReportState {
   readonly marker: LarkCommitMarker | null;
   readonly bakeoffJob: RunRecord | null;
+  readonly adjudicationEventTable: readonly AdjudicationEventRecord[];
+  readonly reviewEventTable: readonly ReviewEventRecord[];
   readonly productGapCardTable: readonly (
     | DynamicComparisonView
     | ProductGapCardRecord
@@ -244,6 +257,8 @@ export interface LarkCommittedAuxiliaryReportState {
     readonly title: string;
     readonly markdown: string;
     readonly payloadHash: `sha256:${string}`;
+    readonly comparisonIds: readonly string[];
+    readonly gapCardIds: readonly string[];
     readonly url: string;
   }[];
 }
@@ -255,6 +270,7 @@ export interface LarkCommitMarker {
   readonly authorizationDecisionId: string;
   readonly recordCount: number;
   readonly attachmentCount: number;
+  readonly recordBindings: readonly LarkCommitMarkerRecordBinding[];
   readonly reportUrls: readonly {
     readonly reportId: string;
     readonly url: string;
@@ -270,6 +286,12 @@ export interface LarkCommitMarker {
   readonly committedAt: string;
   readonly previousBatchHash: `sha256:${string}` | null;
   readonly revision: number;
+}
+
+export interface LarkCommitMarkerRecordBinding {
+  readonly tableKey: Exclude<LarkProjectionTableKey, "commit_markers">;
+  readonly stableId: string;
+  readonly payloadHash: `sha256:${string}`;
 }
 
 export interface LarkCommitMarkerAttachment {
@@ -1795,6 +1817,8 @@ export function createLarkReportCollectionMarkdown(command: {
     readonly title: string;
     readonly markdown: string;
     readonly payloadHash: `sha256:${string}`;
+    readonly comparisonIds: readonly string[];
+    readonly gapCardIds: readonly string[];
   }[];
   readonly collectionHash: `sha256:${string}`;
 }): string {
@@ -1803,6 +1827,8 @@ export function createLarkReportCollectionMarkdown(command: {
       `## ${index + 1}. ${report.title}\n\n` +
       `Report anchor: \`${report.reportId}\`\n\n` +
       `Projection payload hash: \`${report.payloadHash}\`\n\n` +
+      `Comparison lineage: \`${Buffer.from(JSON.stringify(report.comparisonIds ?? [])).toString("base64url")}\`\n\n` +
+      `Gap Card lineage: \`${Buffer.from(JSON.stringify(report.gapCardIds ?? [])).toString("base64url")}\`\n\n` +
       `${collectionReportBody(report)}`,
   );
   return normalizeMarkdown(
@@ -1820,11 +1846,15 @@ function reportCollectionForSnapshot(
   readonly title: string;
   readonly markdown: string;
   readonly payloadHash: `sha256:${string}`;
+  readonly comparisonIds: readonly string[];
+  readonly gapCardIds: readonly string[];
 }[] {
   return snapshot.reports.map((report) => ({
     reportId: report.reportId,
     title: report.title,
     markdown: report.markdown,
+    comparisonIds: report.comparisonIds,
+    gapCardIds: report.gapCardIds,
     payloadHash: sha256(
       JSON.stringify({
         reportId: report.reportId,
@@ -1841,6 +1871,8 @@ function reportCollectionHash(
     readonly title: string;
     readonly markdown: string;
     readonly payloadHash: `sha256:${string}`;
+    readonly comparisonIds: readonly string[];
+    readonly gapCardIds: readonly string[];
   }[],
 ): `sha256:${string}` | null {
   return reports.length === 0
@@ -1858,8 +1890,8 @@ function parseLarkReportCollectionMarkdown(command: {
   const normalized = normalizeMarkdown(command.content);
   if (
     parseReportOwner(normalized) !== command.jobId ||
-    command.marker.reportDocumentRevision !==
-      command.documentRevision ||
+    command.marker.reportDocumentRevision === null ||
+    command.marker.reportDocumentRevision > command.documentRevision ||
     command.marker.reportUrls.some(
       ({ url }) => url !== command.documentUrl,
     )
@@ -1872,21 +1904,20 @@ function parseLarkReportCollectionMarkdown(command: {
     /\n\nCollection hash: `(sha256:[a-f0-9]{64})`\n\n/.exec(
       normalized,
     );
-  if (
-    collectionHashMatch?.[1] !==
-      command.marker.reportCollectionHash
-  ) {
+  if (collectionHashMatch === null) {
     throw new Error(
-      "Lark committed report collection hash does not match its marker",
+      "Lark report document has no collection hash",
     );
   }
   const sectionPattern =
-    /(?:^|\n\n---\n\n)## ([1-9]\d*)\. ([^\n]+)\n\nReport anchor: `([^`\n]+)`\n\nProjection payload hash: `(sha256:[a-f0-9]{64})`\n\n([\s\S]*?)(?=\n\n---\n\n## [1-9]\d*\. |\n$)/g;
+    /(?:^|\n\n---\n\n)## ([1-9]\d*)\. ([^\n]+)\n\nReport anchor: `([^`\n]+)`\n\nProjection payload hash: `(sha256:[a-f0-9]{64})`\n\nComparison lineage: `([A-Za-z0-9_-]+)`\n\nGap Card lineage: `([A-Za-z0-9_-]+)`\n\n([\s\S]*?)(?=\n\n---\n\n## [1-9]\d*\. |\n$)/g;
   const parsed: {
     reportId: string;
     title: string;
     markdown: string;
     payloadHash: `sha256:${string}`;
+    comparisonIds: readonly string[];
+    gapCardIds: readonly string[];
     url: string;
   }[] = [];
   let match: RegExpExecArray | null;
@@ -1899,7 +1930,28 @@ function parseLarkReportCollectionMarkdown(command: {
     }
     const title = match[2]!;
     const reportId = match[3]!;
-    const body = match[5]!
+    const decodeIds = (encoded: string, label: string): readonly string[] => {
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+      } catch {
+        decoded = null;
+      }
+      if (
+        !Array.isArray(decoded) ||
+        decoded.some(
+          (id) => typeof id !== "string" || id.trim().length === 0,
+        ) ||
+        new Set(decoded).size !== decoded.length ||
+        Buffer.from(JSON.stringify(decoded)).toString("base64url") !== encoded
+      ) {
+        throw new Error(`Lark committed report ${label} lineage is invalid`);
+      }
+      return decoded as string[];
+    };
+    const comparisonIds = decodeIds(match[5]!, "Comparison");
+    const gapCardIds = decodeIds(match[6]!, "Gap Card");
+    const body = match[7]!
       .trim()
       .replace(/^(#{2,6}) /gm, (heading) => heading.slice(1));
     const markdown = normalizeMarkdown(`# ${title}\n\n${body}`);
@@ -1916,19 +1968,28 @@ function parseLarkReportCollectionMarkdown(command: {
       title,
       markdown,
       payloadHash,
+      comparisonIds,
+      gapCardIds,
       url: command.documentUrl,
     });
   }
   const expectedIds = command.marker.reportUrls
     .map(({ reportId }) => reportId)
     .sort();
+  const expectedIdSet = new Set(expectedIds);
+  const selected = parsed.filter(({ reportId }) =>
+    expectedIdSet.has(reportId),
+  );
   if (
+    reportCollectionHash(
+      parsed.map(({ url: _url, ...report }) => report),
+    ) !== collectionHashMatch[1] ||
     !isDeepStrictEqual(
-      parsed.map(({ reportId }) => reportId).sort(),
+      selected.map(({ reportId }) => reportId).sort(),
       expectedIds,
     ) ||
     reportCollectionHash(
-      parsed.map(({ url: _url, ...report }) => report),
+      selected.map(({ url: _url, ...report }) => report),
     ) !==
       command.marker.reportCollectionHash
   ) {
@@ -1936,7 +1997,7 @@ function parseLarkReportCollectionMarkdown(command: {
       "Lark committed report collection is incomplete or conflicts with its marker",
     );
   }
-  return Object.freeze(parsed.map((entry) => Object.freeze(entry)));
+  return Object.freeze(selected.map((entry) => Object.freeze(entry)));
 }
 
 interface LarkDocumentReadback {
@@ -2050,6 +2111,74 @@ function requiredPhysicalLogicalId(
   );
 }
 
+function assertLinearCommittedCausalHistory<Event extends {
+  readonly occurredAt: string;
+}>(command: {
+  readonly events: readonly Event[];
+  readonly eventId: (event: Event) => string;
+  readonly priorId: (event: Event) => string | null;
+  readonly groupId: (event: Event) => string;
+  readonly label: string;
+}): void {
+  const groups = new Map<string, Event[]>();
+  for (const event of command.events) {
+    const group = command.groupId(event);
+    groups.set(group, [...(groups.get(group) ?? []), event]);
+  }
+  for (const [group, events] of groups) {
+    const byId = new Map(
+      events.map((event) => [command.eventId(event), event]),
+    );
+    if (byId.size !== events.length) {
+      throw new Error(
+        `${command.label} committed causal history has duplicate IDs: ${group}`,
+      );
+    }
+    const roots: Event[] = [];
+    const children = new Map<string, Event>();
+    for (const event of events) {
+      const prior = command.priorId(event);
+      if (prior === null) {
+        roots.push(event);
+        continue;
+      }
+      const parent = byId.get(prior);
+      if (
+        parent === undefined ||
+        children.has(prior) ||
+        Date.parse(event.occurredAt) < Date.parse(parent.occurredAt)
+      ) {
+        throw new Error(
+          `${command.label} committed causal history conflicts: ${group}`,
+        );
+      }
+      children.set(prior, event);
+    }
+    if (roots.length !== 1) {
+      throw new Error(
+        `${command.label} committed causal history has no unique root: ${group}`,
+      );
+    }
+    const visited = new Set<string>();
+    let current: Event | undefined = roots[0];
+    while (current !== undefined) {
+      const id = command.eventId(current);
+      if (visited.has(id)) {
+        throw new Error(
+          `${command.label} committed causal history has a cycle: ${group}`,
+        );
+      }
+      visited.add(id);
+      current = children.get(id);
+    }
+    if (visited.size !== events.length) {
+      throw new Error(
+        `${command.label} committed causal history is disconnected: ${group}`,
+      );
+    }
+  }
+}
+
 function physicalStableRecordId(
   tableKey: LarkProjectionTableKey,
   record: Record<string, unknown>,
@@ -2137,6 +2266,40 @@ function physicalStableRecordId(
   }
 }
 
+function generationStableRecordId(
+  tableKey: LarkProjectionTableKey,
+  record: Record<string, unknown>,
+  batchHash: `sha256:${string}`,
+): string {
+  const stableId = physicalStableRecordId(tableKey, record);
+  return tableKey === "runs"
+    ? `${stableId}:generation:${batchHash.slice("sha256:".length)}`
+    : stableId;
+}
+
+function markerBoundStableRecordId(
+  marker: LarkCommitMarker,
+  tableKey: Exclude<LarkProjectionTableKey, "commit_markers">,
+  record: Record<string, unknown>,
+  payloadHash: `sha256:${string}`,
+): string {
+  const logicalStableId = physicalStableRecordId(tableKey, record);
+  if (marker.recordBindings.length === 0) return logicalStableId;
+  const matches = marker.recordBindings.filter(
+    (binding) =>
+      binding.tableKey === tableKey &&
+      binding.payloadHash === payloadHash &&
+      (binding.stableId === logicalStableId ||
+        binding.stableId.startsWith(`${logicalStableId}:generation:`)),
+  );
+  if (matches.length !== 1) {
+    throw new Error(
+      `Lark commit marker has no unique record binding: ${tableKey}:${logicalStableId}`,
+    );
+  }
+  return matches[0]!.stableId;
+}
+
 export function physicalStableRecordIdForTest(
   tableKey: LarkProjectionTableKey,
   record: Record<string, unknown>,
@@ -2147,7 +2310,10 @@ export function physicalStableRecordIdForTest(
 function tableRows(
   snapshot: FeishuProjectionSnapshot,
 ): readonly {
-  readonly tableKey: LarkProjectionTableKey;
+  readonly tableKey: Exclude<
+    LarkProjectionTableKey,
+    "commit_markers"
+  >;
   readonly value: Record<string, unknown>;
 }[] {
   const rows = [
@@ -2193,7 +2359,10 @@ function tableRows(
     })),
   ];
   return rows as unknown as readonly {
-    readonly tableKey: LarkProjectionTableKey;
+    readonly tableKey: Exclude<
+      LarkProjectionTableKey,
+      "commit_markers"
+    >;
     readonly value: Record<string, unknown>;
   }[];
 }
@@ -2728,8 +2897,13 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
           for (const { tableKey, value } of tableRows(
             replayMaterialized,
           )) {
-            const stableId = physicalStableRecordId(tableKey, value);
             const { payload, payloadHash } = serializedRow(value);
+            const stableId = markerBoundStableRecordId(
+              existingMarker,
+              tableKey,
+              value,
+              payloadHash,
+            );
             assertAuthorizationCurrent();
             await this.#transport.verifyRecord({
               tableKey,
@@ -2746,7 +2920,11 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       const remoteRecords = new Map<string, string>();
       for (const { tableKey, value } of rows) {
         assertAuthorizationCurrent();
-        const stableId = physicalStableRecordId(tableKey, value);
+        const stableId = generationStableRecordId(
+          tableKey,
+          value,
+          batchHash,
+        );
         const { payload, payloadHash } = serializedRow(value);
         const remote = await this.#transport.upsertRecord({
           tableKey,
@@ -2987,15 +3165,26 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       );
       assertNoMockFeishuUris(materializedSnapshot);
       const originalRows = new Map(
-        rows.map(({ tableKey, value }) => [
-          `${tableKey}:${physicalStableRecordId(tableKey, value)}`,
-          serializedRow(value).payloadHash,
-        ]),
+        rows.map(({ tableKey, value }) => {
+          const stableId = generationStableRecordId(
+            tableKey,
+            value,
+            batchHash,
+          );
+          return [
+            `${tableKey}:${stableId}`,
+            serializedRow(value).payloadHash,
+          ];
+        }),
       );
       for (const { tableKey, value } of tableRows(
         materializedSnapshot,
       )) {
-        const stableId = physicalStableRecordId(tableKey, value);
+        const stableId = generationStableRecordId(
+          tableKey,
+          value,
+          batchHash,
+        );
         const { payload, payloadHash } = serializedRow(value);
         if (
           originalRows.get(`${tableKey}:${stableId}`) !== payloadHash
@@ -3017,6 +3206,16 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
       const reportUrlEntries = [...reportUrls].map(
         ([reportId, url]) => ({ reportId, url }),
       );
+      const recordBindings: readonly LarkCommitMarkerRecordBinding[] =
+        tableRows(materializedSnapshot).map(({ tableKey, value }) => ({
+          tableKey,
+          stableId: generationStableRecordId(
+            tableKey,
+            value,
+            batchHash,
+          ),
+          payloadHash: serializedRow(value).payloadHash,
+        }));
       assertAuthorizationCurrent();
       await this.#transport.commitBatch({
         schemaVersion: "lark-projection-commit-v2",
@@ -3025,6 +3224,7 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
         authorizationDecisionId: authorization.decisionId,
         recordCount: rows.length + expectedPageEvidence.length,
         attachmentCount,
+        recordBindings,
         reportUrls: reportUrlEntries,
         reportCollectionHash: materializedReportCollectionHash,
         reportDocumentRevision,
@@ -4636,6 +4836,14 @@ class VerifiedLarkCliTransport
     const prefixes =
       tableKey === "runs"
         ? ["job:", "run:", "attempt:"]
+        : tableKey === "workflow_events"
+          ? [
+              "adjudication:",
+              "review:",
+              "gap-workflow:",
+              "github-reservation:",
+              "github-link:",
+            ]
         : tableKey === "comparisons"
           ? ["comparison:", "gap:"]
           : null;
@@ -4717,6 +4925,15 @@ class VerifiedLarkCliTransport
       payload,
     );
     if (storedStableId === expectedStableId) return;
+    if (
+      tableKey === "runs" &&
+      typeof storedStableId === "string" &&
+      new RegExp(
+        `^${expectedStableId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}:generation:[a-f0-9]{64}$`,
+      ).test(storedStableId)
+    ) {
+      return;
+    }
     if (
       tableKey === "comparisons" &&
       payload.recordType === "gap_card" &&
@@ -5541,6 +5758,63 @@ class VerifiedLarkCliTransport
         "Lark Base commit marker attachment bindings are duplicate or incomplete",
       );
     }
+    const recordBindingsValue = marker.recordBindings ?? [];
+    if (!Array.isArray(recordBindingsValue)) {
+      throw new Error("Lark Base commit marker record bindings are invalid");
+    }
+    const allowedTableKeys = new Set<
+      Exclude<LarkProjectionTableKey, "commit_markers">
+    >([
+      "cases",
+      "runs",
+      "artifacts",
+      "scores",
+      "workflow_events",
+      "comparisons",
+    ]);
+    const recordBindings = recordBindingsValue.map((entry) => {
+      const binding = asObject(entry, "commit marker record binding");
+      if (
+        typeof binding.tableKey !== "string" ||
+        !allowedTableKeys.has(
+          binding.tableKey as Exclude<
+            LarkProjectionTableKey,
+            "commit_markers"
+          >,
+        ) ||
+        typeof binding.stableId !== "string" ||
+        binding.stableId.trim().length === 0 ||
+        typeof binding.payloadHash !== "string" ||
+        !/^sha256:[a-f0-9]{64}$/.test(binding.payloadHash)
+      ) {
+        throw new Error(
+          "Lark Base commit marker record binding is invalid",
+        );
+      }
+      return Object.freeze({
+        tableKey: binding.tableKey as Exclude<
+          LarkProjectionTableKey,
+          "commit_markers"
+        >,
+        stableId: binding.stableId,
+        payloadHash: binding.payloadHash as `sha256:${string}`,
+      });
+    });
+    if (
+      new Set(
+        recordBindings.map(
+          ({ tableKey, stableId }) => `${tableKey}:${stableId}`,
+        ),
+      ).size !== recordBindings.length ||
+      (recordBindings.length > 0 &&
+        recordBindings.length !==
+          (marker.recordCount as number) -
+            parsedPageEvidenceUrls.length)
+    ) {
+      throw new Error(
+        "Lark Base commit marker record bindings are duplicate or incomplete",
+      );
+    }
     return {
       schemaVersion: "lark-projection-commit-v2",
       jobId: command.jobId,
@@ -5549,6 +5823,7 @@ class VerifiedLarkCliTransport
         marker.authorizationDecisionId as string,
       recordCount: marker.recordCount as number,
       attachmentCount: marker.attachmentCount as number,
+      recordBindings,
       reportUrls: parsedReportUrls,
       reportCollectionHash:
         marker.reportCollectionHash as `sha256:${string}` | null,
@@ -5573,17 +5848,66 @@ class VerifiedLarkCliTransport
         return {
           marker: null,
           bakeoffJob: null,
+          adjudicationEventTable: [],
+          reviewEventTable: [],
           productGapCardTable: [],
           reportCollection: [],
         };
       }
-      const [runRows, comparisonRows] = await Promise.all([
+      const [runRows, workflowRows, comparisonRows] = await Promise.all([
         this.#listRecords("runs"),
+        this.#listRecords("workflow_events"),
         this.#listRecords("comparisons"),
       ]);
-      const runPayloads = runRows.map((row) =>
-        this.#readPersistedRecordPayload(row),
-      );
+      const markerBoundRows = (
+        tableKey: Exclude<LarkProjectionTableKey, "commit_markers">,
+        rows: readonly Record<string, unknown>[],
+      ): readonly Record<string, unknown>[] => {
+        const bindings = marker.recordBindings.filter(
+          (binding) => binding.tableKey === tableKey,
+        );
+        if (marker.recordBindings.length === 0) return rows;
+        const rowsByStableId = new Map<string, Record<string, unknown>[]>
+        for (const row of rows) {
+          const fields =
+            row.fields !== null && typeof row.fields === "object"
+              ? (row.fields as Record<string, unknown>)
+              : row;
+          const stableId = fields[this.#configuration.stableIdField];
+          if (typeof stableId !== "string") continue;
+          rowsByStableId.set(stableId, [
+            ...(rowsByStableId.get(stableId) ?? []),
+            row,
+          ]);
+        }
+        return bindings.map((binding) => {
+          const matches = rowsByStableId.get(binding.stableId) ?? [];
+          const row = matches[0];
+          if (matches.length !== 1 || row === undefined) {
+            throw new Error(
+              `Lark committed generation is missing a unique bound row: ${tableKey}:${binding.stableId}`,
+            );
+          }
+          const fields =
+            row.fields !== null && typeof row.fields === "object"
+              ? (row.fields as Record<string, unknown>)
+              : row;
+          if (
+            fields[this.#configuration.payloadHashField] !==
+            binding.payloadHash
+          ) {
+            throw new Error(
+              `Lark committed generation row hash conflicts: ${tableKey}:${binding.stableId}`,
+            );
+          }
+          return row;
+        });
+      };
+      const runPayloads = markerBoundRows("runs", runRows).map((row) => {
+        const payload = this.#readPersistedRecordPayload(row);
+        this.#assertPersistedPhysicalIdentity("runs", row, payload);
+        return payload;
+      });
       const bakeoffJobs = runPayloads.filter(
         (record) =>
           record.recordType === "bakeoff_job" &&
@@ -5594,7 +5918,58 @@ class VerifiedLarkCliTransport
           "Lark committed auxiliary state has no unique Bakeoff Job row",
         );
       }
-      const productGapCardTable = comparisonRows
+      const workflowPayloads = markerBoundRows(
+        "workflow_events",
+        workflowRows,
+      ).map((row) => {
+        const payload = this.#readPersistedRecordPayload(row);
+        this.#assertPersistedPhysicalIdentity(
+          "workflow_events",
+          row,
+          payload,
+        );
+        return payload;
+      });
+      const adjudicationEventTable = workflowPayloads
+        .filter(
+          (record) =>
+            record.recordType === "adjudication_event" &&
+            record.jobId === command.jobId,
+        )
+        .map((record) => {
+          const event = record as unknown as AdjudicationEventRecord;
+          assertValidAdjudicationEventFields(event);
+          return event;
+        });
+      const reviewEventTable = workflowPayloads
+        .filter(
+          (record) =>
+            record.recordType === "review_event" &&
+            record.jobId === command.jobId,
+        )
+        .map((record) => {
+          const event = record as unknown as ReviewEventRecord;
+          assertValidReviewEventFields(event);
+          return event;
+        });
+      assertLinearCommittedCausalHistory({
+        events: adjudicationEventTable,
+        eventId: (event) => event.adjudicationEventId,
+        priorId: (event) => event.priorAdjudicationEventId,
+        groupId: (event) => `${event.scorecardId}:${event.dimension}`,
+        label: "Adjudication Event",
+      });
+      assertLinearCommittedCausalHistory({
+        events: reviewEventTable,
+        eventId: (event) => event.reviewEventId,
+        priorId: (event) => event.priorReviewEventId,
+        groupId: (event) => event.scorecardId,
+        label: "Review Event",
+      });
+      const productGapCardTable = markerBoundRows(
+        "comparisons",
+        comparisonRows,
+      )
         .map((row) => {
           const payload = this.#readPersistedRecordPayload(row);
           this.#assertPersistedPhysicalIdentity(
@@ -5650,6 +6025,8 @@ class VerifiedLarkCliTransport
       return {
         marker,
         bakeoffJob: bakeoffJobs[0] as unknown as RunRecord,
+        adjudicationEventTable,
+        reviewEventTable,
         productGapCardTable,
         reportCollection,
       };
