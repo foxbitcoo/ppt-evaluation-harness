@@ -1067,10 +1067,10 @@ test("the production CLI rejects the offline fixture checkpoint before reading r
   );
 });
 
-test("checked-in evidence records a successful allowlisted v32 replay under the current verifier", async () => {
+test("checked-in evidence records a successful allowlisted v33 replay under the current verifier", async () => {
   const evidenceSource = await readFile(
     new URL(
-      "../evidence/doubao-v32-current-verifier-recovery.json",
+      "../evidence/doubao-v33-current-verifier-recovery.json",
       import.meta.url,
     ),
     "utf8",
@@ -1080,7 +1080,7 @@ test("checked-in evidence records a successful allowlisted v32 replay under the 
   const rawRecoveryCliResultBytes = Uint8Array.from(
     await readFile(
       new URL(
-        "../evidence/doubao-v32-final-recovery-cli-result.json",
+        "../evidence/doubao-v33-final-recovery-cli-result.json",
         import.meta.url,
       ),
     ),
@@ -1101,7 +1101,7 @@ test("checked-in evidence records a successful allowlisted v32 replay under the 
     status: "recovery_succeeded",
     recordedOn: "2026-08-02",
     timingBasis: "date_only_unobserved_exact_time",
-    registryId: "doubao-real-provider-20260802-t10-v32",
+    registryId: "doubao-real-provider-20260802-t10-v33",
     checkpointId: DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
@@ -1157,20 +1157,20 @@ test("checked-in evidence records a successful allowlisted v32 replay under the 
     recoveryCliEvidence: {
       schemaVersion: "doubao-recovery-cli-evidence-v1",
       rawResultReference:
-        "evidence/doubao-v32-final-recovery-cli-result.json",
+        "evidence/doubao-v33-final-recovery-cli-result.json",
       rawResultHashScope:
         "exact_stdout_bytes_including_terminal_lf",
       rawResultHash:
-        "sha256:509484c35ffdf2ad6fce0cfcff1bf071d8620fc94e1bfd4e03e36e030f121bb4",
+        "sha256:1b03e0a81fbd9475c2842e11a5f8c16971e3b14e54139be305843bca54d4e0f9",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
       attestedResultSchemaVersion:
         "doubao-recovery-result-attestation-v1",
       attestedResultHash:
-        "sha256:957143a7b24f8d6b915c6d852958e1601cbe106cbe06e788567b60e77dde27ec",
+        "sha256:a726950f97fe5258a61d473b447929ce3152ea2f9759e064dfe925fe8409eeb6",
       attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
     },
     resultHash:
-      "sha256:7853973c8f85a631bd076a64926d0df124170ea14d9694dfd41d0111de1e3e7d",
+      "sha256:ced532b5add10518e957376a88ca07dac40b48137a2a9f529c62c228735c4c06",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
@@ -1220,7 +1220,7 @@ test("the recovery evidence index preserves history and identifies exactly one c
 
   assert.deepEqual(index, {
     schemaVersion: "doubao-recovery-evidence-index-v1",
-    latestEvidenceVersion: "v32",
+    latestEvidenceVersion: "v33",
     entries: [
       {
         version: "v30",
@@ -1246,13 +1246,24 @@ test("the recovery evidence index preserves history and identifies exactly one c
       },
       {
         version: "v32",
-        status: "current",
+        status: "historical",
         recordedOn: "2026-08-02",
-        verifierSpecCommitSha: BUILD_SPEC_COMMIT_SHA,
+        verifierSpecCommitSha:
+          "d4712f982860eea55409da7349ae67b7ba9f2c65",
         currentVerifierEvidenceReference:
           "evidence/doubao-v32-current-verifier-recovery.json",
         rawRecoveryCliResultReference:
           "evidence/doubao-v32-final-recovery-cli-result.json",
+      },
+      {
+        version: "v33",
+        status: "current",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha: BUILD_SPEC_COMMIT_SHA,
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v33-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v33-final-recovery-cli-result.json",
       },
     ],
   });
@@ -1262,7 +1273,7 @@ test("raw recovery stdout attestation is whitespace-sensitive while its parsed a
   const checkedBytes = Uint8Array.from(
     await readFile(
       new URL(
-        "../evidence/doubao-v32-final-recovery-cli-result.json",
+        "../evidence/doubao-v33-final-recovery-cli-result.json",
         import.meta.url,
       ),
     ),
@@ -1309,7 +1320,7 @@ test("raw recovery stdout attestation is whitespace-sensitive while its parsed a
 test("current-verifier recovery evidence rejects duplicate and unknown authenticated fields", async () => {
   const evidenceSource = await readFile(
     new URL(
-      "../evidence/doubao-v32-current-verifier-recovery.json",
+      "../evidence/doubao-v33-current-verifier-recovery.json",
       import.meta.url,
     ),
     "utf8",
