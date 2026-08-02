@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "m0-trusted-render-reference-v1",
+  "sourceArtifactHash": "sha256:82552599dfba489abf408c68f4ba9413a903e46e77642960911a30f56860636d",
+  "pageCount": 8,
+  "renderer": "PresentationsArtifactToolRenderHelper",
+  "rendererSourceHash": "sha256:3bedbcf9689cfcba30a09fd025fb9219381f9c46bdf4f9038d16212b7ae028fd",
+  "referenceStatus": "MANUALLY_CONFIRMED_CHINESE_VISIBLE",
+  "slides": [
+    {
+      "pageNumber": 1,
+      "contentHash": "sha256:14ac6eee331f0b21a04f5bcfd0259c676b46e92d7e75715e82ddfc69c8c9627e"
+    },
+    {
+      "pageNumber": 2,
+      "contentHash": "sha256:deb03c603bc770cd84cb5b387bce01a4144b23e189b87a2e9cd356ca3ed2b036"
+    },
+    {
+      "pageNumber": 3,
+      "contentHash": "sha256:899610fe4a547ce9aee94a4861f805d8b85331af26fa498dbbc99ace659ab340"
+    },
+    {
+      "pageNumber": 4,
+      "contentHash": "sha256:4aca8e277f74b86a2bb76d2a5e9f07044c5b5a6850e2c25fcfa219a5b8d8fa46"
+    },
+    {
+      "pageNumber": 5,
+      "contentHash": "sha256:4c228dcc37fa35cd2551efce2943b2b90fa3f4f01f45cae7ad5dd606ca9e2c2b"
+    },
+    {
+      "pageNumber": 6,
+      "contentHash": "sha256:6cb5dcc8cc9fdf2a6c3bd311f8ecdd354936e38489de1476ba5a2b767a698341"
+    },
+    {
+      "pageNumber": 7,
+      "contentHash": "sha256:f955cbdc84d516ade5825af4fc52f0fa0f6bba973164dc3e9b9ccaca78ad3cc5"
+    },
+    {
+      "pageNumber": 8,
+      "contentHash": "sha256:4336d5a25fca40fa21387c6efdf5862b4926926fe31dc096e89523a8126cfbb1"
+    }
+  ]
+}
