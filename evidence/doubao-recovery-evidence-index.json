@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "doubao-recovery-evidence-index-v1",
+  "latestEvidenceVersion": "v32",
+  "entries": [
+    {
+      "version": "v30",
+      "status": "historical",
+      "recordedOn": "2026-07-31",
+      "verifierSpecCommitSha": "2d795e4e5c9dae6f77663b44598d396106181b6e",
+      "currentVerifierEvidenceReference": "evidence/doubao-v30-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v30-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v31",
+      "status": "historical",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "56058f12032b16effaeb079802014406ac0e7e92",
+      "currentVerifierEvidenceReference": "evidence/doubao-v31-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v31-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v32",
+      "status": "current",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "d4712f982860eea55409da7349ae67b7ba9f2c65",
+      "currentVerifierEvidenceReference": "evidence/doubao-v32-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v32-final-recovery-cli-result.json"
+    }
+  ]
+}

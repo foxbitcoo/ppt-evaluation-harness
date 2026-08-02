@@ -49,7 +49,9 @@ through the public `DoubaoProductionReplayAdapter` as
 Machine-readable evidence:
 `docs/smoke/doubao-real-provider-replay-2026-07-28.json`. The later
 current-verifier recovery attestation is retained as
-`evidence/doubao-v30-current-verifier-recovery.json`. Its `recordedOn` value is
+`evidence/doubao-v32-current-verifier-recovery.json`; the append-only evidence
+history and current pointer are recorded in
+`evidence/doubao-recovery-evidence-index.json`. Its `recordedOn` value is
 date-only and its `timingBasis` is
 `date_only_unobserved_exact_time`: the successful CLI result was retained, but
 no independently trustworthy exact CLI-completion timestamp was observed, so
@@ -70,12 +72,13 @@ source is frozen. The evidence records the exact verifier build identity that
 produced both hashes and retains the raw post-freeze CLI result as a separate
 checked-in evidence file.
 
-The 2026-08-02 T10 rehearsal used durable-root registry
-`doubao-real-provider-20260802-t10-v31`. The previous v30 registry was retained
-unchanged after macOS reported a different filesystem device identity; v31
-explicitly re-attests the same six narrow retained roots before recovery. This
-is a verifier-side storage re-attestation, not a new provider generation or a
-change to the retained Artifact.
+The current 2026-08-02 T10 rehearsal used the v2 durable-root registry
+`doubao-real-provider-20260802-t10-v32`. Historical v30 and v31 recovery
+evidence remains unchanged. v32 binds the same six narrow retained roots to
+their canonical path, device, inode, owner, and mode before recovery and binds
+the verifier to the exact TypeScript runtime toolchain used for execution.
+This is verifier-side storage and build re-attestation, not a new provider
+generation or a change to the retained Artifact.
 
 ## Fixed protocol
 
