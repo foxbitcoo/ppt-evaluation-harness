@@ -1067,10 +1067,10 @@ test("the production CLI rejects the offline fixture checkpoint before reading r
   );
 });
 
-test("checked-in evidence records a successful allowlisted v33 replay under the current verifier", async () => {
+test("checked-in evidence records a successful allowlisted v35 replay under the current verifier", async () => {
   const evidenceSource = await readFile(
     new URL(
-      "../evidence/doubao-v33-current-verifier-recovery.json",
+      "../evidence/doubao-v35-current-verifier-recovery.json",
       import.meta.url,
     ),
     "utf8",
@@ -1080,7 +1080,7 @@ test("checked-in evidence records a successful allowlisted v33 replay under the 
   const rawRecoveryCliResultBytes = Uint8Array.from(
     await readFile(
       new URL(
-        "../evidence/doubao-v33-final-recovery-cli-result.json",
+        "../evidence/doubao-v35-final-recovery-cli-result.json",
         import.meta.url,
       ),
     ),
@@ -1101,7 +1101,7 @@ test("checked-in evidence records a successful allowlisted v33 replay under the 
     status: "recovery_succeeded",
     recordedOn: "2026-08-02",
     timingBasis: "date_only_unobserved_exact_time",
-    registryId: "doubao-real-provider-20260802-t10-v33",
+    registryId: "doubao-real-provider-20260802-t10-v34",
     checkpointId: DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
@@ -1157,20 +1157,20 @@ test("checked-in evidence records a successful allowlisted v33 replay under the 
     recoveryCliEvidence: {
       schemaVersion: "doubao-recovery-cli-evidence-v1",
       rawResultReference:
-        "evidence/doubao-v33-final-recovery-cli-result.json",
+        "evidence/doubao-v35-final-recovery-cli-result.json",
       rawResultHashScope:
         "exact_stdout_bytes_including_terminal_lf",
       rawResultHash:
-        "sha256:1b03e0a81fbd9475c2842e11a5f8c16971e3b14e54139be305843bca54d4e0f9",
+        "sha256:36edc027a29452cb3490265e7b7ba67edb975fe4a12edd11b502e759529faed6",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
       attestedResultSchemaVersion:
         "doubao-recovery-result-attestation-v1",
       attestedResultHash:
-        "sha256:a726950f97fe5258a61d473b447929ce3152ea2f9759e064dfe925fe8409eeb6",
+        "sha256:7f42520ce1193501f873dd95b084cf2d495bb83f7addf70d272b4bb6fb732131",
       attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
     },
     resultHash:
-      "sha256:ced532b5add10518e957376a88ca07dac40b48137a2a9f529c62c228735c4c06",
+      "sha256:90a5c535894b05b1b112f7104bd94c82b51ebb42a25c5ae9f696a6916a775173",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
@@ -1220,7 +1220,7 @@ test("the recovery evidence index preserves history and identifies exactly one c
 
   assert.deepEqual(index, {
     schemaVersion: "doubao-recovery-evidence-index-v1",
-    latestEvidenceVersion: "v33",
+    latestEvidenceVersion: "v35",
     entries: [
       {
         version: "v30",
@@ -1257,13 +1257,35 @@ test("the recovery evidence index preserves history and identifies exactly one c
       },
       {
         version: "v33",
-        status: "current",
+        status: "historical",
         recordedOn: "2026-08-02",
-        verifierSpecCommitSha: BUILD_SPEC_COMMIT_SHA,
+        verifierSpecCommitSha:
+          "5c2312ae6abed54e797f70f3e85e1621ce5e4581",
         currentVerifierEvidenceReference:
           "evidence/doubao-v33-current-verifier-recovery.json",
         rawRecoveryCliResultReference:
           "evidence/doubao-v33-final-recovery-cli-result.json",
+      },
+      {
+        version: "v34",
+        status: "historical",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha:
+          "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v34-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v34-final-recovery-cli-result.json",
+      },
+      {
+        version: "v35",
+        status: "current",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha: BUILD_SPEC_COMMIT_SHA,
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v35-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v35-final-recovery-cli-result.json",
       },
     ],
   });
@@ -1273,7 +1295,7 @@ test("raw recovery stdout attestation is whitespace-sensitive while its parsed a
   const checkedBytes = Uint8Array.from(
     await readFile(
       new URL(
-        "../evidence/doubao-v33-final-recovery-cli-result.json",
+        "../evidence/doubao-v35-final-recovery-cli-result.json",
         import.meta.url,
       ),
     ),
@@ -1320,7 +1342,7 @@ test("raw recovery stdout attestation is whitespace-sensitive while its parsed a
 test("current-verifier recovery evidence rejects duplicate and unknown authenticated fields", async () => {
   const evidenceSource = await readFile(
     new URL(
-      "../evidence/doubao-v33-current-verifier-recovery.json",
+      "../evidence/doubao-v35-current-verifier-recovery.json",
       import.meta.url,
     ),
     "utf8",

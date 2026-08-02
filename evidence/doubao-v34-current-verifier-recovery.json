@@ -1,0 +1,72 @@
+{
+  "schemaVersion": "doubao-current-verifier-trusted-recovery-evidence-v1",
+  "status": "recovery_succeeded",
+  "recordedOn": "2026-08-02",
+  "timingBasis": "date_only_unobserved_exact_time",
+  "registryId": "doubao-real-provider-20260802-t10-v34",
+  "checkpointId": "doubao-volcano-20260727-real-provider-v1",
+  "artifactContentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+  "artifactManifestHash": "sha256:1697e0128db2880c3bf7de7dc7fc03d376582d0bc16b3e293fbe68229c12a53a",
+  "renderManifestHash": "sha256:6daf8702f7007148336931dca858f1b01dc288832545f9ae5bf534a3be2c32f0",
+  "runSpecificationHash": "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b",
+  "checkpointTraceHash": "sha256:f2b51f7de6b15d9676ee3d345ba406be0f7aeb42a10443e2c0d562fe2508ca0d",
+  "evaluatedRunIdentity": {
+    "specCommitSha": "fb08a1096bad8e63f33c27bd6add40e0ee6c792c",
+    "buildIdentitySource": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    "runnerCodeDigest": "sha256:ba691d59c346eb96f2cd68ba5d54bde341ffe0f2f4486aa3f765056d60732b18",
+    "runSpecificationCanonicalHash": "sha256:4ede5e5c3f8b3ce1e17163658d742004fd7436136b715f6046689bef2c872b3b"
+  },
+  "verifierBuildIdentity": {
+    "schemaVersion": "ppt-evaluation-build-identity-v1",
+    "specCommitSha": "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+    "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+    "sourceArchiveDigest": "sha256:7c86267fca584ea65126c75efe96cca17da0f275828cfcc55783503803f05972",
+    "sourceArchiveEntryCount": 130,
+    "embeddedManifestHash": "sha256:7f6190283200d62d2d263991dd8265cebbc699f36404c339be16a033abd8e049",
+    "manifestHash": "sha256:2eda16abb33266992ce4390e5876863fdc89abce523124642858b26cb8a12a58"
+  },
+  "rendererAuthorizationEvidence": {
+    "decisionId": "doubao-replay:b7b30a5f6730e1de522c6164",
+    "authorizationAuditDigest": "sha256:1ed43314b7d5a8c0c99a05cd300fc388b56de95a36347563839e77d470317315",
+    "requestId": "artifact-rendering:artifact-doubao-ca1235d230e2b61ce083bebadaeaa5e4",
+    "targetService": "isolated-offline-png-rasterizer",
+    "targetAccount": "local-sandbox",
+    "targetRegion": "local",
+    "payloadHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
+    "policyVersion": "doubao-real-provider-replay-ingest-v1",
+    "approvedAt": "2026-07-30T15:40:45.090Z",
+    "expiresAt": "2099-01-01T00:00:00.000Z"
+  },
+  "binaryValidation": {
+    "pptxSlideCount": 16,
+    "staticPngCount": 16,
+    "contactSheetPngCount": 1
+  },
+  "recoveryCliEvidence": {
+    "schemaVersion": "doubao-recovery-cli-evidence-v1",
+    "rawResultReference": "evidence/doubao-v34-final-recovery-cli-result.json",
+    "rawResultHashScope": "exact_stdout_bytes_including_terminal_lf",
+    "rawResultHash": "sha256:3db2171eb14e3f31eab09bdeb23a83cd3d1ad5cc7bb5f234b039cac7c648d9ab",
+    "rawResultVerifierBuildIdentity": {
+      "schemaVersion": "ppt-evaluation-build-identity-v1",
+      "specCommitSha": "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+      "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+      "sourceArchiveDigest": "sha256:7c86267fca584ea65126c75efe96cca17da0f275828cfcc55783503803f05972",
+      "sourceArchiveEntryCount": 130,
+      "embeddedManifestHash": "sha256:7f6190283200d62d2d263991dd8265cebbc699f36404c339be16a033abd8e049",
+      "manifestHash": "sha256:2eda16abb33266992ce4390e5876863fdc89abce523124642858b26cb8a12a58"
+    },
+    "attestedResultSchemaVersion": "doubao-recovery-result-attestation-v1",
+    "attestedResultHash": "sha256:7f42520ce1193501f873dd95b084cf2d495bb83f7addf70d272b4bb6fb732131",
+    "attestedResultVerifierBuildIdentity": {
+      "schemaVersion": "ppt-evaluation-build-identity-v1",
+      "specCommitSha": "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+      "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
+      "sourceArchiveDigest": "sha256:7c86267fca584ea65126c75efe96cca17da0f275828cfcc55783503803f05972",
+      "sourceArchiveEntryCount": 130,
+      "embeddedManifestHash": "sha256:7f6190283200d62d2d263991dd8265cebbc699f36404c339be16a033abd8e049",
+      "manifestHash": "sha256:2eda16abb33266992ce4390e5876863fdc89abce523124642858b26cb8a12a58"
+    }
+  },
+  "resultHash": "sha256:9223f5bf32dc61a69fa0db498b6507a3508ef229a0d8c0e1fed30c50a359e704"
+}

@@ -1,6 +1,6 @@
 {
   "schemaVersion": "doubao-recovery-evidence-index-v1",
-  "latestEvidenceVersion": "v33",
+  "latestEvidenceVersion": "v35",
   "entries": [
     {
       "version": "v30",
@@ -28,11 +28,27 @@
     },
     {
       "version": "v33",
-      "status": "current",
+      "status": "historical",
       "recordedOn": "2026-08-02",
       "verifierSpecCommitSha": "5c2312ae6abed54e797f70f3e85e1621ce5e4581",
       "currentVerifierEvidenceReference": "evidence/doubao-v33-current-verifier-recovery.json",
       "rawRecoveryCliResultReference": "evidence/doubao-v33-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v34",
+      "status": "historical",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+      "currentVerifierEvidenceReference": "evidence/doubao-v34-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v34-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v35",
+      "status": "current",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "856776e27fb9eba1f3cec2457653fa721696a4b6",
+      "currentVerifierEvidenceReference": "evidence/doubao-v35-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v35-final-recovery-cli-result.json"
     }
   ]
 }
