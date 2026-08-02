@@ -9,11 +9,11 @@ import {
   FileSystemEgressAuthorizationAudit,
   FileSystemJudgeEgressAudit,
   FileSystemReferencePackStore,
-  VOLCANO_EVALUATION_CASE,
-  resolveReferencePackForCase,
-  type ApprovedEgressAuthorization,
-  type JudgeEgressAttemptAudit,
-} from "../src/index.ts";
+} from "../src/file-system-operational-durability.ts";
+import type { JudgeEgressAttemptAudit } from "../src/domain.ts";
+import type { ApprovedEgressAuthorization } from "../src/egress-authorization.ts";
+import { VOLCANO_EVALUATION_CASE } from "../src/fixtures/volcano-case.ts";
+import { resolveReferencePackForCase } from "../src/reference-pack.ts";
 
 const FIXED_TIME = "2026-07-30T00:00:00.000Z";
 

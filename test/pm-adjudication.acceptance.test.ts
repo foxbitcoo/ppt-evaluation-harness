@@ -167,6 +167,21 @@ test("adjudication append and readback reject invalid human-final fields", async
   };
   const invalidEvents = [
     {
+      label: "invalid record type",
+      event: { ...validEvent, recordType: "review_event" },
+    },
+    {
+      label: "invalid schema",
+      event: {
+        ...validEvent,
+        schemaVersion: "adjudication-event-v0",
+      },
+    },
+    {
+      label: "blank event ID",
+      event: { ...validEvent, adjudicationEventId: " " },
+    },
+    {
       label: "out-of-range human score",
       event: { ...validEvent, humanFinalScore: 99 },
     },
@@ -197,6 +212,20 @@ test("adjudication append and readback reject invalid human-final fields", async
       label: "invalid sync timestamp",
       event: { ...validEvent, lastSyncedAt: "not-a-date" },
     },
+    {
+      label: "creation precedes occurrence",
+      event: {
+        ...validEvent,
+        createdAt: "2026-07-30T23:59:59.000Z",
+      },
+    },
+    {
+      label: "sync precedes creation",
+      event: {
+        ...validEvent,
+        lastSyncedAt: "2026-07-30T23:59:59.000Z",
+      },
+    },
   ] as const;
 
   for (const { label, event } of invalidEvents) {
@@ -205,7 +234,7 @@ test("adjudication append and readback reject invalid human-final fields", async
         feishu.appendAdjudicationEvent(
           event as unknown as AdjudicationEventRecord,
         ),
-        /Adjudication Event.*invalid|human.*score|actor|reason|timestamp/i,
+        /Adjudication Event.*(?:invalid|schema|ID|score|actor|reason|timestamp)/i,
       );
       await assert.rejects(
         createScoreAdjudicationService({
@@ -216,11 +245,88 @@ test("adjudication append and readback reject invalid human-final fields", async
             ],
           ),
         }).getEffectiveScorecard(scorecardId),
-        /Adjudication Event.*invalid|human.*score|actor|reason|timestamp/i,
+        /Adjudication Event.*(?:invalid|schema|ID|score|actor|reason|timestamp)/i,
       );
     });
   }
   assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
+});
+
+test("adjudication append rejects a causal child that predates its parent", async () => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) => assessmentStatus === "ASSESSED",
+  );
+  assert.ok(dimension);
+  const parent = await service.adjudicateDimension({
+    adjudicationEventId: "adj-causal-parent",
+    scorecardId,
+    dimension: dimension.dimension,
+    humanFinalScore: 4,
+    actorId: "pm-causal-reviewer",
+    occurredAt: "2026-08-02T10:00:00.000Z",
+    reason: "Causal parent fixture.",
+    priorAdjudicationEventId: null,
+  });
+
+  await assert.rejects(
+    service.adjudicateDimension({
+      adjudicationEventId: "adj-causal-child",
+      scorecardId,
+      dimension: dimension.dimension,
+      humanFinalScore: 1,
+      actorId: "pm-causal-reviewer",
+      occurredAt: "2026-08-02T09:59:59.000Z",
+      reason: "This child predates its causal parent.",
+      priorAdjudicationEventId: parent.adjudicationEventId,
+    }),
+    /Adjudication Event.*(?:precedes|causal parent)/i,
+  );
+  assert.deepEqual(
+    feishu.snapshot().adjudicationEventTable.map(
+      ({ adjudicationEventId }) => adjudicationEventId,
+    ),
+    [parent.adjudicationEventId],
+  );
+});
+
+test("effective Scorecard readback rejects an adjudication child that predates its parent", async () => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) => assessmentStatus === "ASSESSED",
+  );
+  assert.ok(dimension);
+  const parent = await service.adjudicateDimension({
+    adjudicationEventId: "adj-readback-causal-parent",
+    scorecardId,
+    dimension: dimension.dimension,
+    humanFinalScore: 4,
+    actorId: "pm-causal-reviewer",
+    occurredAt: "2026-08-02T10:00:00.000Z",
+    reason: "Causal parent fixture.",
+    priorAdjudicationEventId: null,
+  });
+  const child: AdjudicationEventRecord = {
+    ...parent,
+    adjudicationEventId: "adj-readback-causal-child",
+    humanFinalScore: 1,
+    occurredAt: "2026-08-02T09:59:59.000Z",
+    createdAt: "2026-08-02T09:59:59.000Z",
+    lastSyncedAt: "2026-08-02T09:59:59.000Z",
+    reason: "This persisted child predates its causal parent.",
+    priorAdjudicationEventId: parent.adjudicationEventId,
+  };
+
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: withAdjudicationEvents(feishu, () => [parent, child]),
+    }).getEffectiveScorecard(scorecardId),
+    /adjudication causal history.*child precedes parent/i,
+  );
 });
 
 test("review append and readback accept only causal human acceptance events", async (t) => {

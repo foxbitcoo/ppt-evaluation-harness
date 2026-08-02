@@ -23,6 +23,7 @@ import {
   resolveHarnessProductAdapterExecutor,
 } from "../src/mock-wps.ts";
 import {
+  createProviderSubmissionIntentCheckpoint,
   parseAdapterExecutionConfiguration,
 } from "../src/product-adapter.ts";
 import {
@@ -31,6 +32,7 @@ import {
   rendererBundleClosureDigestForTest,
   rendererSystemRuntimeAttestationDigestForTest,
   createHarnessOwnedProductionCapabilities,
+  resolveHarnessOwnedProductionCheckpointAuthority,
 } from "../src/production-capabilities.ts";
 import {
   InMemoryPayloadInventory,
@@ -145,6 +147,94 @@ async function capabilityFixture(
     egressAudit: new InMemoryEgressAuthorizationAudit(),
   });
 }
+
+test("production capabilities expose only a read-only Attempt checkpoint facade", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "production-checkpoint-read-facade-"),
+  );
+  try {
+    const capabilities = await capabilityFixture(root, {
+      rendererId: "production-checkpoint-read-facade-renderer",
+      slidesDirectory: join(root, "unused-slides"),
+      extractedTextPrefix: "page",
+      fontPack: "test",
+      resolution: "1x1",
+      colorProfile: "sRGB",
+      fidelityNotes: ["test"],
+    });
+
+    assert.equal(
+      typeof capabilities.attemptCheckpointStore.readAttempt,
+      "function",
+    );
+    assert.equal("append" in capabilities.attemptCheckpointStore, false);
+    assert.equal(
+      "registerAdapterClaim" in capabilities.attemptCheckpointStore,
+      false,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("production adapter checkpoints require the exact harness-selected Attempt authority", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "production-checkpoint-attempt-authority-"),
+  );
+  try {
+    const capabilities = await capabilityFixture(root, {
+      rendererId: "production-checkpoint-attempt-authority-renderer",
+      slidesDirectory: join(root, "unused-slides"),
+      extractedTextPrefix: "page",
+      fontPack: "test",
+      resolution: "1x1",
+      colorProfile: "sRGB",
+      fidelityNotes: ["test"],
+    });
+    const authority = resolveHarnessOwnedProductionCheckpointAuthority(
+      capabilities.attemptCheckpointStore,
+    );
+    assert.ok(authority);
+    const command = Object.freeze({
+      jobId: "production-checkpoint-authority-job",
+      runId: "production-checkpoint-authority-run",
+      attemptId: "production-checkpoint-authority-attempt-1",
+      attemptSeq: 1,
+      timeoutMs: 30 * 60 * 1_000,
+      signal: new AbortController().signal,
+      evaluationCase: VOLCANO_EVALUATION_CASE,
+    });
+    const adapterVersion = "wps-aippt-browser@1";
+    const event = createProviderSubmissionIntentCheckpoint(
+      command,
+      adapterVersion,
+      "2026-08-02T00:00:00.000Z",
+    );
+
+    await assert.rejects(
+      authority.adapterCheckpointStore.append(event),
+      /no matching harness-selected Attempt authority/i,
+    );
+    await authority.authorizeAdapterClaim({
+      jobId: command.jobId,
+      caseId: command.evaluationCase.caseId,
+      runId: command.runId,
+      attemptId: command.attemptId,
+      attemptSeq: command.attemptSeq,
+      adapterVersion,
+      claimEpoch: command.attemptSeq,
+    });
+    await authority.adapterCheckpointStore.append(event);
+    const recovered = await capabilities.attemptCheckpointStore.readAttempt(
+      command.attemptId,
+    );
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0]?.eventId, event.eventId);
+    assert.equal(recovered[0]?.writerId, adapterVersion);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("production capabilities reject two lexical roots that resolve to one directory identity", async () => {
   const root = await mkdtemp(

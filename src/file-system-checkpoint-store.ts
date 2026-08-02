@@ -25,6 +25,7 @@ import type {
 import { parseStrictJson } from "./strict-json.ts";
 
 const LEDGER_SCHEMA = "attempt-checkpoint-ledger-v1" as const;
+const HEAD_SCHEMA = "attempt-checkpoint-monotonic-head-v1" as const;
 const TERMINAL_PROOF_SCHEMA =
   "harness-terminal-non-submission-proof-v1" as const;
 const MAX_LEDGER_BYTES = 16 * 1024 * 1024;
@@ -56,6 +57,14 @@ interface CheckpointRootIdentity {
   readonly mode: number;
 }
 
+export interface ExpectedCheckpointRootIdentity {
+  readonly canonicalPath: string;
+  readonly deviceId: string;
+  readonly inodeId: string;
+  readonly ownerUid: number;
+  readonly mode: number;
+}
+
 interface CheckpointLedgerRecord {
   readonly schemaVersion: typeof LEDGER_SCHEMA;
   readonly checkpointStoreId: string;
@@ -69,6 +78,16 @@ interface CheckpointLedgerRecord {
     | TerminalNonSubmissionProof
     | null;
   readonly recordHash: `sha256:${string}`;
+  readonly authenticationTag: `hmac-sha256:${string}`;
+}
+
+interface CheckpointLedgerHead {
+  readonly schemaVersion: typeof HEAD_SCHEMA;
+  readonly checkpointStoreId: string;
+  readonly attemptDigest: string;
+  readonly sequence: number;
+  readonly recordHash: `sha256:${string}`;
+  readonly headHash: `sha256:${string}`;
   readonly authenticationTag: `hmac-sha256:${string}`;
 }
 
@@ -624,11 +643,13 @@ export class FileSystemAttemptCheckpointStore
   readonly recoveryReferencePrefix: string;
   readonly #rootPath: string;
   readonly #legacyReadOnly: boolean;
+  readonly #expectedRootIdentity: ExpectedCheckpointRootIdentity | undefined;
 
   constructor(input: {
     readonly checkpointStoreId: string;
     readonly rootPath: string;
     readonly legacyReadOnly?: boolean;
+    readonly expectedRootIdentity?: ExpectedCheckpointRootIdentity;
   }) {
     if (input.checkpointStoreId.trim().length === 0) {
       throw new Error("Checkpoint store requires a stable ID");
@@ -639,6 +660,7 @@ export class FileSystemAttemptCheckpointStore
       throw new Error("Checkpoint store root must be narrowly scoped");
     }
     this.#legacyReadOnly = input.legacyReadOnly === true;
+    this.#expectedRootIdentity = input.expectedRootIdentity;
     this.checkpointIntegrity = this.#legacyReadOnly
       ? "legacy_unverified_read_only"
       : "authenticated_hash_chain";
@@ -658,6 +680,13 @@ export class FileSystemAttemptCheckpointStore
     return resolve(this.#rootPath, `${this.#digestFor(attemptId)}.lock`);
   }
 
+  #headPathFor(attemptId: string): string {
+    return resolve(
+      this.#rootPath,
+      `.checkpoint-monotonic-head-${this.#digestFor(attemptId)}.json`,
+    );
+  }
+
   #keyPath(): string {
     const storeDigest = createHash("sha256")
       .update(this.checkpointStoreId)
@@ -668,6 +697,7 @@ export class FileSystemAttemptCheckpointStore
   async #prepareRoot(): Promise<void> {
     await mkdir(this.#rootPath, { recursive: true, mode: 0o700 });
     const observed = await this.#observedRootIdentity();
+    this.#assertExpectedRootIdentity(observed);
     const rootAnchorDigest = createHash("sha256")
       .update(observed.canonicalPath)
       .digest("hex");
@@ -716,6 +746,27 @@ export class FileSystemAttemptCheckpointStore
         "Checkpoint store root identity conflicts with its persistent anchor",
       );
     }
+  }
+
+  #assertExpectedRootIdentity(observed: CheckpointRootIdentity): void {
+    const expected = this.#expectedRootIdentity;
+    if (expected === undefined) return;
+    if (
+      observed.canonicalPath !== expected.canonicalPath ||
+      observed.device !== expected.deviceId ||
+      observed.inode !== expected.inodeId ||
+      observed.ownerUserId !== expected.ownerUid ||
+      observed.mode !== (expected.mode & 0o777)
+    ) {
+      throw new Error(
+        "Checkpoint store root identity differs from its durable registry attestation",
+      );
+    }
+  }
+
+  async #assertExpectedRootStillBound(): Promise<void> {
+    if (this.#expectedRootIdentity === undefined) return;
+    this.#assertExpectedRootIdentity(await this.#observedRootIdentity());
   }
 
   async #observedRootIdentity(): Promise<CheckpointRootIdentity> {
@@ -830,18 +881,161 @@ export class FileSystemAttemptCheckpointStore
     key: Buffer,
   ): Promise<readonly CheckpointLedgerRecord[]> {
     const content = await this.#readContent(this.#pathFor(attemptId));
-    if (content === null || content.length === 0) return Object.freeze([]);
-    return parseLedger(
+    const head = await this.#readHead(attemptId, key);
+    if (content === null || content.length === 0) {
+      if (head !== null) {
+        throw new Error(
+          "Attempt checkpoint monotonic head conflicts with an empty ledger",
+        );
+      }
+      return Object.freeze([]);
+    }
+    const records = parseLedger(
       content,
       attemptId,
       this.checkpointStoreId,
       key,
     );
+    const latest = records.at(-1);
+    if (
+      head === null ||
+      latest === undefined ||
+      head.sequence !== latest.sequence ||
+      head.recordHash !== latest.recordHash
+    ) {
+      throw new Error(
+        "Attempt checkpoint monotonic head mismatch detected ledger rollback",
+      );
+    }
+    return records;
+  }
+
+  async #readHead(
+    attemptId: string,
+    key: Buffer,
+  ): Promise<CheckpointLedgerHead | null> {
+    const path = this.#headPathFor(attemptId);
+    let content: string;
+    try {
+      content = await this.#readSecureFile(
+        path,
+        "Attempt checkpoint monotonic head",
+      );
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return null;
+      }
+      throw error;
+    }
+    const parsed = parseStrictJson(
+      content,
+      "Attempt checkpoint monotonic head",
+    );
+    if (!isRecord(parsed)) {
+      throw new Error("Attempt checkpoint monotonic head is invalid");
+    }
+    assertExactKeys(
+      parsed,
+      [
+        "schemaVersion",
+        "checkpointStoreId",
+        "attemptDigest",
+        "sequence",
+        "recordHash",
+        "headHash",
+        "authenticationTag",
+      ],
+      [],
+      "Attempt checkpoint monotonic head",
+    );
+    const unsigned = {
+      schemaVersion: parsed.schemaVersion,
+      checkpointStoreId: parsed.checkpointStoreId,
+      attemptDigest: parsed.attemptDigest,
+      sequence: parsed.sequence,
+      recordHash: parsed.recordHash,
+    };
+    const expectedHeadHash = sha256(unsigned);
+    if (
+      parsed.schemaVersion !== HEAD_SCHEMA ||
+      parsed.checkpointStoreId !== this.checkpointStoreId ||
+      parsed.attemptDigest !== this.#digestFor(attemptId) ||
+      !Number.isSafeInteger(parsed.sequence) ||
+      (parsed.sequence as number) < 1 ||
+      typeof parsed.recordHash !== "string" ||
+      !/^sha256:[a-f0-9]{64}$/.test(parsed.recordHash) ||
+      parsed.headHash !== expectedHeadHash ||
+      typeof parsed.authenticationTag !== "string" ||
+      !tagsEqual(
+        parsed.authenticationTag,
+        authenticationTag(key, expectedHeadHash),
+      )
+    ) {
+      throw new Error(
+        "Attempt checkpoint monotonic head authentication is invalid",
+      );
+    }
+    return Object.freeze(parsed as unknown as CheckpointLedgerHead);
+  }
+
+  async #writeHead(
+    attemptId: string,
+    latest: CheckpointLedgerRecord,
+    key: Buffer,
+  ): Promise<void> {
+    const path = this.#headPathFor(attemptId);
+    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    const unsigned = Object.freeze({
+      schemaVersion: HEAD_SCHEMA,
+      checkpointStoreId: this.checkpointStoreId,
+      attemptDigest: this.#digestFor(attemptId),
+      sequence: latest.sequence,
+      recordHash: latest.recordHash,
+    });
+    const headHash = sha256(unsigned);
+    const payload = `${JSON.stringify({
+      ...unsigned,
+      headHash,
+      authenticationTag: authenticationTag(key, headHash),
+    })}\n`;
+    let temporaryExists = false;
+    try {
+      const handle = await open(
+        temporaryPath,
+        fileConstants.O_CREAT |
+          fileConstants.O_EXCL |
+          fileConstants.O_WRONLY |
+          fileConstants.O_NOFOLLOW,
+        0o600,
+      );
+      temporaryExists = true;
+      try {
+        await handle.writeFile(payload, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporaryPath, path);
+      temporaryExists = false;
+      const directoryHandle = await open(dirname(path), "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    } finally {
+      if (temporaryExists) await unlink(temporaryPath).catch(() => undefined);
+    }
   }
 
   async #writeLedger(
     attemptId: string,
     records: readonly CheckpointLedgerRecord[],
+    key: Buffer,
   ): Promise<void> {
     const path = this.#pathFor(attemptId);
     const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -874,6 +1068,11 @@ export class FileSystemAttemptCheckpointStore
       } finally {
         await rootHandle.close();
       }
+      const latest = records.at(-1);
+      if (latest === undefined) {
+        throw new Error("Attempt checkpoint ledger cannot publish an empty head");
+      }
+      await this.#writeHead(attemptId, latest, key);
     } finally {
       if (temporaryExists) await unlink(temporaryPath).catch(() => undefined);
     }
@@ -1056,7 +1255,7 @@ export class FileSystemAttemptCheckpointStore
         records,
         key,
       );
-      await this.#writeLedger(input.attemptId, [...records, record]);
+      await this.#writeLedger(input.attemptId, [...records, record], key);
     });
   }
 
@@ -1136,7 +1335,7 @@ export class FileSystemAttemptCheckpointStore
         records,
         key,
       );
-      await this.#writeLedger(event.attemptId, [...records, record]);
+      await this.#writeLedger(event.attemptId, [...records, record], key);
     });
   }
 
@@ -1145,25 +1344,30 @@ export class FileSystemAttemptCheckpointStore
   ): Promise<readonly ObservableAttemptEvent[]> {
     nonEmptyString(attemptId, "Attempt ID");
     if (this.#legacyReadOnly) {
-      const content = await this.#readContent(this.#pathFor(attemptId));
-      if (content === null) return Object.freeze([]);
-      if (content.length > 0 && !content.endsWith("\n")) {
-        throw new Error("Legacy checkpoint ledger has a partial record");
-      }
-      return Object.freeze(
-        content
-          .split("\n")
-          .filter(Boolean)
-          .map((line, index) =>
-            validateEvent(
-              parseStrictJson(
-                line,
-                `Legacy attempt checkpoint line ${index + 1}`,
+      await this.#assertExpectedRootStillBound();
+      try {
+        const content = await this.#readContent(this.#pathFor(attemptId));
+        if (content === null) return Object.freeze([]);
+        if (content.length > 0 && !content.endsWith("\n")) {
+          throw new Error("Legacy checkpoint ledger has a partial record");
+        }
+        return Object.freeze(
+          content
+            .split("\n")
+            .filter(Boolean)
+            .map((line, index) =>
+              validateEvent(
+                parseStrictJson(
+                  line,
+                  `Legacy attempt checkpoint line ${index + 1}`,
+                ),
+                attemptId,
               ),
-              attemptId,
             ),
-          ),
-      );
+        );
+      } finally {
+        await this.#assertExpectedRootStillBound();
+      }
     }
     return this.#runLocked(attemptId, async () => {
       const key = await this.#authenticationKey();

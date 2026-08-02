@@ -297,6 +297,19 @@ The local attestation is implementation evidence. A successful real Judge call
 and persisted non-Mock score lineage are still required for production
 acceptance.
 
+The recovery CLIs run as `node --import tsx`, so their embedded source/archive
+check occurs only after the current workstation's Node and `tsx` loader have
+already started the TypeScript program. The recorded
+`verifierBuildIdentity`, `rawResultVerifierBuildIdentity`, and
+`attestedResultVerifierBuildIdentity` fields are therefore
+**current-workstation reproducibility identities only**: they identify the
+source and local TypeScript toolchain bytes observed by that run and catch
+accidental drift. They are not an independent bootstrap, signed execution
+attestation, or tamper-proof proof of which code executed. Production assurance
+at that stronger level requires a separately trusted signed bootstrap or a
+native frozen executable whose identity is verified before any verifier code
+runs. The current recovery evidence does not claim that stronger property.
+
 ## Comparison compatibility and concurrent reports — implementation ready
 
 Every Artifact is scored independently and comparisons are derived only from
@@ -387,9 +400,10 @@ the safe 16-slide PPTX; and cross-binds job, Case, Run, Attempt, local Artifact,
 provider Artifact reference, task, adapter, driver, renderer, and ordering. It
 also independently recomputes the capture receipt's event Trace, retained-page
 digest, derivative-set digest, and browser-package identity. The evaluated
-historical runner identity and the current embedded-verified verifier identity
-are reported separately. Any missing payload, extra field, reordered
-checkpoint, digest drift, or lineage mismatch fails closed.
+historical runner identity and the current-workstation reproducibility identity
+of the post-start TypeScript verifier are reported separately. The latter is
+not an independent or tamper-proof execution proof. Any missing payload, extra
+field, reordered checkpoint, digest drift, or lineage mismatch fails closed.
 
 A marker-only recovery read reports
 `commit_marker_present_unverified`, never `committed`. A matching completed
@@ -407,6 +421,13 @@ Mock outputs cannot enter production lineage. A provider without a captured,
 hash-verified PPT remains partial rather than receiving zero. A degraded static
 render retains the Artifact, skips the Judge, and reports visual quality as
 `NOT_ASSESSABLE`.
+
+`assertT10ProductionAcceptanceReady()` is the final code-level lineage and
+closure gate. It accepts only a completed `LIVE_PRODUCTION` Job and Report with
+three distinct LIVE Artifacts, faithful renders, Scorecards, and an exact HTTPS
+report binding. `PRODUCTION_REPLAY` is rejected before those completeness
+checks: replay may validate recovery and reporting behavior, but can never
+satisfy T10 production readiness.
 
 Therefore the current state is not end-to-end production acceptance: real
 provider generation, real Lark mutation/readback, native-frozen evidence for

@@ -1,18 +1,22 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
+  constants,
+  fstatSync,
   fsyncSync,
+  lstatSync,
   linkSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
-  rmSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import type { Stats } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 
 import type {
   ArtifactCaptureJournalEvent,
@@ -39,72 +43,308 @@ function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function safeRoot(rootPath: string): string {
-  const root = resolve(rootPath);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  return root;
+interface OperationalRootIdentity {
+  readonly canonicalPath: string;
+  readonly deviceId: string;
+  readonly inodeId: string;
+  readonly ownerUid: number;
+  readonly mode: number;
 }
 
-function immutableJsonWrite(path: string, value: unknown): void {
-  const content = JSON.stringify(value);
-  const temporaryPath =
-    `${path}.${process.pid}.${randomUUID()}.tmp`;
-  let descriptor: number | null = null;
+function rootIdentity(input: {
+  readonly canonicalPath: string;
+  readonly dev: number | bigint;
+  readonly ino: number | bigint;
+  readonly uid: number;
+  readonly mode: number;
+}): OperationalRootIdentity {
+  return Object.freeze({
+    canonicalPath: input.canonicalPath,
+    deviceId: String(input.dev),
+    inodeId: String(input.ino),
+    ownerUid: input.uid,
+    mode: input.mode,
+  });
+}
+
+function sameIdentity(
+  left: OperationalRootIdentity,
+  right: OperationalRootIdentity,
+): boolean {
+  return left.canonicalPath === right.canonicalPath &&
+    left.deviceId === right.deviceId &&
+    left.inodeId === right.inodeId &&
+    left.ownerUid === right.ownerUid &&
+    left.mode === right.mode;
+}
+
+function assertOwnerOnly(input: {
+  readonly uid: number;
+  readonly mode: number;
+}, label: string): void {
+  const currentUid = typeof process.getuid === "function"
+    ? process.getuid()
+    : null;
+  if (currentUid === null || input.uid !== currentUid) {
+    throw new Error(`${label} must be owned by the current user`);
+  }
+  if ((input.mode & 0o077) !== 0) {
+    throw new Error(`${label} must be owner-only`);
+  }
+}
+
+function safeRoot(rootPath: string): OperationalRootIdentity {
+  const root = resolve(rootPath);
+  if (root === sep) {
+    throw new Error("Operational durability root must be narrowly scoped");
+  }
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const requested = lstatSync(root);
+  if (requested.isSymbolicLink()) {
+    throw new Error("Operational durability rejects a symbolic link root");
+  }
+  if (!requested.isDirectory()) {
+    throw new Error("Operational durability root is not a directory");
+  }
+  const canonicalPath = realpathSync(root);
+  const canonical = lstatSync(canonicalPath);
+  if (
+    canonical.isSymbolicLink() ||
+    !canonical.isDirectory() ||
+    canonical.dev !== requested.dev ||
+    canonical.ino !== requested.ino
+  ) {
+    throw new Error(
+      "Operational durability root identity changed during initialization",
+    );
+  }
+  assertOwnerOnly(canonical, "Operational durability root");
+  return rootIdentity({ canonicalPath, ...canonical });
+}
+
+function currentRootIdentity(
+  root: OperationalRootIdentity,
+): OperationalRootIdentity {
+  const requested = lstatSync(root.canonicalPath);
+  if (requested.isSymbolicLink() || !requested.isDirectory()) {
+    throw new Error("Operational durability root identity changed");
+  }
+  const canonicalPath = realpathSync(root.canonicalPath);
+  const canonical = lstatSync(canonicalPath);
+  assertOwnerOnly(canonical, "Operational durability root");
+  return rootIdentity({ canonicalPath, ...canonical });
+}
+
+function assertRootStillBound(root: OperationalRootIdentity): void {
+  if (!sameIdentity(root, currentRootIdentity(root))) {
+    throw new Error("Operational durability root identity changed");
+  }
+}
+
+function withVerifiedRoot<T>(
+  root: OperationalRootIdentity,
+  operation: (descriptor: number) => T,
+): T {
+  assertRootStillBound(root);
+  let descriptor: number;
   try {
-    descriptor = openSync(temporaryPath, "wx", 0o600);
-    writeFileSync(descriptor, content, { encoding: "utf8" });
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = null;
-    linkSync(temporaryPath, path);
-    const directoryDescriptor = openSync(dirname(path), "r");
-    try {
-      fsyncSync(directoryDescriptor);
-    } finally {
-      closeSync(directoryDescriptor);
+    descriptor = openSync(
+      root.canonicalPath,
+      constants.O_RDONLY |
+        constants.O_DIRECTORY |
+        constants.O_NOFOLLOW,
+    );
+  } catch (error) {
+    throw new Error("Operational durability root identity changed", {
+      cause: error,
+    });
+  }
+  try {
+    const opened = fstatSync(descriptor);
+    const openedIdentity = rootIdentity({
+      canonicalPath: root.canonicalPath,
+      ...opened,
+    });
+    assertOwnerOnly(opened, "Operational durability root");
+    if (!opened.isDirectory() || !sameIdentity(root, openedIdentity)) {
+      throw new Error("Operational durability root identity changed");
     }
-  } catch (error: unknown) {
-    if (
-      error === null ||
-      typeof error !== "object" ||
-      !("code" in error) ||
-      error.code !== "EEXIST"
-    ) {
-      throw error;
-    }
-    let existing: unknown;
-    try {
-      existing = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      throw error;
-    }
-    if (!isDeepStrictEqual(existing, value)) {
-      throw new Error(`Durable immutable JSON conflict: ${path}`, {
-        cause: error,
-      });
-    }
+    const result = operation(descriptor);
+    assertRootStillBound(root);
+    return result;
   } finally {
-    if (descriptor !== null) closeSync(descriptor);
+    closeSync(descriptor);
+  }
+}
+
+function assertSecureLeaf(
+  path: string,
+  metadata: Stats,
+): void {
+  if (metadata.isSymbolicLink() || !metadata.isFile()) {
+    throw new Error(
+      `Operational durability leaf is a symbolic link or not a regular file: ${path}`,
+    );
+  }
+  assertOwnerOnly(metadata, "Operational durability leaf");
+}
+
+function secureJsonRead<T>(
+  root: OperationalRootIdentity,
+  filename: string,
+): T {
+  return withVerifiedRoot(root, () => {
+    const path = join(root.canonicalPath, filename);
+    const before = lstatSync(path);
+    assertSecureLeaf(path, before);
+    let descriptor: number;
     try {
-      unlinkSync(temporaryPath);
+      descriptor = openSync(
+        path,
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
     } catch (error) {
+      throw new Error(
+        `Operational durability leaf changed during read: ${path}`,
+        { cause: error },
+      );
+    }
+    try {
+      const opened = fstatSync(descriptor);
+      assertSecureLeaf(path, opened);
+      if (
+        before.dev !== opened.dev ||
+        before.ino !== opened.ino ||
+        before.uid !== opened.uid ||
+        before.mode !== opened.mode
+      ) {
+        throw new Error(
+          `Operational durability leaf changed during read: ${path}`,
+        );
+      }
+      const value = JSON.parse(readFileSync(descriptor, "utf8")) as T;
+      const after = lstatSync(path);
+      assertSecureLeaf(path, after);
+      if (
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.uid !== after.uid ||
+        before.mode !== after.mode
+      ) {
+        throw new Error(
+          `Operational durability leaf changed during read: ${path}`,
+        );
+      }
+      return value;
+    } finally {
+      closeSync(descriptor);
+    }
+  });
+}
+
+function immutableJsonWrite(
+  root: OperationalRootIdentity,
+  filename: string,
+  value: unknown,
+): void {
+  const content = JSON.stringify(value);
+  const path = join(root.canonicalPath, filename);
+  const temporaryPath = join(
+    root.canonicalPath,
+    `.${filename}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  withVerifiedRoot(root, (rootDescriptor) => {
+    let descriptor: number | null = null;
+    try {
+      descriptor = openSync(
+        temporaryPath,
+        constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_WRONLY |
+          constants.O_NOFOLLOW,
+        0o600,
+      );
+      const temporaryMetadata = fstatSync(descriptor);
+      assertSecureLeaf(temporaryPath, temporaryMetadata);
+      writeFileSync(descriptor, content, { encoding: "utf8" });
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      descriptor = null;
+      assertRootStillBound(root);
+      linkSync(temporaryPath, path);
+      fsyncSync(rootDescriptor);
+    } catch (error: unknown) {
       if (
         error === null ||
         typeof error !== "object" ||
         !("code" in error) ||
-        error.code !== "ENOENT"
+        error.code !== "EEXIST"
       ) {
         throw error;
       }
+      const existing = secureJsonRead<unknown>(root, filename);
+      if (!isDeepStrictEqual(existing, value)) {
+        throw new Error(`Durable immutable JSON conflict: ${path}`, {
+          cause: error,
+        });
+      }
+    } finally {
+      if (descriptor !== null) closeSync(descriptor);
+      try {
+        assertRootStillBound(root);
+        unlinkSync(temporaryPath);
+        fsyncSync(rootDescriptor);
+      } catch (error) {
+        if (
+          error === null ||
+          typeof error !== "object" ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
+          throw error;
+        }
+      }
     }
-  }
+  });
 }
 
-function readJsonFiles<T>(root: string): readonly T[] {
-  return readdirSync(root)
-    .filter((name) => name.endsWith(".json"))
-    .sort()
-    .map((name) => JSON.parse(readFileSync(join(root, name), "utf8")) as T);
+function readJsonFiles<T>(
+  root: OperationalRootIdentity,
+): readonly T[] {
+  const names = withVerifiedRoot(root, () =>
+    readdirSync(root.canonicalPath)
+      .filter((name) => name.endsWith(".json"))
+      .sort()
+  );
+  return names.map((name) => secureJsonRead<T>(root, name));
+}
+
+function secureRemove(
+  root: OperationalRootIdentity,
+  filename: string,
+): boolean {
+  return withVerifiedRoot(root, (rootDescriptor) => {
+    const path = join(root.canonicalPath, filename);
+    let metadata: Stats;
+    try {
+      metadata = lstatSync(path);
+    } catch (error) {
+      if (
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return false;
+      }
+      throw error;
+    }
+    assertSecureLeaf(path, metadata);
+    assertRootStillBound(root);
+    unlinkSync(path);
+    fsyncSync(rootDescriptor);
+    return true;
+  });
 }
 
 const HARNESS_OWNED_JUDGE_EGRESS_AUDITS =
@@ -119,7 +359,7 @@ export class FileSystemArtifactCaptureJournal
 {
   readonly durability = "durable" as const;
   readonly journalId: string;
-  readonly #root: string;
+  readonly #root: OperationalRootIdentity;
   #tail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -182,7 +422,8 @@ export class FileSystemArtifactCaptureJournal
 
   #append(event: ArtifactCaptureJournalEvent): void {
     immutableJsonWrite(
-      join(this.#root, `${sha256(event.eventId)}.json`),
+      this.#root,
+      `${sha256(event.eventId)}.json`,
       event,
     );
   }
@@ -251,7 +492,7 @@ export class FileSystemEgressAuthorizationAudit
 {
   readonly durability = "durable" as const;
   readonly auditId: string;
-  readonly #root: string;
+  readonly #root: OperationalRootIdentity;
 
   constructor(options: {
     readonly auditId: string;
@@ -262,12 +503,12 @@ export class FileSystemEgressAuthorizationAudit
     }
     this.auditId = options.auditId;
     this.#root = safeRoot(options.rootPath);
-    HARNESS_OWNED_EGRESS_AUTHORIZATION_AUDITS.add(this);
   }
 
   async append(decision: ApprovedEgressAuthorization): Promise<void> {
     immutableJsonWrite(
-      join(this.#root, `${sha256(decision.decisionId)}.json`),
+      this.#root,
+      `${sha256(decision.decisionId)}.json`,
       decision,
     );
   }
@@ -275,13 +516,10 @@ export class FileSystemEgressAuthorizationAudit
   async assertRecorded(
     decision: ApprovedEgressAuthorization,
   ): Promise<void> {
-    const path = join(
-      this.#root,
-      `${sha256(decision.decisionId)}.json`,
-    );
+    const filename = `${sha256(decision.decisionId)}.json`;
     let value: unknown;
     try {
-      value = JSON.parse(readFileSync(path, "utf8"));
+      value = secureJsonRead(this.#root, filename);
     } catch (error) {
       throw new Error(
         `Durable egress authorization audit is missing: ${decision.decisionId}`,
@@ -311,7 +549,7 @@ export class FileSystemJudgeEgressAudit
 {
   readonly durability = "durable" as const;
   readonly auditId: string;
-  readonly #root: string;
+  readonly #root: OperationalRootIdentity;
 
   constructor(options: {
     readonly auditId: string;
@@ -322,17 +560,14 @@ export class FileSystemJudgeEgressAudit
     }
     this.auditId = options.auditId;
     this.#root = safeRoot(options.rootPath);
-    HARNESS_OWNED_JUDGE_EGRESS_AUDITS.add(this);
   }
 
   async recordAuthorizedAttempt(
     audit: JudgeEgressAttemptAudit,
   ): Promise<void> {
     immutableJsonWrite(
-      join(
-        this.#root,
-        `${sha256(`${audit.attemptId}\u0000${audit.idempotencyKey}`)}.json`,
-      ),
+      this.#root,
+      `${sha256(`${audit.attemptId}\u0000${audit.idempotencyKey}`)}.json`,
       audit,
     );
   }
@@ -352,8 +587,8 @@ export class FileSystemReferencePackStore
   implements ReferencePackStorePort
 {
   readonly durability = "durable" as const;
-  readonly #temporaryRoot: string;
-  readonly #usedRoot: string;
+  readonly #temporaryRoot: OperationalRootIdentity;
+  readonly #usedRoot: OperationalRootIdentity;
   readonly #now: () => string;
 
   constructor(options: {
@@ -361,10 +596,9 @@ export class FileSystemReferencePackStore
     readonly now?: () => string;
   }) {
     const root = safeRoot(options.rootPath);
-    this.#temporaryRoot = safeRoot(join(root, "temporary"));
-    this.#usedRoot = safeRoot(join(root, "used"));
+    this.#temporaryRoot = safeRoot(join(root.canonicalPath, "temporary"));
+    this.#usedRoot = safeRoot(join(root.canonicalPath, "used"));
     this.#now = options.now ?? (() => new Date().toISOString());
-    HARNESS_OWNED_REFERENCE_PACK_STORES.add(this);
   }
 
   stage(
@@ -375,7 +609,8 @@ export class FileSystemReferencePackStore
       `temporary:${input.jobId}:${pack.contentHash}`;
     const staged = { stagingId, pack };
     immutableJsonWrite(
-      join(this.#temporaryRoot, `${sha256(stagingId)}.json`),
+      this.#temporaryRoot,
+      `${sha256(stagingId)}.json`,
       staged,
     );
     return Object.freeze(staged);
@@ -405,10 +640,7 @@ export class FileSystemReferencePackStore
           `Durable Reference Pack usage conflict: ${stagingId}`,
         );
       }
-      rmSync(
-        join(this.#temporaryRoot, `${sha256(stagingId)}.json`),
-        { force: true },
-      );
+      secureRemove(this.#temporaryRoot, `${sha256(stagingId)}.json`);
       return Object.freeze(existing);
     }
     if (input.evaluationAttemptIds.length === 0) {
@@ -416,15 +648,13 @@ export class FileSystemReferencePackStore
         "A used Reference Pack requires at least one evaluation attempt",
       );
     }
-    const path = join(
-      this.#temporaryRoot,
-      `${sha256(stagingId)}.json`,
-    );
+    const filename = `${sha256(stagingId)}.json`;
     let staged: StagedReferencePack;
     try {
-      staged = JSON.parse(
-        readFileSync(path, "utf8"),
-      ) as StagedReferencePack;
+      staged = secureJsonRead<StagedReferencePack>(
+        this.#temporaryRoot,
+        filename,
+      );
     } catch (error) {
       throw new Error(`Temporary Reference Pack not found: ${stagingId}`, {
         cause: error,
@@ -443,32 +673,19 @@ export class FileSystemReferencePackStore
       usedAt: this.#now(),
     });
     immutableJsonWrite(
-      join(this.#usedRoot, `${sha256(record.recordId)}.json`),
+      this.#usedRoot,
+      `${sha256(record.recordId)}.json`,
       record,
     );
-    rmSync(path, { force: true });
+    secureRemove(this.#temporaryRoot, filename);
     return record;
   }
 
   deleteUnused(stagingId: string): boolean {
-    const path = join(
+    return secureRemove(
       this.#temporaryRoot,
       `${sha256(stagingId)}.json`,
     );
-    try {
-      rmSync(path);
-      return true;
-    } catch (error) {
-      if (
-        error !== null &&
-        typeof error === "object" &&
-        "code" in error &&
-        error.code === "ENOENT"
-      ) {
-        return false;
-      }
-      throw error;
-    }
   }
 }
 
@@ -480,4 +697,33 @@ export function assertHarnessOwnedDurableReferencePackStore(
       "Production Bakeoff requires a harness-owned durable Reference Pack store",
     );
   }
+}
+
+// Package-internal production assembly seam. These factories are deliberately
+// not re-exported from index.ts: public filesystem constructors create durable
+// objects, but only the harness assembly path may attach production ownership.
+export function createHarnessOwnedFileSystemEgressAuthorizationAudit(
+  options: ConstructorParameters<
+    typeof FileSystemEgressAuthorizationAudit
+  >[0],
+): FileSystemEgressAuthorizationAudit {
+  const audit = new FileSystemEgressAuthorizationAudit(options);
+  HARNESS_OWNED_EGRESS_AUTHORIZATION_AUDITS.add(audit);
+  return audit;
+}
+
+export function createHarnessOwnedFileSystemJudgeEgressAudit(
+  options: ConstructorParameters<typeof FileSystemJudgeEgressAudit>[0],
+): FileSystemJudgeEgressAudit {
+  const audit = new FileSystemJudgeEgressAudit(options);
+  HARNESS_OWNED_JUDGE_EGRESS_AUDITS.add(audit);
+  return audit;
+}
+
+export function createHarnessOwnedFileSystemReferencePackStore(
+  options: ConstructorParameters<typeof FileSystemReferencePackStore>[0],
+): FileSystemReferencePackStore {
+  const store = new FileSystemReferencePackStore(options);
+  HARNESS_OWNED_REFERENCE_PACK_STORES.add(store);
+  return store;
 }

@@ -12,7 +12,7 @@ import {
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
   loadDurableRootRegistry,
-  resolveDurableRoot,
+  resolveDurableRootIdentity,
   trustedDoubaoRecoveryCheckpoint,
   parseStrictJson,
   type TrustedDoubaoRecoveryCheckpoint,
@@ -369,23 +369,32 @@ const {
   attemptId,
 } = command;
 const registry = await loadDurableRootRegistry(registryId);
+const artifactRootIdentity = resolveDurableRootIdentity(
+  registry,
+  artifactRecoveryRootReference,
+);
+const runSpecificationRootIdentity = resolveDurableRootIdentity(
+  registry,
+  runSpecificationRootReference,
+);
+const checkpointRootIdentity = resolveDurableRootIdentity(
+  registry,
+  checkpointRootReference,
+);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
-  rootPath: resolveDurableRoot(
-    registry,
-    artifactRecoveryRootReference,
-  ),
+  rootPath: artifactRootIdentity.canonicalPath,
+  expectedRootIdentity: artifactRootIdentity,
 });
 const runSpecificationStore = new FileSystemImmutableBlobStore({
   storeId: runSpecificationStoreId,
-  rootPath: resolveDurableRoot(
-    registry,
-    runSpecificationRootReference,
-  ),
+  rootPath: runSpecificationRootIdentity.canonicalPath,
+  expectedRootIdentity: runSpecificationRootIdentity,
 });
 const checkpointStore = new FileSystemAttemptCheckpointStore({
   checkpointStoreId,
-  rootPath: resolveDurableRoot(registry, checkpointRootReference),
+  rootPath: checkpointRootIdentity.canonicalPath,
+  expectedRootIdentity: checkpointRootIdentity,
   legacyReadOnly: checkpointReadMode === "legacy_read_only",
 });
 const [manifest, original, runSpecification, checkpoints] =

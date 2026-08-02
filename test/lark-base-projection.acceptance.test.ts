@@ -314,6 +314,7 @@ async function authorizedSnapshot() {
     manualActions: null,
     costEvidence: null,
     provenance: "MOCK",
+    executionProvenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     createdAt: FIXED_TIME,
     lastSyncedAt: FIXED_TIME,
@@ -326,6 +327,7 @@ async function authorizedSnapshot() {
   const report = await source.createReport({
     reportId: "report-volcano-v1",
     provenance: "MOCK",
+    executionProvenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     title: "火山 Case Sample",
     jobId: "job-volcano-v1",
@@ -488,6 +490,7 @@ test("a remote commit marker that advanced beyond the captured staging baseline 
   const report = await staged.createReport({
     reportId: "report-stale-baseline-v1",
     provenance: "MOCK",
+    executionProvenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     title: "stale baseline",
     jobId: "job-volcano-v1",
@@ -1149,7 +1152,7 @@ test("Lark Base projection fails closed before the batch marker when attachment 
   assert.equal(transport.markers.has(jobId), false);
 });
 
-test("lark-cli 1.0.72 record-search columnar envelope is reconstructed exactly and rejects pagination or length drift", () => {
+test("lark-cli 1.0.72 record-search columnar pages are reconstructed exactly and reject length drift", () => {
   const envelope = {
     ok: true,
     identity: "user",
@@ -1174,13 +1177,12 @@ test("lark-cli 1.0.72 record-search columnar envelope is reconstructed exactly a
       },
     },
   ]);
-  assert.throws(
-    () =>
-      parseLarkRecordSearchEnvelope({
-        ...envelope,
-        data: { ...envelope.data, has_more: true },
-      }),
-    /paginated columnar envelope/i,
+  assert.deepEqual(
+    parseLarkRecordSearchEnvelope({
+      ...envelope,
+      data: { ...envelope.data, has_more: true },
+    }),
+    parseLarkRecordSearchEnvelope(envelope),
   );
   assert.throws(
     () =>
@@ -1197,6 +1199,188 @@ test("lark-cli 1.0.72 record-search columnar envelope is reconstructed exactly a
         data: { ...envelope.data, data: [["stable-job-001"]] },
       }),
     /row length/i,
+  );
+});
+
+test("committed auxiliary state collects 201+ shared-table rows and retries a stale multi-page read idempotently", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_PAGINATION_BASE_TOKEN";
+  const reportTokenVariable = "PPT_EVAL_PAGINATION_REPORT_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  const previousReportToken = process.env[reportTokenVariable];
+  process.env[baseTokenVariable] = "basPaginationToken";
+  process.env[reportTokenVariable] = "docPaginationToken";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    if (previousReportToken === undefined) {
+      delete process.env[reportTokenVariable];
+    } else {
+      process.env[reportTokenVariable] = previousReportToken;
+    }
+  });
+
+  const jobId = "job-pagination-target";
+  const encodedRow = (
+    stableId: string,
+    value: Record<string, unknown>,
+    recordId: string,
+  ) => {
+    const payload = new TextDecoder().decode(canonicalJsonBytes(value));
+    return {
+      stableId,
+      payload,
+      payloadHash: sha256Bytes(new TextEncoder().encode(payload)),
+      recordId,
+    };
+  };
+  const marker = (revision: number): Record<string, unknown> => ({
+    schemaVersion: "lark-projection-commit-v2",
+    jobId,
+    batchHash: `sha256:${String(revision).padStart(64, "0")}`,
+    authorizationDecisionId: `decision-pagination-${revision}`,
+    recordCount: 402,
+    attachmentCount: 0,
+    reportUrls: [],
+    reportCollectionHash: null,
+    reportDocumentRevision: null,
+    pageEvidenceUrls: [],
+    attachments: [],
+    committedAt: `2026-08-02T00:00:0${revision}.000Z`,
+    previousBatchHash:
+      revision === 1 ? null : `sha256:${"1".padStart(64, "0")}`,
+    revision,
+  });
+  const jobRows = Array.from({ length: 200 }, (_, index) => {
+    const fillerJobId = `filler-${String(index).padStart(3, "0")}`;
+    return encodedRow(
+      `job:${fillerJobId}`,
+      {
+        recordType: "bakeoff_job",
+        recordId: fillerJobId,
+        jobId: fillerJobId,
+      },
+      `recJobFiller${index}`,
+    );
+  });
+  jobRows.push(
+    encodedRow(
+      `job:${jobId}`,
+      { recordType: "bakeoff_job", recordId: jobId, jobId },
+      "recJobTarget",
+    ),
+  );
+  const comparisonRows = Array.from({ length: 200 }, (_, index) => {
+    const fillerComparisonId =
+      `filler-${String(index).padStart(3, "0")}`;
+    return encodedRow(
+      `comparison:${fillerComparisonId}`,
+      {
+        recordType: "comparison",
+        comparisonId: fillerComparisonId,
+        jobId: `filler-job-${index}`,
+      },
+      `recComparisonFiller${index}`,
+    );
+  });
+  comparisonRows.push(
+    encodedRow(
+      "comparison:target-comparison",
+      {
+        recordType: "comparison",
+        comparisonId: "target-comparison",
+        jobId,
+      },
+      "recComparisonTarget",
+    ),
+  );
+  const pagedOffsets = new Map<string, number[]>();
+  let markerReadCount = 0;
+  const clock = { clockId: "pagination-clock", now: () => FIXED_TIME };
+  const transport = createLarkCliTransportForMutationBoundaryTest({
+    configuration: {
+      ...LARK_TEST_CONFIGURATION,
+      baseTokenEnvironmentVariable: baseTokenVariable,
+      reportDocumentTokenEnvironmentVariable: reportTokenVariable,
+    },
+    egressAuthorization: allowLarkMutation,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+    clock,
+    async run(args) {
+      assert.equal(args[1], "+record-search");
+      const keywordIndex = args.indexOf("--keyword");
+      assert.notEqual(
+        keywordIndex,
+        -1,
+        "every page must use an explicit stable-ID namespace",
+      );
+      const keyword = args[keywordIndex + 1]!;
+      const offsetIndex = args.indexOf("--offset");
+      assert.notEqual(offsetIndex, -1);
+      const offset = Number(args[offsetIndex + 1]);
+      const tableId = args[args.indexOf("--table-id") + 1]!;
+      const key = `${tableId}:${keyword}`;
+      pagedOffsets.set(key, [...(pagedOffsets.get(key) ?? []), offset]);
+
+      let rows =
+        keyword === "job:"
+          ? jobRows
+          : keyword === "comparison:"
+            ? comparisonRows
+            : [];
+      if (keyword === `commit:${jobId}`) {
+        markerReadCount += 1;
+        rows = [
+          encodedRow(
+            keyword,
+            marker(markerReadCount === 1 ? 1 : 2),
+            "recCommitMarker",
+          ),
+        ];
+      }
+      const page = rows.slice(offset, offset + 200);
+      return {
+        ok: true,
+        data: {
+          data: page.map((row) => [
+            row.stableId,
+            row.payload,
+            row.payloadHash,
+          ]),
+          field_id_list: ["fldStable", "fldPayload", "fldHash"],
+          fields: ["稳定ID", "载荷", "载荷哈希"],
+          has_more: offset + page.length < rows.length,
+          record_id_list: page.map(({ recordId }) => recordId),
+        },
+      };
+    },
+  });
+
+  await assert.rejects(
+    transport.readCommittedAuxiliaryReportState!({ jobId }),
+    ProjectionStaleBaselineError,
+  );
+  const recovered = await transport.readCommittedAuxiliaryReportState!({
+    jobId,
+  });
+  const replay = await transport.readCommittedAuxiliaryReportState!({ jobId });
+  assert.deepEqual(replay, recovered);
+  assert.equal(recovered.bakeoffJob?.jobId, jobId);
+  assert.deepEqual(
+    recovered.productGapCardTable.map(({ comparisonId }) => comparisonId),
+    ["target-comparison"],
+  );
+  assert.deepEqual(
+    pagedOffsets.get(`${LARK_TEST_CONFIGURATION.tables.runs}:job:`),
+    [0, 200, 0, 200, 0, 200],
+  );
+  assert.deepEqual(
+    pagedOffsets.get(
+      `${LARK_TEST_CONFIGURATION.tables.comparisons}:comparison:`,
+    ),
+    [0, 200, 0, 200, 0, 200],
   );
 });
 

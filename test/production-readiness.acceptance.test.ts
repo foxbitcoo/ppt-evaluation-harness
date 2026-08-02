@@ -5,9 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
-  FileSystemJudgeEgressAudit,
   InMemoryFeishuProjection,
   MockWpsProductAdapter,
+  PRODUCTION_ENVIRONMENT_ORIGIN,
   DoubaoProductionProductAdapter,
   QwenProductionProductAdapter,
   VOLCANO_CASE_ID,
@@ -16,11 +16,15 @@ import {
   assertHarnessOwnedDurableEgressAuthorizationAudit,
   assertHarnessOwnedDurableReferencePackStore,
   assertHarnessOwnedProductionJudge,
+  assertT10ProductionAcceptanceReady,
   createBakeoffHarness,
   createHarnessOwnedCodexCliJudge,
   preflightHarnessOwnedProductionJudge,
 } from "../src/index.ts";
 import { createMockReportDraft } from "../src/mock-report.ts";
+import {
+  createHarnessOwnedFileSystemJudgeEgressAudit,
+} from "../src/file-system-operational-durability.ts";
 
 test("production preflight fails closed on a missing real Judge before any adapter or browser execution", () => {
   assert.throws(
@@ -80,7 +84,7 @@ test("production preflight rejects an in-memory Feishu projection even when a re
           throw new Error("projection preflight must run first");
         },
       },
-      egressAudit: new FileSystemJudgeEgressAudit({
+      egressAudit: createHarnessOwnedFileSystemJudgeEgressAudit({
         auditId: "production-judge-egress-audit-v1",
         rootPath: root,
       }),
@@ -223,4 +227,59 @@ test("capture_only persists captured Artifacts without producing scores, compari
     /静态渲染：`degraded`[\s\S]*视觉评估：`NOT_ASSESSABLE`[\s\S]*Judge 未调用/,
   );
   assert.doesNotMatch(degradedReport.markdown, /Judge：失败/);
+});
+
+test("a retained provider replay report is visibly historical and cannot read as a current LIVE acceptance", () => {
+  const replayReport = createMockReportDraft(
+    "production-replay-job",
+    "partial",
+    [
+      {
+        product: "WPS AI PPT retained real-provider replay",
+        runId: "production-replay-run-wps",
+        status: "failed",
+        stateReason: "technical_failure",
+        artifact: null,
+        scorecard: null,
+        judgeFailure: null,
+      },
+    ],
+    {
+      provenance: "PRODUCTION",
+      executionProvenance: "PRODUCTION_REPLAY",
+      environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
+      createdAt: "2026-08-02T00:00:00.000Z",
+    },
+  );
+
+  assert.equal(replayReport.executionProvenance, "PRODUCTION_REPLAY");
+  assert.match(replayReport.title, /历史真实产物回放/);
+  assert.match(replayReport.markdown, /非本次 LIVE 生产验收/);
+  assert.doesNotMatch(replayReport.markdown, /当前真实火山 Case/);
+  assert.doesNotMatch(replayReport.markdown, /真实单次 Case Sample，仅记录当前运行/);
+  assert.throws(
+    () =>
+      assertT10ProductionAcceptanceReady({
+        job: {
+          jobId: "production-replay-job",
+          caseId: VOLCANO_CASE_ID,
+          environment: "production",
+          status: "completed",
+          provenance: "PRODUCTION",
+          executionProvenance: "PRODUCTION_REPLAY",
+          environmentOrigin: replayReport.environmentOrigin,
+        },
+        artifact: null,
+        renderManifest: null,
+        scorecard: null,
+        artifacts: [],
+        renderManifests: [],
+        scorecards: [],
+        report: {
+          ...replayReport,
+          url: "https://my.feishu.cn/docx/replay",
+        },
+      }),
+    /requires LIVE_PRODUCTION.*PRODUCTION_REPLAY/i,
+  );
 });

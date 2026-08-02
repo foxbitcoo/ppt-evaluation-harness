@@ -19,6 +19,7 @@ import { promisify } from "node:util";
 import {
   loadDurableRootRegistry,
   registerDurableRoots,
+  resolveDurableRootIdentity,
 } from "../src/durable-root-registry.ts";
 
 const execFileAsync = promisify(execFile);
@@ -73,6 +74,19 @@ test("a durable root registry rejects symbolic roots and same-device inode repla
     assert.match(registered.roots[0]?.inodeId ?? "", /^\d+$/);
     assert.equal(typeof registered.roots[0]?.ownerUid, "number");
     assert.equal(typeof registered.roots[0]?.mode, "number");
+    assert.deepEqual(
+      resolveDurableRootIdentity(
+        registered,
+        "root:test-identity",
+      ),
+      {
+        canonicalPath: registered.roots[0]?.absolutePath,
+        deviceId: registered.roots[0]?.deviceId,
+        inodeId: registered.roots[0]?.inodeId,
+        ownerUid: registered.roots[0]?.ownerUid,
+        mode: registered.roots[0]?.mode,
+      },
+    );
 
     const replay = await registerDurableRoots({
       registryId,

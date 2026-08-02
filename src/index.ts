@@ -36,6 +36,7 @@ export {
   type HarnessOwnedProductionCapabilities,
   type HarnessOwnedProductionCapabilityEvidence,
 } from "./production-capabilities.ts";
+export { assertT10ProductionAcceptanceReady } from "./production-readiness.ts";
 export {
   BUILD_IDENTITY,
   BUILD_IDENTITY_SOURCE,
@@ -45,6 +46,7 @@ export {
   loadDurableRootRegistry,
   registerDurableRoots,
   resolveDurableRoot,
+  resolveDurableRootIdentity,
   retainedRehearsalRoot,
   type DurableRootRegistry,
   type DurableRootRegistryEntry,

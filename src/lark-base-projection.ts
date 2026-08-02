@@ -1476,9 +1476,10 @@ function asNonEmptyString(value: unknown, label: string): string {
   return value;
 }
 
-export function parseLarkRecordSearchEnvelope(
-  value: unknown,
-): readonly Record<string, unknown>[] {
+function parseLarkRecordSearchPage(value: unknown): {
+  readonly records: readonly Record<string, unknown>[];
+  readonly hasMore: boolean;
+} {
   const envelope = asObject(value, "record-search envelope");
   if (envelope.ok !== true) {
     throw new Error("lark-cli record-search envelope is not successful");
@@ -1493,7 +1494,7 @@ export function parseLarkRecordSearchEnvelope(
     !Array.isArray(fields) ||
     !Array.isArray(fieldIds) ||
     !Array.isArray(recordIds) ||
-    body.has_more !== false ||
+    typeof body.has_more !== "boolean" ||
     fields.length !== fieldIds.length ||
     rows.length !== recordIds.length ||
     fields.some((field) => typeof field !== "string" || field.length === 0) ||
@@ -1505,13 +1506,13 @@ export function parseLarkRecordSearchEnvelope(
     )
   ) {
     throw new Error(
-      "lark-cli record-search returned an incomplete or paginated columnar envelope",
+      "lark-cli record-search returned an incomplete columnar envelope",
     );
   }
   if (new Set(fields).size !== fields.length) {
     throw new Error("lark-cli record-search returned duplicate fields");
   }
-  return Object.freeze(
+  const records = Object.freeze(
     rows.map((row, rowIndex) => {
       if (!Array.isArray(row) || row.length !== fields.length) {
         throw new Error(
@@ -1539,6 +1540,13 @@ export function parseLarkRecordSearchEnvelope(
       });
     }),
   );
+  return Object.freeze({ records, hasMore: body.has_more });
+}
+
+export function parseLarkRecordSearchEnvelope(
+  value: unknown,
+): readonly Record<string, unknown>[] {
+  return parseLarkRecordSearchPage(value).records;
 }
 
 export function parseLarkRecordUpsertEnvelope(
@@ -4539,41 +4547,80 @@ class VerifiedLarkCliTransport
     }
   }
 
+  async #searchRecords(
+    tableKey: LarkProjectionTableKey,
+    keyword: string,
+    options: { readonly includeArtifactAttachment?: boolean } = {},
+  ): Promise<readonly Record<string, unknown>[]> {
+    nonEmpty(keyword, "record-search keyword");
+    const records: Record<string, unknown>[] = [];
+    const recordIds = new Set<string>();
+    let offset = 0;
+    for (;;) {
+      const response = await this.#run([
+        "base",
+        "+record-search",
+        "--base-token",
+        this.#baseToken(),
+        "--table-id",
+        this.#configuration.tables[tableKey],
+        "--keyword",
+        keyword,
+        "--search-field",
+        this.#configuration.stableIdField,
+        "--field-id",
+        this.#configuration.stableIdField,
+        "--field-id",
+        this.#configuration.payloadField,
+        "--field-id",
+        this.#configuration.payloadHashField,
+        ...(options.includeArtifactAttachment === true
+          ? [
+              "--field-id",
+              this.#configuration.artifactAttachmentField,
+            ]
+          : []),
+        "--sort-json",
+        JSON.stringify([
+          { field: this.#configuration.stableIdField, desc: false },
+        ]),
+        "--offset",
+        String(offset),
+        "--limit",
+        "200",
+        "--format",
+        "json",
+        "--as",
+        "user",
+      ]);
+      const page = parseLarkRecordSearchPage(response);
+      for (const record of page.records) {
+        const recordId = record.record_id;
+        if (typeof recordId !== "string" || recordIds.has(recordId)) {
+          throw new Error(
+            "lark-cli record-search pagination returned a duplicate record ID",
+          );
+        }
+        recordIds.add(recordId);
+        records.push(record);
+      }
+      if (!page.hasMore) return Object.freeze(records);
+      if (page.records.length === 0) {
+        throw new Error(
+          "lark-cli record-search pagination did not advance",
+        );
+      }
+      offset += page.records.length;
+    }
+  }
+
   async #findRecords(
     tableKey: LarkProjectionTableKey,
     stableId: string,
   ): Promise<readonly Record<string, unknown>[]> {
-    const response = await this.#run([
-      "base",
-      "+record-search",
-      "--base-token",
-      this.#baseToken(),
-      "--table-id",
-      this.#configuration.tables[tableKey],
-      "--keyword",
-      stableId,
-      "--search-field",
-      this.#configuration.stableIdField,
-      "--field-id",
-      this.#configuration.stableIdField,
-      "--field-id",
-      this.#configuration.payloadField,
-      "--field-id",
-      this.#configuration.payloadHashField,
-      ...(tableKey === "artifacts"
-        ? [
-            "--field-id",
-            this.#configuration.artifactAttachmentField,
-          ]
-        : []),
-      "--limit",
-      "200",
-      "--format",
-      "json",
-      "--as",
-      "user",
-    ]);
-    const matches = parseLarkRecordSearchEnvelope(response).filter((record) => {
+    const matches = (await this.#searchRecords(tableKey, stableId, {
+      includeArtifactAttachment: tableKey === "artifacts",
+    })).filter((record) => {
       const fields =
         record.fields !== null && typeof record.fields === "object"
           ? (record.fields as Record<string, unknown>)
@@ -4586,27 +4633,44 @@ class VerifiedLarkCliTransport
   async #listRecords(
     tableKey: LarkProjectionTableKey,
   ): Promise<readonly Record<string, unknown>[]> {
-    const response = await this.#run([
-      "base",
-      "+record-search",
-      "--base-token",
-      this.#baseToken(),
-      "--table-id",
-      this.#configuration.tables[tableKey],
-      "--field-id",
-      this.#configuration.stableIdField,
-      "--field-id",
-      this.#configuration.payloadField,
-      "--field-id",
-      this.#configuration.payloadHashField,
-      "--limit",
-      "200",
-      "--format",
-      "json",
-      "--as",
-      "user",
-    ]);
-    return parseLarkRecordSearchEnvelope(response);
+    const prefixes =
+      tableKey === "runs"
+        ? ["job:", "run:", "attempt:"]
+        : tableKey === "comparisons"
+          ? ["comparison:", "gap:"]
+          : null;
+    if (prefixes === null) {
+      throw new Error(
+        `Lark Base full-table refresh is unsupported for ${tableKey}`,
+      );
+    }
+    const rows: Record<string, unknown>[] = [];
+    const recordIds = new Set<string>();
+    for (const prefix of prefixes) {
+      for (const record of await this.#searchRecords(tableKey, prefix)) {
+        const fields =
+          record.fields !== null && typeof record.fields === "object"
+            ? (record.fields as Record<string, unknown>)
+            : record;
+        if (
+          typeof fields[this.#configuration.stableIdField] !== "string" ||
+          !(fields[this.#configuration.stableIdField] as string).startsWith(
+            prefix,
+          )
+        ) {
+          continue;
+        }
+        const recordId = record.record_id as string;
+        if (recordIds.has(recordId)) {
+          throw new Error(
+            "Lark Base namespace pagination returned a duplicate physical record",
+          );
+        }
+        recordIds.add(recordId);
+        rows.push(record);
+      }
+    }
+    return Object.freeze(rows);
   }
 
   #readPersistedRecordPayload(

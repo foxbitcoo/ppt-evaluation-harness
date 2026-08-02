@@ -101,6 +101,12 @@ function causalAdjudicationHead(
         `Invalid adjudication causal history: missing parent ${prior}`,
       );
     }
+    const parent = byId.get(prior)!;
+    if (Date.parse(event.occurredAt) < Date.parse(parent.occurredAt)) {
+      throw new Error(
+        "Invalid adjudication causal history: child precedes parent",
+      );
+    }
     if (referencedParents.has(prior)) {
       throw new Error(
         `Invalid adjudication causal history: fork at ${prior}`,

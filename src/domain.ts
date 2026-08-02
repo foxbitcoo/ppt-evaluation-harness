@@ -23,6 +23,11 @@ export type ProvenanceLabel =
   | "LIVE_PRODUCTION"
   | "PRODUCTION_REPLAY";
 
+export type ExecutionProvenance =
+  | MockProvenance
+  | "LIVE_PRODUCTION"
+  | "PRODUCTION_REPLAY";
+
 export type RunStatus =
   | "active"
   | "completed"
@@ -139,6 +144,8 @@ export interface RunRecord {
   readonly productConfigurationEvidence?: ObservedProductConfiguration | null;
   readonly costEvidence: CostEvidence | null;
   readonly provenance: ProvenanceLabel;
+  /** Provider execution source; production replay must remain distinct from LIVE. */
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly createdAt: string;
   readonly lastSyncedAt: string;
@@ -508,6 +515,7 @@ export interface ComparisonRecord {
   readonly leftScorecardId: string;
   readonly rightScorecardId: string;
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
 }
 
@@ -578,6 +586,7 @@ export interface ProductGapCardRecord {
   readonly jobId: string;
   readonly comparisonId: string;
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly workflowState: "pending_review";
   readonly causeAttribution: "HYPOTHESIS";
@@ -679,6 +688,7 @@ export interface VendorComparisonSummary {
 export interface FeishuReportDraft {
   readonly reportId: string;
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly title: string;
   readonly jobId: string;
@@ -713,6 +723,7 @@ export interface BakeoffJobSummary {
   readonly environment: "test" | "production";
   readonly status: "active" | "completed" | "partial" | "failed";
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
 }
 

@@ -58,8 +58,11 @@ no independently trustworthy exact CLI-completion timestamp was observed, so
 the evidence does not manufacture a midnight timestamp.
 
 The current-verifier evidence distinguishes the exact raw CLI stdout hash from
-the stable attested recovery-result hash. The raw hash is bound to the complete
-embedded verifier build identity that appears in that same CLI result. “Raw”
+the stable attested recovery-result hash. The raw hash is associated with the
+current-workstation verifier reproducibility identity that appears in that same
+CLI result. Because `node --import tsx` performs this source/toolchain check
+only after Node and the loader have started, that identity is not an independent
+bootstrap, signed attestation, or tamper-proof proof of executed code. “Raw”
 means the exact UTF-8 stdout bytes, including the CLI's single terminal LF;
 no trimming or whitespace normalization occurs before hashing. The JSON parser
 may accept surrounding JSON whitespace, but that does not alter the raw-byte
@@ -76,9 +79,12 @@ The current 2026-08-02 T10 rehearsal used the v2 durable-root registry
 `doubao-real-provider-20260802-t10-v32`. Historical v30 and v31 recovery
 evidence remains unchanged. v32 binds the same six narrow retained roots to
 their canonical path, device, inode, owner, and mode before recovery and binds
-the verifier to the exact TypeScript runtime toolchain used for execution.
-This is verifier-side storage and build re-attestation, not a new provider
-generation or a change to the retained Artifact.
+the reported current-workstation reproducibility identity to the observed
+TypeScript runtime toolchain bytes. This is verifier-side storage and
+post-start reproducibility checking, not independent execution attestation, a
+new provider generation, or a change to the retained Artifact. A signed
+bootstrap or native frozen verifier remains required for stronger execution
+provenance.
 
 ## Fixed protocol
 

@@ -1485,6 +1485,7 @@ test("Feishu projection commits one authorized canonical batch without rewriting
   await feishu.createReport({
     reportId: "unrelated-report",
     provenance: "MOCK",
+    executionProvenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     title: "Unrelated",
     jobId: unrelatedJobId,

@@ -5,6 +5,7 @@ import type {
   CapturedArtifactTableRecord,
   DynamicComparisonView,
   EffectiveArtifactScorecard,
+  ExecutionProvenance,
   FeishuReportDraft,
   PageEvidenceLink,
   ProductGapCardRecord,
@@ -246,6 +247,15 @@ export function buildCanonicalComparisonReportDraft(command: {
     vendorSummaries,
     scores,
   } = command;
+  const executionProvenance: ExecutionProvenance =
+    job.executionProvenance ??
+    (job.provenance === "MOCK"
+      ? "MOCK"
+      : (() => {
+          throw new Error(
+            "Production comparison report requires explicit LIVE_PRODUCTION or PRODUCTION_REPLAY execution provenance",
+          );
+        })());
   const reportKey = shortHash(
     comparisons.map(({ comparisonId, dimensions }) => ({
       comparisonId,
@@ -386,12 +396,21 @@ ${comparison.dimensions
     )
     .join("\n\n");
   const title =
-    job.provenance === "MOCK"
+    executionProvenance === "MOCK"
       ? "MOCK｜Case Sample 动态 A/B 精简报告"
-      : "Case Sample｜动态 A/B 精简报告";
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "历史真实产物回放｜Case Sample 动态 A/B 精简报告"
+        : "LIVE｜Case Sample 动态 A/B 精简报告";
+  const executionNotice =
+    executionProvenance === "MOCK"
+      ? "> **单次 Case Sample：MOCK 测试数据，禁止作为真实厂商结论。**"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "> **历史真实产物回放，非本次 LIVE 生产验收；报告仅验证已留存真实产物的当前评测与投影链路。**"
+        : "> **LIVE 真实单次 Case Sample：结论仅适用于本次已捕获的静态自读 PPT，不外推到其他场景。**";
   return {
     reportId: `comparison-report-${reportKey}`,
     provenance: job.provenance,
+    executionProvenance,
     environmentOrigin: job.environmentOrigin,
     title,
     jobId: job.jobId,
@@ -409,11 +428,12 @@ ${comparison.dimensions
     claimLevel: "case_sample",
     markdown: `# ${title}
 
-> **单次 Case Sample：结论仅适用于当前已捕获的静态自读 PPT，不外推到其他场景。**
+${executionNotice}
 
 ## 全部所选产品交付结果
 
 - Bakeoff Job 状态：\`${job.status}\`
+- 执行血缘：\`${executionProvenance}\`
 
 | 产品 | Run | 状态 | 状态原因 | Artifact | Judge / 视觉评估 |
 |---|---|---|---|---|---|

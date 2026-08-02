@@ -250,6 +250,18 @@ export interface ProductAttemptResult {
   readonly captureEvidence?: ProductArtifactCaptureEvidence;
 }
 
+export interface AttemptCheckpointReadPort {
+  readonly checkpointStoreId: string;
+  readonly durability?: "ephemeral" | "durable";
+  readonly checkpointIntegrity?:
+    | "authenticated_hash_chain"
+    | "legacy_unverified_read_only";
+  readonly recoveryReferencePrefix?: string;
+  readAttempt(
+    attemptId: string,
+  ): Promise<readonly ObservableAttemptEvent[]>;
+}
+
 export interface AttemptCheckpointPort {
   readonly checkpointStoreId: string;
   readonly durability?: "ephemeral" | "durable";

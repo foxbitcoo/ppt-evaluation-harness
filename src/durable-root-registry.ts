@@ -11,6 +11,8 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
+import type { FileSystemRootIdentity } from "./file-system-blob-store.ts";
+
 export interface DurableRootRegistryEntry {
   readonly rootReference: string;
   readonly absolutePath: string;
@@ -419,6 +421,13 @@ export function resolveDurableRoot(
   registry: DurableRootRegistry,
   rootReference: string,
 ): string {
+  return resolveDurableRootIdentity(registry, rootReference).canonicalPath;
+}
+
+export function resolveDurableRootIdentity(
+  registry: DurableRootRegistry,
+  rootReference: string,
+): FileSystemRootIdentity {
   const entry = registry.roots.find(
     (candidate) => candidate.rootReference === rootReference,
   );
@@ -427,7 +436,13 @@ export function resolveDurableRoot(
       `Durable root registry has no mapping for ${rootReference}`,
     );
   }
-  return entry.absolutePath;
+  return Object.freeze({
+    canonicalPath: entry.absolutePath,
+    deviceId: entry.deviceId,
+    inodeId: entry.inodeId,
+    ownerUid: entry.ownerUid,
+    mode: entry.mode,
+  });
 }
 
 export function retainedRehearsalRoot(registryId: string): string {

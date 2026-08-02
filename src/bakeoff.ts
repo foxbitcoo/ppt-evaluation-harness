@@ -9,6 +9,7 @@ import type {
   BakeoffJobSummary,
   CaptureOnlyBakeoffJobOutcome,
   BlockReason,
+  ExecutionProvenance,
   FeishuReport,
   JudgeFailureLineage,
   ObservableAttemptEvent,
@@ -114,6 +115,7 @@ import {
   InMemoryAttemptCheckpointStore,
   parseAdapterExecutionConfiguration,
   type AttemptCheckpointPort,
+  type AttemptCheckpointReadPort,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
   type ProductAdapterImplementationPackage,
@@ -127,7 +129,11 @@ import {
   registeredQwenBrowserDriverEvidence,
   type QwenBrowserDriverPort,
 } from "./qwen-production-adapter.ts";
-import { assertHarnessOwnedProductionCapabilities } from "./production-capabilities.ts";
+import {
+  assertHarnessOwnedProductionCapabilities,
+  resolveHarnessOwnedProductionCheckpointAuthority,
+  type HarnessOwnedProductionCheckpointAuthority,
+} from "./production-capabilities.ts";
 import {
   InMemoryReferencePackStore,
   ReviewedReferencePackGenerator,
@@ -206,6 +212,7 @@ interface BakeoffExecutionContext {
   readonly jobId: string;
   readonly evaluationCase: typeof VOLCANO_EVALUATION_CASE;
   readonly provenance: "MOCK" | "PRODUCTION";
+  readonly executionProvenance: ExecutionProvenance;
   readonly environmentOrigin:
     | typeof MOCK_TEST_ENVIRONMENT_ORIGIN
     | typeof PRODUCTION_ENVIRONMENT_ORIGIN;
@@ -216,6 +223,8 @@ function executionContext(
   environment: "test" | "production",
   fixedTime: string,
   executionMode: "evaluate" | "capture_only" = "evaluate",
+  executionProvenance: ExecutionProvenance =
+    environment === "test" ? "MOCK" : "LIVE_PRODUCTION",
 ): BakeoffExecutionContext {
   return environment === "production"
     ? Object.freeze({
@@ -225,6 +234,7 @@ function executionContext(
             : "production-job-volcano-wps-v1",
         evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
         provenance: "PRODUCTION",
+        executionProvenance,
         environmentOrigin: PRODUCTION_ENVIRONMENT_ORIGIN,
         fixedTime,
       })
@@ -232,9 +242,32 @@ function executionContext(
         jobId: MOCK_SCENARIO.jobId,
         evaluationCase: VOLCANO_EVALUATION_CASE,
         provenance: "MOCK",
+        executionProvenance: "MOCK",
         environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
         fixedTime: MOCK_SCENARIO.fixedTime,
       });
+}
+
+function selectedExecutionProvenance(
+  environment: "test" | "production",
+  selections: readonly SelectedProductAdapter[],
+): ExecutionProvenance {
+  if (environment === "test") return "MOCK";
+  const provenances = new Set(
+    selections.map(({ productPackage }) => productPackage.provenance),
+  );
+  if (
+    provenances.size !== 1 ||
+    (!provenances.has("LIVE_PRODUCTION") &&
+      !provenances.has("PRODUCTION_REPLAY"))
+  ) {
+    throw new Error(
+      "Production Bakeoff requires one unambiguous LIVE_PRODUCTION or PRODUCTION_REPLAY execution lineage",
+    );
+  }
+  return provenances.has("PRODUCTION_REPLAY")
+    ? "PRODUCTION_REPLAY"
+    : "LIVE_PRODUCTION";
 }
 
 function bakeoffProtocolSnapshot(
@@ -392,7 +425,9 @@ export interface BakeoffHarnessDependencies {
   readonly egressAudit?: EgressAuthorizationAuditPort;
   readonly wpsAiPptBrowserDriver?: WpsAiPptBrowserDriverPort;
   readonly qwenBrowserDriver?: QwenBrowserDriverPort;
-  readonly attemptCheckpointStore?: AttemptCheckpointPort;
+  readonly attemptCheckpointStore?:
+    | AttemptCheckpointPort
+    | AttemptCheckpointReadPort;
   readonly browserProfileLock?: BrowserProfileLockPort;
   readonly safeRasterRenderer?: SafeRasterRendererPort;
   readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort;
@@ -1265,6 +1300,10 @@ function replayedBakeoffOutcome(
   const selectedRunIds = source.job.selectedRunIds;
   if (
     source.job.caseId !== command.caseId ||
+    source.job.executionProvenance !== context.executionProvenance ||
+    (source.primaryReport !== null &&
+      source.primaryReport.executionProvenance !==
+        context.executionProvenance) ||
     selectedRunIds === null ||
     selectedRunIds.length !== expectedRunIds.length ||
     selectedRunIds.some((runId, index) => runId !== expectedRunIds[index])
@@ -1334,6 +1373,7 @@ function replayedBakeoffOutcome(
       run.productVendorId !== selection.productPackage.vendorId ||
       run.productPackageId !== selection.productPackage.packageId ||
       run.adapterVersion !== selection.productPackage.adapterVersion ||
+      run.executionProvenance !== context.executionProvenance ||
       run.specificationReference?.specCommitSha !== specCommitSha ||
       run.specificationReference.versionReferences
         .productPackageContentHash !==
@@ -1437,6 +1477,7 @@ function replayedBakeoffOutcome(
       environment: command.environment,
       status: source.job.status,
       provenance: context.provenance,
+      executionProvenance: context.executionProvenance,
       environmentOrigin: context.environmentOrigin,
     },
     artifact: primaryCapture?.artifact ?? null,
@@ -1661,6 +1702,7 @@ function attemptRecord(input: {
       currency: null,
     },
     provenance: input.productPackage.provenance,
+    executionProvenance: input.productPackage.provenance,
     environmentOrigin: input.productPackage.environmentOrigin,
     createdAt: input.context.fixedTime,
     lastSyncedAt: input.context.fixedTime,
@@ -1690,6 +1732,9 @@ async function executeVendor(
   safeRasterRenderer: SafeRasterRendererPort | undefined,
   judgeDestination: EgressDestinationMetadata,
   attemptCheckpointStore: AttemptCheckpointPort,
+  productionCheckpointAuthority:
+    | HarnessOwnedProductionCheckpointAuthority
+    | undefined,
   onReferencePackUse: (evaluationAttemptId: string) => void,
   beforeVendorEgress?: (input: {
     readonly runId: string;
@@ -1736,13 +1781,13 @@ async function executeVendor(
       });
       if (
         targetEnvironment === "production" &&
-        attemptCheckpointStore.registerAdapterClaim === undefined
+        productionCheckpointAuthority === undefined
       ) {
         throw new Error(
-          "Production provider execution requires a durable harness adapter claim",
+          "Production provider execution requires a private Attempt-scoped checkpoint authority",
         );
       }
-      await attemptCheckpointStore.registerAdapterClaim?.({
+      const adapterClaim = {
         jobId: context.jobId,
         caseId: context.evaluationCase.caseId,
         runId,
@@ -1750,7 +1795,14 @@ async function executeVendor(
         attemptSeq,
         adapterVersion: productPackage.adapterVersion,
         claimEpoch: attemptSeq,
-      });
+      };
+      if (productionCheckpointAuthority === undefined) {
+        await attemptCheckpointStore.registerAdapterClaim?.(adapterClaim);
+      } else {
+        await productionCheckpointAuthority.authorizeAdapterClaim(
+          adapterClaim,
+        );
+      }
       const vendorAuthorization =
         await requireEgressAuthorization(egressAuthorization, {
           requestId: `vendor-generation:${attemptId}`,
@@ -2349,6 +2401,7 @@ function sharedRunFields(
     jobId: context.jobId,
     caseId,
     provenance: context.provenance,
+    executionProvenance: context.executionProvenance,
     environmentOrigin: context.environmentOrigin,
     createdAt: context.fixedTime,
     lastSyncedAt: context.fixedTime,
@@ -2393,9 +2446,19 @@ export function createBakeoffHarness({
     configuredTombstones ?? defaultTombstoneLedger(feishu);
   const egressAudit =
     configuredEgressAudit ?? defaultEgressAudit(feishu);
+  const productionCheckpointAuthority =
+    configuredAttemptCheckpointStore === undefined
+      ? undefined
+      : resolveHarnessOwnedProductionCheckpointAuthority(
+          configuredAttemptCheckpointStore as AttemptCheckpointReadPort,
+        );
   const attemptCheckpointStore =
-    configuredAttemptCheckpointStore ??
+    productionCheckpointAuthority?.checkpointStore ??
+    (configuredAttemptCheckpointStore as AttemptCheckpointPort | undefined) ??
     defaultAttemptCheckpointStore(feishu);
+  const adapterCheckpointStore =
+    productionCheckpointAuthority?.adapterCheckpointStore ??
+    attemptCheckpointStore;
   const browserProfileLock =
     configuredBrowserProfileLock ??
     new InProcessBrowserProfileLock(
@@ -2478,6 +2541,7 @@ export function createBakeoffHarness({
         command.environment,
         clock.now(),
         command.executionMode ?? "evaluate",
+        selectedExecutionProvenance(command.environment, selections),
       );
       if (command.caseId !== VOLCANO_CASE_ID) {
         throw new Error(`Unknown Evaluation Case: ${command.caseId}`);
@@ -2807,6 +2871,7 @@ export function createBakeoffHarness({
               safeRasterRenderer,
               judgeDestination,
               attemptCheckpointStore,
+              productionCheckpointAuthority,
               (evaluationAttemptId) => {
                 evaluationAttemptIdsThatUsedPack.add(evaluationAttemptId);
               },
@@ -3084,6 +3149,7 @@ export function createBakeoffHarness({
             })),
             {
               provenance: context.provenance,
+              executionProvenance: context.executionProvenance,
               environmentOrigin: context.environmentOrigin,
               createdAt: context.fixedTime,
             },
@@ -3193,6 +3259,7 @@ export function createBakeoffHarness({
           environment: command.environment,
           status: jobStatus,
           provenance: context.provenance,
+          executionProvenance: context.executionProvenance,
           environmentOrigin: context.environmentOrigin,
         },
         artifact: captured[0]?.artifact ?? null,
@@ -3264,7 +3331,7 @@ export function createBakeoffHarness({
         {
           wpsAiPptBrowserDriver,
           qwenBrowserDriver,
-          attemptCheckpointStore,
+          attemptCheckpointStore: adapterCheckpointStore,
           doubaoBrowserDriver,
         },
       );
@@ -3429,7 +3496,8 @@ export function createBakeoffHarness({
         assertHarnessOwnedProductionCapabilities({
           artifactVault,
           runSpecificationVault,
-          attemptCheckpointStore,
+          attemptCheckpointStore:
+            configuredAttemptCheckpointStore ?? attemptCheckpointStore,
           browserProfileLock,
           safeRasterRenderer,
         });
@@ -3460,6 +3528,10 @@ export function createBakeoffHarness({
         commandSnapshot.environment,
         clock.now(),
         commandSnapshot.executionMode ?? "evaluate",
+        selectedExecutionProvenance(
+          commandSnapshot.environment,
+          selections,
+        ),
       );
       const specCommitSha = BUILD_SPEC_COMMIT_SHA;
       const jobIdentity = bakeoffJobIdentity(

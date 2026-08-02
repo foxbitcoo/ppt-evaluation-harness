@@ -47,6 +47,54 @@ export function assertValidAdjudicationEventFields(
   event: AdjudicationEventRecord,
 ): void {
   if (
+    event.recordType !== "adjudication_event" ||
+    event.schemaVersion !== "adjudication-event-v1"
+  ) {
+    throw new Error("Adjudication Event has an invalid schema");
+  }
+  for (const [label, value] of [
+    ["adjudicationEventId", event.adjudicationEventId],
+    ["scorecardId", event.scorecardId],
+    ["artifactId", event.artifactId],
+    ["runId", event.runId],
+    ["jobId", event.jobId],
+    ["actor", event.actorId],
+    ["reason", event.reason],
+  ] as const) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new Error(`Adjudication Event ${label} must not be blank`);
+    }
+  }
+  if (
+    event.priorAdjudicationEventId !== null &&
+    (typeof event.priorAdjudicationEventId !== "string" ||
+      event.priorAdjudicationEventId.trim().length === 0)
+  ) {
+    throw new Error(
+      "Adjudication Event prior reference must be null or a non-blank ID",
+    );
+  }
+  if (!REVIEWABLE_SCORE_DIMENSIONS.has(event.dimension)) {
+    throw new Error("Adjudication Event has an invalid score dimension");
+  }
+  if (
+    event.modelOriginalAssessmentStatus !== "ASSESSED" ||
+    event.modelOriginalScore === null
+  ) {
+    throw new Error(
+      "Invalid adjudication for NOT_ASSESSABLE: human adjudication cannot invent assessability",
+    );
+  }
+  if (
+    !Number.isInteger(event.modelOriginalScore) ||
+    event.modelOriginalScore < 1 ||
+    event.modelOriginalScore > 5
+  ) {
+    throw new Error(
+      "Adjudication Event has an invalid model-original score",
+    );
+  }
+  if (
     event.humanFinalAssessmentStatus !== "ASSESSED" ||
     !Number.isInteger(event.humanFinalScore) ||
     event.humanFinalScore < 1 ||
@@ -57,24 +105,14 @@ export function assertValidAdjudicationEventFields(
     );
   }
   if (
-    typeof event.actorId !== "string" ||
-    event.actorId.trim().length === 0
-  ) {
-    throw new Error("Adjudication Event actor must not be blank");
-  }
-  if (
-    typeof event.reason !== "string" ||
-    event.reason.trim().length === 0
-  ) {
-    throw new Error("Adjudication Event reason must not be blank");
-  }
-  if (
     !isIsoTimestamp(event.occurredAt) ||
     !isIsoTimestamp(event.createdAt) ||
-    !isIsoTimestamp(event.lastSyncedAt)
+    !isIsoTimestamp(event.lastSyncedAt) ||
+    Date.parse(event.createdAt) < Date.parse(event.occurredAt) ||
+    Date.parse(event.lastSyncedAt) < Date.parse(event.createdAt)
   ) {
     throw new Error(
-      "Adjudication Event timestamp must be an ISO timestamp",
+      "Adjudication Event timestamps must be causal ISO timestamps",
     );
   }
 }

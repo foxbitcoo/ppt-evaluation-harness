@@ -4,6 +4,7 @@ import type {
   RunStatus,
   FeishuReportDraft,
   JudgeFailureLineage,
+  ExecutionProvenance,
   ProvenanceLabel,
   RenderManifest,
   ScoreDimension,
@@ -39,10 +40,12 @@ export function createMockReportDraft(
   results: readonly MockReportVendorResult[],
   lineage: {
     readonly provenance: ProvenanceLabel;
+    readonly executionProvenance?: ExecutionProvenance;
     readonly environmentOrigin: EnvironmentOrigin;
     readonly createdAt: string;
   } = {
     provenance: "MOCK",
+    executionProvenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     createdAt: MOCK_SCENARIO.fixedTime,
   },
@@ -112,18 +115,35 @@ ${scoreRows}`;
       },
     )
     .join("\n\n");
-  const reportPrefix = lineage.provenance === "MOCK" ? "MOCK｜" : "";
+  const executionProvenance =
+    lineage.executionProvenance ??
+    (lineage.provenance === "MOCK" ? "MOCK" : "LIVE_PRODUCTION");
+  const reportPrefix =
+    executionProvenance === "MOCK"
+      ? "MOCK｜"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "历史真实产物回放｜"
+        : "LIVE｜";
+  const scopeNotice =
+    executionProvenance === "MOCK"
+      ? "> **MOCK 测试数据，禁止作为真实厂商结论。**"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "> **历史真实产物回放，非本次 LIVE 生产验收；仅验证已留存真实产物的当前读取与评测链路。**"
+        : "> **LIVE 真实单次 Case Sample，仅记录本次运行，不外推为稳定厂商结论。**";
+  const claimScope =
+    executionProvenance === "MOCK"
+      ? "仅适用于当前固定 Mock 火山 Case"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "仅适用于已留存历史真实产物的回放，不代表本次 LIVE 厂商运行"
+        : "仅适用于本次 LIVE 真实火山 Case 的单次样本";
   const markdown = `# ${reportPrefix}火山 Case Sample 三厂商评测报告
 
-${lineage.provenance === "MOCK" ? "> **MOCK 测试数据，禁止作为真实厂商结论。**" : "> **真实单次 Case Sample，仅记录当前运行，不外推为稳定厂商结论。**"}
+${scopeNotice}
 
 - Bakeoff Job：\`${jobId}\`
 - Job 状态：\`${jobStatus}\`
-- 证据等级：Case Sample（${
-    lineage.provenance === "MOCK"
-      ? "仅适用于当前固定 Mock 火山 Case"
-      : "仅适用于当前真实火山 Case 的单次样本"
-  }）
+- 执行血缘：\`${executionProvenance}\`
+- 证据等级：Case Sample（${claimScope}）
 
 ${vendorSections}
 
@@ -137,6 +157,7 @@ Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分
         ? MOCK_SCENARIO.reportId
         : `${jobId}-report`,
     provenance: lineage.provenance,
+    executionProvenance,
     environmentOrigin: lineage.environmentOrigin,
     title: `${reportPrefix}火山 Case Sample 三厂商评测报告`,
     jobId,

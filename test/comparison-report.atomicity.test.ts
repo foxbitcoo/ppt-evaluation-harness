@@ -310,10 +310,12 @@ async function threeVendorProductionSeed(): Promise<FeishuProjectionSnapshot> {
     ),
   );
   const seed = productionize(source.snapshot());
+  const executionProvenance = "PRODUCTION_REPLAY" as const;
   const capturedArtifactTable = seed.capturedArtifactTable.map(
     (record) => {
       const rendered = {
         ...record.renderManifest,
+        provenance: executionProvenance,
         slides: record.renderManifest.slides.map((slide) => ({
           ...slide,
           filename: slide.filename.replace(/\.svg$/i, ".png"),
@@ -328,6 +330,10 @@ async function threeVendorProductionSeed(): Promise<FeishuProjectionSnapshot> {
       } = rendered;
       return {
         ...record,
+        artifact: {
+          ...record.artifact,
+          provenance: executionProvenance,
+        },
         renderManifest: {
           ...rendered,
           contentHash: calculateRenderManifestHash(
@@ -356,6 +362,7 @@ async function threeVendorProductionSeed(): Promise<FeishuProjectionSnapshot> {
     assert.ok(capture);
     const scorecard = {
       ...record.scorecard,
+      provenance: executionProvenance,
       evaluationInputManifest: {
         ...record.scorecard.evaluationInputManifest,
         artifactHash: capture.artifact.contentHash,
@@ -383,13 +390,21 @@ async function threeVendorProductionSeed(): Promise<FeishuProjectionSnapshot> {
       record.recordType === "bakeoff_job"
         ? {
             ...record,
+            executionProvenance,
             reportUrl: null,
             auxiliaryReportUrls: null,
           }
-        : record,
+        : {
+            ...record,
+            executionProvenance,
+          },
     ),
     capturedArtifactTable,
     artifactScoreTable,
+    reports: seed.reports.map((report) => ({
+      ...report,
+      executionProvenance,
+    })),
   };
   assert.doesNotMatch(
     JSON.stringify(safelyMaterializedSeed),

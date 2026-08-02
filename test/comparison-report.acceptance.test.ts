@@ -20,6 +20,7 @@ import {
   type ProductAdapterPort,
   type ReferencePackGeneratorPort,
 } from "../src/index.ts";
+import { buildCanonicalComparisonReportDraft } from "../src/comparison-report-render.ts";
 
 function rehashRenderManifest(
   artifactContentHash: ArtifactScoreTableRecord["artifact"]["contentHash"],
@@ -72,6 +73,34 @@ async function seededThreeVendorProjection(): Promise<{
   });
   return { feishu, jobId: bakeoff.job.jobId };
 }
+
+test("a comparison report keeps replay provenance visible and disclaims LIVE acceptance", async () => {
+  const { feishu } = await seededThreeVendorProjection();
+  const job = feishu.snapshot().runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  );
+  assert.ok(job);
+
+  const report = buildCanonicalComparisonReportDraft({
+    resolveEvidenceUrl: () => "https://my.feishu.cn/record/example",
+    job: {
+      ...job,
+      provenance: "PRODUCTION",
+      executionProvenance: "PRODUCTION_REPLAY",
+    },
+    vendorRuns: [],
+    capturedArtifacts: [],
+    comparisons: [],
+    gapCards: [],
+    vendorSummaries: [],
+    scores: [],
+  });
+
+  assert.equal(report.executionProvenance, "PRODUCTION_REPLAY");
+  assert.match(report.title, /历史真实产物回放/);
+  assert.match(report.markdown, /非本次 LIVE 生产验收/);
+  assert.doesNotMatch(report.markdown, /当前真实运行/);
+});
 
 async function projectionBeforeScores(): Promise<{
   readonly feishu: InMemoryFeishuProjection;
@@ -1598,6 +1627,7 @@ test("Artifact Score projection rejects a production-shaped score whose persiste
     await target.appendRunRecord({
       ...run,
       provenance: "PRODUCTION",
+      executionProvenance: "LIVE_PRODUCTION",
     });
   }
   const productionRenderManifest = {

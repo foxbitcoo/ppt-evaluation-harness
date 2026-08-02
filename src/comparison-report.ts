@@ -9,6 +9,7 @@ import type {
   DynamicComparisonView,
   EffectiveArtifactScorecard,
   EffectiveDimensionScore,
+  ExecutionProvenance,
   ProductGapCardRecord,
   ProductGapEvidence,
   RunRecord,
@@ -506,6 +507,28 @@ function comparePair(
     throw new Error("Selected Runs are not compatible for direct comparison");
   }
   const sharedProvenance = left.score.provenance;
+  const leftExecutionProvenance = captureExecutionProvenance(
+    left.score.artifact,
+    left.score.renderManifest,
+    left.score.scorecard,
+  );
+  const rightExecutionProvenance = captureExecutionProvenance(
+    right.score.artifact,
+    right.score.renderManifest,
+    right.score.scorecard,
+  );
+  if (
+    leftExecutionProvenance === null ||
+    rightExecutionProvenance === null ||
+    leftExecutionProvenance !== rightExecutionProvenance ||
+    leftExecutionProvenance === "PRODUCTION"
+  ) {
+    throw new Error(
+      "Selected Runs do not preserve one shared execution provenance",
+    );
+  }
+  const executionProvenance =
+    leftExecutionProvenance as ExecutionProvenance;
   assertCompleteScoreDimensions(
     left.score.effectiveScorecard.dimensions,
     "Left effective Scorecard",
@@ -635,6 +658,7 @@ function comparePair(
     leftScorecardId: left.score.scorecard.scorecardId,
     rightScorecardId: right.score.scorecard.scorecardId,
     provenance: sharedProvenance,
+    executionProvenance,
     environmentOrigin: left.score.environmentOrigin,
     leftProduct: left.run.product,
     rightProduct: right.run.product,
@@ -787,6 +811,12 @@ function createGapCards(
         jobId: comparison.jobId,
         comparisonId: comparison.comparisonId,
         provenance: comparison.provenance,
+        ...(comparison.executionProvenance === undefined
+          ? {}
+          : {
+              executionProvenance:
+                comparison.executionProvenance,
+            }),
         environmentOrigin: comparison.environmentOrigin,
         workflowState: "pending_review",
         causeAttribution: "HYPOTHESIS",

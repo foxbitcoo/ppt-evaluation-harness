@@ -461,7 +461,11 @@ test("Codex CLI Judge executes a verified private Codex snapshot through the pro
       stdin: null,
       cwd: directory,
       env: { PATH: "/usr/bin:/bin" },
-      deadlineMs: 5_000,
+      // The full acceptance suite runs several native renderer and Lark
+      // subprocess tests concurrently. Keep this success-path smoke test well
+      // above observed scheduler contention; hard-deadline behavior is covered
+      // separately with the deterministic 100 ms fixture below.
+      deadlineMs: 15_000,
       stdoutByteLimit: 4_096,
       stderrByteLimit: 4_096,
       terminationGraceMs: 250,

@@ -9,6 +9,7 @@ import type {
   ComparisonRecord,
   DynamicComparisonView,
   EvaluationCaseRecord,
+  ExecutionProvenance,
   FeishuReport,
   FeishuReportDraft,
   GitHubIssueDeliveryReservationRecord,
@@ -69,6 +70,13 @@ function snapshotHash(value: unknown): `sha256:${string}` {
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(canonicalValue(value)))
     .digest("hex")}`;
+}
+
+function explicitExecutionProvenance(
+  record: Pick<RunRecord, "provenance" | "executionProvenance">,
+): ExecutionProvenance | null {
+  return record.executionProvenance ??
+    (record.provenance === "MOCK" ? "MOCK" : null);
 }
 
 function cloneProjectionValue<T>(value: T): T {
@@ -489,13 +497,20 @@ function assertCompleteProjectionGraph(
       run.jobId !== job.jobId ||
       run.caseId !== job.caseId ||
       run.provenance !== job.provenance ||
+      explicitExecutionProvenance(run) !==
+        explicitExecutionProvenance(job) ||
       run.environmentOrigin !== job.environmentOrigin ||
       runAttempts.length === 0 ||
       runAttempts.some(
         (attempt) =>
           attempt.jobId !== run.jobId ||
           attempt.caseId !== run.caseId ||
-          attempt.provenance !== run.provenance ||
+          !projectionProvenanceCoversCapture(
+            run.provenance,
+            attempt.provenance,
+          ) ||
+          explicitExecutionProvenance(attempt) !==
+            explicitExecutionProvenance(run) ||
           attempt.environmentOrigin !== run.environmentOrigin,
       ) ||
       captures.length > 1 ||
@@ -679,6 +694,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       if (
         record.parentRecordId !== null ||
         record.recordId !== record.jobId ||
+        explicitExecutionProvenance(record) === null ||
+        (record.provenance === "MOCK") !==
+          (record.executionProvenance === undefined ||
+            record.executionProvenance === "MOCK") ||
         record.selectedRunIds === null ||
         new Set(record.selectedRunIds).size !==
           record.selectedRunIds.length ||
@@ -706,7 +725,15 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       (record.recordType === "vendor_run" &&
         job.recordId !== record.parentRecordId) ||
       job.caseId !== record.caseId ||
-      job.provenance !== record.provenance ||
+      (record.recordType === "vendor_run"
+        ? job.provenance !== record.provenance
+        : !projectionProvenanceCoversCapture(
+            job.provenance,
+            record.provenance,
+          )) ||
+      explicitExecutionProvenance(job) === null ||
+      explicitExecutionProvenance(record) !==
+        explicitExecutionProvenance(job) ||
       job.environmentOrigin !== record.environmentOrigin
     ) {
       throw new Error(
@@ -742,7 +769,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       parent === undefined ||
       parent.jobId !== record.jobId ||
       parent.caseId !== record.caseId ||
-      parent.provenance !== record.provenance ||
+      !projectionProvenanceCoversCapture(
+        parent.provenance,
+        record.provenance,
+      ) ||
+      explicitExecutionProvenance(parent) === null ||
+      explicitExecutionProvenance(record) !==
+        explicitExecutionProvenance(parent) ||
       parent.environmentOrigin !== record.environmentOrigin ||
       parent.product !== record.product ||
       parent.productVendorId !== record.productVendorId ||
@@ -782,6 +815,11 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     const job = jobs[0];
     const evaluationCase = cases[0];
     const run = runs[0];
+    const captureProvenance = captureExecutionProvenance(
+      record.artifact,
+      record.renderManifest,
+      "scorecard" in record ? record.scorecard : undefined,
+    );
     if (
       jobs.length !== 1 ||
       cases.length !== 1 ||
@@ -800,6 +838,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       job.provenance !== record.provenance ||
       run.provenance !== record.provenance ||
       evaluationCase.provenance !== record.provenance ||
+      captureProvenance === null ||
+      captureProvenance === "PRODUCTION" ||
+      explicitExecutionProvenance(job) !== captureProvenance ||
+      explicitExecutionProvenance(run) !== captureProvenance ||
       job.environmentOrigin !== record.environmentOrigin ||
       run.environmentOrigin !== record.environmentOrigin ||
       evaluationCase.environmentOrigin !== record.environmentOrigin
@@ -893,6 +935,13 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       job.provenance !== record.provenance ||
       leftRun.provenance !== record.provenance ||
       rightRun.provenance !== record.provenance ||
+      record.executionProvenance === undefined ||
+      explicitExecutionProvenance(job) !==
+        record.executionProvenance ||
+      explicitExecutionProvenance(leftRun) !==
+        record.executionProvenance ||
+      explicitExecutionProvenance(rightRun) !==
+        record.executionProvenance ||
       leftScore.environmentOrigin !== record.environmentOrigin ||
       rightScore.environmentOrigin !== record.environmentOrigin ||
       job.environmentOrigin !== record.environmentOrigin ||
@@ -1151,6 +1200,8 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       comparison.caseId !== record.caseId ||
       comparison.jobId !== record.jobId ||
       comparison.provenance !== record.provenance ||
+      comparison.executionProvenance !==
+        record.executionProvenance ||
       comparison.environmentOrigin !== record.environmentOrigin
     ) {
       throw new Error(
@@ -1337,6 +1388,9 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       evaluationCase === undefined ||
       job.provenance !== report.provenance ||
       evaluationCase.provenance !== report.provenance ||
+      report.executionProvenance === undefined ||
+      explicitExecutionProvenance(job) !==
+        report.executionProvenance ||
       job.environmentOrigin !== report.environmentOrigin ||
       evaluationCase.environmentOrigin !==
         report.environmentOrigin ||
@@ -1349,6 +1403,8 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
           run.caseId !== job.caseId ||
           run.parentRecordId !== job.recordId ||
           run.provenance !== report.provenance ||
+          explicitExecutionProvenance(run) !==
+            report.executionProvenance ||
           run.environmentOrigin !== report.environmentOrigin,
       )
     ) {
@@ -1947,6 +2003,22 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         `Adjudication Event prior reference conflict: expected ${
           expectedPrior ?? "null"
         }`,
+      );
+    }
+    const prior =
+      record.priorAdjudicationEventId === null
+        ? undefined
+        : this.#adjudicationEventTable.find(
+            ({ adjudicationEventId }) =>
+              adjudicationEventId ===
+              record.priorAdjudicationEventId,
+          );
+    if (
+      prior !== undefined &&
+      Date.parse(record.occurredAt) < Date.parse(prior.occurredAt)
+    ) {
+      throw new Error(
+        "Adjudication Event occurredAt precedes its causal parent",
       );
     }
     this.#adjudicationEventTable.push(

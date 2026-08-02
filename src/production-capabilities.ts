@@ -43,7 +43,9 @@ import type {
 import { FileSystemImmutableBlobStore } from "./file-system-blob-store.ts";
 import { FileSystemAttemptCheckpointStore } from "./file-system-checkpoint-store.ts";
 import type {
+  AttemptCheckpointAdapterClaim,
   AttemptCheckpointPort,
+  AttemptCheckpointReadPort,
   SafeRasterCandidate,
   SafeRasterRendererPort,
 } from "./product-adapter.ts";
@@ -108,13 +110,28 @@ export interface HarnessOwnedProductionCapabilityEvidence {
 export interface HarnessOwnedProductionCapabilities {
   readonly artifactVault: ArtifactVault;
   readonly runSpecificationVault: RunSpecificationVault;
-  readonly attemptCheckpointStore: AttemptCheckpointPort;
+  readonly attemptCheckpointStore: AttemptCheckpointReadPort;
   readonly browserProfileLock: BrowserProfileLockPort;
   readonly safeRasterRenderer: SafeRasterRendererPort;
   readonly evidence: HarnessOwnedProductionCapabilityEvidence;
 }
 
 const capabilityBundleByObject = new WeakMap<object, string>();
+export interface HarnessOwnedProductionCheckpointAuthority {
+  readonly checkpointStore: AttemptCheckpointPort;
+  readonly adapterCheckpointStore: AttemptCheckpointPort;
+  authorizeAdapterClaim(claim: AttemptCheckpointAdapterClaim): Promise<void>;
+}
+const checkpointAuthorityByReadFacade = new WeakMap<
+  AttemptCheckpointReadPort,
+  HarnessOwnedProductionCheckpointAuthority
+>();
+
+export function resolveHarnessOwnedProductionCheckpointAuthority(
+  facade: AttemptCheckpointReadPort,
+): HarnessOwnedProductionCheckpointAuthority | undefined {
+  return checkpointAuthorityByReadFacade.get(facade);
+}
 
 function safeIdentifier(value: string, label: string): void {
   if (!/^[a-z0-9][a-z0-9._:-]{2,127}$/i.test(value)) {
@@ -1098,6 +1115,10 @@ export function createHarnessOwnedProductionCapabilities(input: {
   const runSpecificationAttestation = backendAttestation(
     input.runSpecification,
   );
+  const checkpointAttestation = backendAttestation({
+    ...input.checkpoint,
+    operatorDomainLabel: "production-checkpoint-domain",
+  });
   if (
     primaryAttestation.canonicalPath ===
       recoveryAttestation.canonicalPath ||
@@ -1157,8 +1178,63 @@ export function createHarnessOwnedProductionCapabilities(input: {
   const attemptCheckpointStore =
     new FileSystemAttemptCheckpointStore({
       checkpointStoreId: input.checkpoint.storeId,
-      rootPath: input.checkpoint.rootPath,
+      rootPath: checkpointAttestation.canonicalPath,
+      expectedRootIdentity: checkpointAttestation,
     });
+  const authorizedAdapterClaims = new Map<
+    string,
+    AttemptCheckpointAdapterClaim
+  >();
+  const attemptCheckpointReadFacade = Object.freeze<AttemptCheckpointReadPort>({
+    checkpointStoreId: attemptCheckpointStore.checkpointStoreId,
+    durability: attemptCheckpointStore.durability,
+    checkpointIntegrity: attemptCheckpointStore.checkpointIntegrity,
+    recoveryReferencePrefix: attemptCheckpointStore.recoveryReferencePrefix,
+    readAttempt: (attemptId) =>
+      attemptCheckpointStore.readAttempt(attemptId),
+  });
+  const adapterCheckpointStore = Object.freeze<AttemptCheckpointPort>({
+    checkpointStoreId: attemptCheckpointStore.checkpointStoreId,
+    durability: attemptCheckpointStore.durability,
+    checkpointIntegrity: attemptCheckpointStore.checkpointIntegrity,
+    recoveryReferencePrefix: attemptCheckpointStore.recoveryReferencePrefix,
+    readAttempt: (attemptId) =>
+      attemptCheckpointStore.readAttempt(attemptId),
+    async append(event) {
+      const claim = authorizedAdapterClaims.get(event.attemptId);
+      if (
+        claim === undefined ||
+        event.jobId !== claim.jobId ||
+        event.caseId !== claim.caseId ||
+        event.runId !== claim.runId ||
+        event.attemptSeq !== claim.attemptSeq ||
+        event.adapterVersion !== claim.adapterVersion ||
+        event.writerId !== claim.adapterVersion
+      ) {
+        throw new Error(
+          "Production checkpoint write has no matching harness-selected Attempt authority",
+        );
+      }
+      await attemptCheckpointStore.append(event);
+    },
+  });
+  const checkpointAuthority = Object.freeze<
+    HarnessOwnedProductionCheckpointAuthority
+  >({
+    checkpointStore: attemptCheckpointStore,
+    adapterCheckpointStore,
+    async authorizeAdapterClaim(claim) {
+      await attemptCheckpointStore.registerAdapterClaim(claim);
+      authorizedAdapterClaims.set(
+        claim.attemptId,
+        Object.freeze(structuredClone(claim)),
+      );
+    },
+  });
+  checkpointAuthorityByReadFacade.set(
+    attemptCheckpointReadFacade,
+    checkpointAuthority,
+  );
   const browserProfileLock = new FileSystemBrowserProfileLock({
     lockId: input.profileLock.lockId,
     rootPath: input.profileLock.rootPath,
@@ -1485,7 +1561,7 @@ export function createHarnessOwnedProductionCapabilities(input: {
   for (const capability of [
     artifactVault,
     runSpecificationVault,
-    attemptCheckpointStore,
+    attemptCheckpointReadFacade,
     browserProfileLock,
     safeRasterRenderer,
   ]) {
@@ -1494,7 +1570,7 @@ export function createHarnessOwnedProductionCapabilities(input: {
   return Object.freeze({
     artifactVault,
     runSpecificationVault,
-    attemptCheckpointStore,
+    attemptCheckpointStore: attemptCheckpointReadFacade,
     browserProfileLock,
     safeRasterRenderer,
     evidence: Object.freeze({
@@ -1550,7 +1626,9 @@ export function createHarnessOwnedProductionCapabilities(input: {
 export function assertHarnessOwnedProductionCapabilities(input: {
   readonly artifactVault: ArtifactVault;
   readonly runSpecificationVault: RunSpecificationVault;
-  readonly attemptCheckpointStore: AttemptCheckpointPort;
+  readonly attemptCheckpointStore:
+    | AttemptCheckpointReadPort
+    | AttemptCheckpointPort;
   readonly browserProfileLock: BrowserProfileLockPort;
   readonly safeRasterRenderer: SafeRasterRendererPort;
 }): void {
