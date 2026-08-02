@@ -28,3 +28,16 @@ node mvp/historical-m0.mjs \
 用户可见的排序指标是 `experimentalAssessableMean`（可评五维实验均值）。它不包含 `NOT_ASSESSABLE` 的事实维度，未经过标尺校准，只用于本次探索比较，不应解释为权威综合评分。
 
 默认渲染器为 Presentations 技能自带的 `container_tools/render_slides.py`，它使用 bundled Artifact Tool。可通过 `PRESENTATIONS_RENDER_HELPER` 与 `PRESENTATIONS_PYTHON` 环境变量覆盖；命令会校验输出页数、每张 PNG 的签名、尺寸和 SHA-256。命令不会自行声称完成了人工逐页验收。
+
+## WPS 实时 capture-only 预检
+
+第一道实时题固定为 `volcano-query-v1`：16 页（封面、目录、12 页正文、总结、封底），专业模式、允许联网，并选择当前账号零新增付费范围内的最佳档位。协议只允许提交一次，最长等待 30 分钟。
+
+```bash
+node mvp/live-wps-capture-only.mjs \
+  --job-id job-live-volcano-001 \
+  --run-id run-live-wps-001 \
+  --output-dir tmp/live-wps-volcano-001
+```
+
+当前构建缺少经过证明的外部 Chrome 桥接程序，因此命令会有意以状态码 `2` 退出，并记录 `waiting_for_human / not_submitted`。即使尚未提交，它仍会保存冻结后的请求、Trace、分钟耗时和接管说明。流程不会导出 Cookie，也不会重试状态未知或已经提交的任务。
