@@ -1122,7 +1122,7 @@ test("Bakeoff waits for sibling Judge calls and retains the shared pack when one
   );
   assert.match(
     outcome.report.markdown,
-    /\| Mock WPS AI PPT \| `MOCK-run-wps-volcano-v1` \| `completed` \| `success` \| MOCK-artifact-wps-volcano-v1 \| Judge：失败（`unknown`）；`NOT_ASSESSABLE` \|/,
+    /\| Mock WPS AI PPT \| `MOCK-run-wps-volcano-v1` \| `completed` \| `success` \| 总计 0\.00 分钟；队列 UNKNOWN；生成 0\.00 分钟；导出 UNKNOWN；捕获 UNKNOWN \| MOCK-artifact-wps-volcano-v1 \| Judge：失败（`unknown`）；`NOT_ASSESSABLE` \|/,
   );
   const failedJudgeRun = feishu
     .snapshot()

@@ -506,9 +506,13 @@ function createExport(
   const cases = command.snapshot.caseTable.filter(({ caseId }) =>
     runRecords.some((record) => record.caseId === caseId),
   );
-  const events = runRecords.flatMap(
-    ({ observableEvents }) => observableEvents ?? [],
-  );
+  // Vendor-run rows carry a denormalized copy of their attempts' events for
+  // reporting. The recovery ledger stores the authoritative event stream once,
+  // from the evaluation-attempt rows, so an ordinary completed Job cannot be
+  // rejected as a duplicate of its own projection.
+  const events = runRecords
+    .filter(({ recordType }) => recordType === "evaluation_attempt")
+    .flatMap(({ observableEvents }) => observableEvents ?? []);
   const reports = command.snapshot.reports.filter(
     ({ jobId }) => jobId === command.jobId,
   );
