@@ -36,7 +36,10 @@ import {
 import {
   assertArtifactScoreCompatibility,
 } from "./comparison-compatibility.ts";
-import { assertValidAdjudicationEventFields } from "./adjudication-validation.ts";
+import {
+  assertValidAdjudicationEventFields,
+  assertValidReviewEventFields,
+} from "./adjudication-validation.ts";
 import {
   assertArtifactRenderManifestIntegrity,
   renderedPageNumbers,
@@ -1965,6 +1968,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   async appendReviewEvent(record: ReviewEventRecord): Promise<void> {
     this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Review Event");
+    assertValidReviewEventFields(record);
     const existing = this.#reviewEventTable.find(
       ({ reviewEventId }) => reviewEventId === record.reviewEventId,
     );
@@ -2007,6 +2011,21 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         `Review Event prior reference conflict: expected ${
           expectedPrior ?? "null"
         }`,
+      );
+    }
+    const prior =
+      record.priorReviewEventId === null
+        ? undefined
+        : this.#reviewEventTable.find(
+            ({ reviewEventId }) =>
+              reviewEventId === record.priorReviewEventId,
+          );
+    if (
+      prior !== undefined &&
+      Date.parse(record.occurredAt) < Date.parse(prior.occurredAt)
+    ) {
+      throw new Error(
+        "Review Event occurredAt precedes its causal parent",
       );
     }
     this.#reviewEventTable.push(cloneWithEnvironmentOrigin(record));

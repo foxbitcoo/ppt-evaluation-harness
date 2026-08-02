@@ -1309,7 +1309,7 @@ function createWpsAiPptProductAdapterExecutor(
       }
       const alreadyReconciled = latestReconciliation !== undefined;
       const recoveredSubmissionState =
-        attemptSubmissionState(persistedEvents);
+        attemptSubmissionState(recoveredEvents);
       const latestTaskCheckpoint =
         recoveredSubmissionState === "not_submitted"
           ? undefined
@@ -1395,7 +1395,7 @@ function createWpsAiPptProductAdapterExecutor(
         persistedEvents.some(
           isUnresolvedProviderSubmissionIntent,
         ) &&
-        attemptSubmissionState(persistedEvents) === "unknown"
+        recoveredSubmissionState === "unknown"
       ) {
         return {
           terminalReason: "task_state_unknown",

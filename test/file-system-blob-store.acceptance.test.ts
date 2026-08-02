@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { watch } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { renameSync, symlinkSync, watch } from "node:fs";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -205,5 +213,119 @@ test("a failed writer cannot delete a shared blob adopted by another process", a
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a blob store rejects root replacement without writing through a symbolic alias", async () => {
+  const fixtureRoot = await mkdtemp(
+    join(tmpdir(), "ppt-file-system-blob-root-identity-"),
+  );
+  const root = join(fixtureRoot, "store");
+  const originalRoot = join(fixtureRoot, "store-original");
+  const escapeRoot = join(fixtureRoot, "escape");
+  await Promise.all([
+    mkdir(root, { mode: 0o700 }),
+    mkdir(escapeRoot, { mode: 0o700 }),
+  ]);
+  const store = new FileSystemImmutableBlobStore({
+    storeId: "root-identity-store",
+    rootPath: root,
+  });
+  const content = new TextEncoder().encode(
+    "must remain bound to the original directory inode",
+  );
+  try {
+    await rename(root, originalRoot);
+    await symlink(escapeRoot, root, "dir");
+    await assert.rejects(
+      store.putImmutable(
+        "replacement-key",
+        content,
+        writeContext(content, "replacement-writer"),
+      ),
+      /root identity changed|symbolic link/i,
+    );
+    assert.deepEqual(
+      await readdir(escapeRoot),
+      [],
+      "the rejected write escaped through the replacement symlink",
+    );
+    await assert.rejects(
+      store.read("replacement-key"),
+      /root identity changed|symbolic link/i,
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("a blob store fails closed when its bound root becomes group-writable", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "ppt-file-system-blob-root-mode-"),
+  );
+  const store = new FileSystemImmutableBlobStore({
+    storeId: "root-mode-store",
+    rootPath: root,
+  });
+  const content = new TextEncoder().encode("permission-bound payload");
+  try {
+    await chmod(root, 0o720);
+    await assert.rejects(
+      store.putImmutable(
+        "permission-key",
+        content,
+        writeContext(content, "permission-writer"),
+      ),
+      /group\/other writable/i,
+    );
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    await chmod(root, 0o700);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a blob store detects mid-publication root replacement without writing to the replacement target", async () => {
+  const fixtureRoot = await mkdtemp(
+    join(tmpdir(), "ppt-file-system-blob-mid-replacement-"),
+  );
+  const root = join(fixtureRoot, "store");
+  const originalRoot = join(fixtureRoot, "store-original");
+  const replacementTarget = join(fixtureRoot, "replacement-target");
+  await Promise.all([
+    mkdir(root, { mode: 0o700 }),
+    mkdir(replacementTarget, { mode: 0o700 }),
+  ]);
+  const store = new FileSystemImmutableBlobStore({
+    storeId: "mid-replacement-store",
+    rootPath: root,
+  });
+  const content = new TextEncoder().encode(
+    "content must never reach a replacement root",
+  );
+  let authorizationChecks = 0;
+  try {
+    await assert.rejects(
+      store.putImmutable("mid-replacement-key", content, {
+        jobId: "job-file-system-blob-store",
+        contentHash: sha256(content),
+        writeAttemptId: "mid-replacement-writer",
+        assertWriteAuthorized() {
+          authorizationChecks += 1;
+          if (authorizationChecks === 2) {
+            renameSync(root, originalRoot);
+            symlinkSync(replacementTarget, root, "dir");
+          }
+        },
+      }),
+      /root identity changed/i,
+    );
+    assert.deepEqual(
+      await readdir(replacementTarget),
+      [],
+      "no temporary or final object may be created in the replacement root",
+    );
+  } finally {
+    await rm(fixtureRoot, { recursive: true, force: true });
   }
 });

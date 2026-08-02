@@ -22,7 +22,9 @@ import { execFileSync, spawn } from "node:child_process";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
+  DynamicComparisonView,
   FeishuReport,
+  ProductGapCardRecord,
   RunRecord,
 } from "./domain.ts";
 import {
@@ -48,6 +50,12 @@ import {
   canonicalJsonBytes,
   sha256Bytes,
 } from "./run-specification.ts";
+import {
+  failStopOwnerProcess,
+  isOwnerFailStopRequiredError,
+  ProcessGroupTerminationIncompleteError,
+  type OwnerFailStopRequired,
+} from "./process-group-supervisor.ts";
 
 export type LarkProjectionTableKey =
   | "cases"
@@ -172,6 +180,9 @@ export interface LarkBaseProjectionTransportPort {
   readCommitMarker(command: {
     readonly jobId: string;
   }): Promise<LarkCommitMarker | null>;
+  readCommittedAuxiliaryReportState?(command: {
+    readonly jobId: string;
+  }): Promise<LarkCommittedAuxiliaryReportState>;
   readProductionJobState?(command: {
     readonly jobId: string;
     readonly runIds: readonly string[];
@@ -219,6 +230,22 @@ export interface LarkBaseProjectionTransportPort {
     readonly revision: number;
     readonly authorization: ApprovedEgressAuthorization;
   }): Promise<void>;
+}
+
+export interface LarkCommittedAuxiliaryReportState {
+  readonly marker: LarkCommitMarker | null;
+  readonly bakeoffJob: RunRecord | null;
+  readonly productGapCardTable: readonly (
+    | DynamicComparisonView
+    | ProductGapCardRecord
+  )[];
+  readonly reportCollection: readonly {
+    readonly reportId: string;
+    readonly title: string;
+    readonly markdown: string;
+    readonly payloadHash: `sha256:${string}`;
+    readonly url: string;
+  }[];
 }
 
 export interface LarkCommitMarker {
@@ -899,6 +926,110 @@ class LarkAdvisoryLockUnavailableError extends Error {
   }
 }
 
+class LarkMachineLockRootDriftFailStopError
+  extends Error
+  implements OwnerFailStopRequired
+{
+  readonly ownerFailStopRequired = true as const;
+
+  constructor(cause: unknown) {
+    super(
+      "Lark machine lock root drifted before the resource-lock critical section ended; owner fail-stop is required",
+      { cause },
+    );
+    this.name = "LarkMachineLockRootDriftFailStopError";
+  }
+}
+
+function larkRootExternalCriticalSectionAnchorPath(
+  root: string,
+): string {
+  return `${root}.critical-section-v1.lock`;
+}
+
+interface LarkRootExternalAnchorIdentity {
+  readonly device: number;
+  readonly inode: number;
+  readonly ownerUserId: number;
+}
+
+async function readLarkRootExternalAnchorIdentity(
+  anchorPath: string,
+): Promise<LarkRootExternalAnchorIdentity> {
+  const [canonicalPath, metadata] = await Promise.all([
+    realpath(anchorPath),
+    lstat(anchorPath),
+  ]);
+  const ownerUserId = process.getuid?.();
+  if (
+    canonicalPath !== anchorPath ||
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1 ||
+    ownerUserId === undefined ||
+    metadata.uid !== ownerUserId ||
+    (metadata.mode & 0o777) !== 0o600
+  ) {
+    throw new Error(
+      "Lark root-external critical-section anchor must be canonical, regular, owner-only, and owned by the current user",
+    );
+  }
+  return {
+    device: metadata.dev,
+    inode: metadata.ino,
+    ownerUserId: metadata.uid,
+  };
+}
+
+async function prepareLarkRootExternalAnchor(
+  anchorPath: string,
+): Promise<LarkRootExternalAnchorIdentity> {
+  try {
+    const handle = await open(anchorPath, "wx", 0o600);
+    try {
+      await handle.chmod(0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    if (!hasErrorCode(error, "EEXIST")) throw error;
+    const pathMetadata = await lstat(anchorPath);
+    const ownerUserId = process.getuid?.();
+    if (
+      !pathMetadata.isFile() ||
+      pathMetadata.isSymbolicLink() ||
+      pathMetadata.nlink !== 1 ||
+      ownerUserId === undefined ||
+      pathMetadata.uid !== ownerUserId
+    ) {
+      throw new Error(
+        "Existing Lark root-external critical-section anchor is unsafe",
+      );
+    }
+    const handle = await open(anchorPath, "r+");
+    try {
+      const openedMetadata = await handle.stat();
+      if (
+        openedMetadata.dev !== pathMetadata.dev ||
+        openedMetadata.ino !== pathMetadata.ino ||
+        !openedMetadata.isFile() ||
+        openedMetadata.nlink !== 1 ||
+        openedMetadata.uid !== ownerUserId
+      ) {
+        throw new Error(
+          "Existing Lark root-external critical-section anchor changed during validation",
+        );
+      }
+      await handle.chmod(0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+  return await readLarkRootExternalAnchorIdentity(anchorPath);
+}
+
 async function acquireMacOsAdvisoryLock(
   lockPath: string,
   waitTimeoutMs: number,
@@ -1053,6 +1184,7 @@ async function acquireLarkSingleWorkstationMutex(
     readonly resourceIdentities?: readonly string[];
     readonly includeReportDocument?: boolean;
     readonly assertLockRootCurrent?: () => Promise<void>;
+    readonly requireRootExternalAnchor?: boolean;
   } = {},
 ): Promise<() => Promise<void>> {
   if (
@@ -1065,9 +1197,19 @@ async function acquireLarkSingleWorkstationMutex(
   }
   nonEmpty(scope, "mutex operation scope");
   const root = larkMutexRoot(configuration);
-  await options.assertLockRootCurrent?.();
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  await options.assertLockRootCurrent?.();
+  const rootAnchorPath =
+    larkRootExternalCriticalSectionAnchorPath(root);
+  const rootAnchorIdentity =
+    options.requireRootExternalAnchor !== true
+      ? null
+      : await prepareLarkRootExternalAnchor(rootAnchorPath);
+  const releaseRootAnchor =
+    rootAnchorIdentity === null
+      ? async () => {}
+      : await acquireMacOsAdvisoryLock(
+          rootAnchorPath,
+          options.waitTimeoutMs ?? LARK_MUTEX_WAIT_TIMEOUT_MS,
+        );
   const resourceIdentities =
     options.resourceIdentities !== undefined
       ? [...new Set(options.resourceIdentities)].sort()
@@ -1081,6 +1223,20 @@ async function acquireLarkSingleWorkstationMutex(
       : [options.resourceIdentityForTest];
   const releases: (() => Promise<void>)[] = [];
   try {
+    if (
+      rootAnchorIdentity !== null &&
+      !isDeepStrictEqual(
+        await readLarkRootExternalAnchorIdentity(rootAnchorPath),
+        rootAnchorIdentity,
+      )
+    ) {
+      throw new Error(
+        "Lark root-external critical-section anchor identity drifted during acquisition",
+      );
+    }
+    await options.assertLockRootCurrent?.();
+    await mkdir(root, { recursive: true, mode: 0o700 });
+    await options.assertLockRootCurrent?.();
     for (const resourceIdentity of resourceIdentities) {
       const lockPath = join(
         root,
@@ -1093,19 +1249,58 @@ async function acquireLarkSingleWorkstationMutex(
         ),
       );
     }
+    await options.assertLockRootCurrent?.();
   } catch (error) {
     for (const release of releases.reverse()) {
       await release();
     }
+    await releaseRootAnchor();
     throw error;
   }
   let released = false;
   return async () => {
     if (released) return;
     released = true;
+    try {
+      await options.assertLockRootCurrent?.();
+      if (
+        rootAnchorIdentity !== null &&
+        !isDeepStrictEqual(
+          await readLarkRootExternalAnchorIdentity(rootAnchorPath),
+          rootAnchorIdentity,
+        )
+      ) {
+        throw new Error(
+          "Lark root-external critical-section anchor identity drifted",
+        );
+      }
+    } catch (error) {
+      await failStopOwnerProcess(
+        new LarkMachineLockRootDriftFailStopError(error),
+      );
+    }
     for (const release of releases.reverse()) {
       await release();
     }
+    try {
+      await options.assertLockRootCurrent?.();
+      if (
+        rootAnchorIdentity !== null &&
+        !isDeepStrictEqual(
+          await readLarkRootExternalAnchorIdentity(rootAnchorPath),
+          rootAnchorIdentity,
+        )
+      ) {
+        throw new Error(
+          "Lark root-external critical-section anchor identity drifted",
+        );
+      }
+    } catch (error) {
+      await failStopOwnerProcess(
+        new LarkMachineLockRootDriftFailStopError(error),
+      );
+    }
+    await releaseRootAnchor();
   };
 }
 
@@ -1162,7 +1357,10 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
             "lark-mutex-public-test-resource-v1",
           ...(assertLockRootCurrent === undefined
             ? {}
-            : { assertLockRootCurrent }),
+            : {
+                assertLockRootCurrent,
+                requireRootExternalAnchor: true,
+              }),
         }
       : {
           waitTimeoutMs: options.waitTimeoutMs,
@@ -1170,7 +1368,10 @@ export async function acquireLarkSingleWorkstationMutexForTest(options: {
             "lark-mutex-public-test-resource-v1",
           ...(assertLockRootCurrent === undefined
             ? {}
-            : { assertLockRootCurrent }),
+            : {
+                assertLockRootCurrent,
+                requireRootExternalAnchor: true,
+              }),
         },
   );
 }
@@ -1639,6 +1840,97 @@ function reportCollectionHash(
     : sha256(canonicalPayload(reports));
 }
 
+function parseLarkReportCollectionMarkdown(command: {
+  readonly jobId: string;
+  readonly content: string;
+  readonly marker: LarkCommitMarker;
+  readonly documentUrl: string;
+  readonly documentRevision: number;
+}): LarkCommittedAuxiliaryReportState["reportCollection"] {
+  const normalized = normalizeMarkdown(command.content);
+  if (
+    parseReportOwner(normalized) !== command.jobId ||
+    command.marker.reportDocumentRevision !==
+      command.documentRevision ||
+    command.marker.reportUrls.some(
+      ({ url }) => url !== command.documentUrl,
+    )
+  ) {
+    throw new Error(
+      "Lark committed report collection does not match the exact Docx revision",
+    );
+  }
+  const collectionHashMatch =
+    /\n\nCollection hash: `(sha256:[a-f0-9]{64})`\n\n/.exec(
+      normalized,
+    );
+  if (
+    collectionHashMatch?.[1] !==
+      command.marker.reportCollectionHash
+  ) {
+    throw new Error(
+      "Lark committed report collection hash does not match its marker",
+    );
+  }
+  const sectionPattern =
+    /(?:^|\n\n---\n\n)## ([1-9]\d*)\. ([^\n]+)\n\nReport anchor: `([^`\n]+)`\n\nProjection payload hash: `(sha256:[a-f0-9]{64})`\n\n([\s\S]*?)(?=\n\n---\n\n## [1-9]\d*\. |\n$)/g;
+  const parsed: {
+    reportId: string;
+    title: string;
+    markdown: string;
+    payloadHash: `sha256:${string}`;
+    url: string;
+  }[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = sectionPattern.exec(normalized)) !== null) {
+    const expectedIndex = parsed.length + 1;
+    if (Number(match[1]) !== expectedIndex) {
+      throw new Error(
+        "Lark committed report collection section order is invalid",
+      );
+    }
+    const title = match[2]!;
+    const reportId = match[3]!;
+    const body = match[5]!
+      .trim()
+      .replace(/^(#{2,6}) /gm, (heading) => heading.slice(1));
+    const markdown = normalizeMarkdown(`# ${title}\n\n${body}`);
+    const payloadHash = sha256(
+      JSON.stringify({ reportId, title, markdown }),
+    );
+    if (payloadHash !== match[4]) {
+      throw new Error(
+        `Lark committed report payload hash is invalid: ${reportId}`,
+      );
+    }
+    parsed.push({
+      reportId,
+      title,
+      markdown,
+      payloadHash,
+      url: command.documentUrl,
+    });
+  }
+  const expectedIds = command.marker.reportUrls
+    .map(({ reportId }) => reportId)
+    .sort();
+  if (
+    !isDeepStrictEqual(
+      parsed.map(({ reportId }) => reportId).sort(),
+      expectedIds,
+    ) ||
+    reportCollectionHash(
+      parsed.map(({ url: _url, ...report }) => report),
+    ) !==
+      command.marker.reportCollectionHash
+  ) {
+    throw new Error(
+      "Lark committed report collection is incomplete or conflicts with its marker",
+    );
+  }
+  return Object.freeze(parsed.map((entry) => Object.freeze(entry)));
+}
+
 interface LarkDocumentReadback {
   readonly documentId: string;
   readonly revisionId: number;
@@ -1736,28 +2028,17 @@ export function parseLarkDocumentReadback(
   });
 }
 
-function stableRecordId(
-  tableKey: LarkProjectionTableKey,
+function requiredPhysicalLogicalId(
   record: Record<string, unknown>,
+  key: string,
+  label: string,
 ): string {
-  for (const key of [
-    "recordId",
-    "reportId",
-    "comparisonId",
-    "gapCardId",
-    "adjudicationEventId",
-    "reviewEventId",
-    "workflowEventId",
-    "reservationId",
-    "linkEventId",
-  ]) {
-    const value = record[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      return value;
-    }
+  const value = record[key];
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
   }
   throw new Error(
-    `Lark Base ${tableKey} row has no stable identity`,
+    `Lark Base ${label} row has no ${key} physical identity`,
   );
 }
 
@@ -1765,11 +2046,15 @@ function physicalStableRecordId(
   tableKey: LarkProjectionTableKey,
   record: Record<string, unknown>,
 ): string {
-  const logicalId = stableRecordId(tableKey, record);
   switch (tableKey) {
     case "cases":
-      return `case:${logicalId}`;
+      return `case:${requiredPhysicalLogicalId(record, "recordId", "case")}`;
     case "runs": {
+      const logicalId = requiredPhysicalLogicalId(
+        record,
+        "recordId",
+        "run",
+      );
       switch (record.recordType) {
         case "bakeoff_job":
           return `job:${logicalId}`;
@@ -1784,33 +2069,54 @@ function physicalStableRecordId(
       }
     }
     case "artifacts":
-      return `artifact:${logicalId}`;
+      return `artifact:${requiredPhysicalLogicalId(record, "recordId", "artifact")}`;
     case "scores":
-      return `score:${logicalId}`;
+      return `score:${requiredPhysicalLogicalId(record, "recordId", "score")}`;
     case "workflow_events": {
-      const prefixByRecordType: Readonly<Record<string, string>> = {
-        adjudication_event: "adjudication",
-        review_event: "review",
-        gap_card_workflow_event: "gap-workflow",
-        github_issue_delivery_reservation: "github-reservation",
-        github_issue_link_event: "github-link",
+      const identityByRecordType: Readonly<
+        Record<string, { readonly prefix: string; readonly key: string }>
+      > = {
+        adjudication_event: {
+          prefix: "adjudication",
+          key: "adjudicationEventId",
+        },
+        review_event: {
+          prefix: "review",
+          key: "reviewEventId",
+        },
+        gap_card_workflow_event: {
+          prefix: "gap-workflow",
+          key: "workflowEventId",
+        },
+        github_issue_delivery_reservation: {
+          prefix: "github-reservation",
+          key: "reservationId",
+        },
+        github_issue_link_event: {
+          prefix: "github-link",
+          key: "linkEventId",
+        },
       };
-      const prefix =
+      const identity =
         typeof record.recordType === "string"
-          ? prefixByRecordType[record.recordType]
+          ? identityByRecordType[record.recordType]
           : undefined;
-      if (prefix === undefined) {
+      if (identity === undefined) {
         throw new Error(
           "Lark workflow row has no recognized physical entity type",
         );
       }
-      return `${prefix}:${logicalId}`;
+      return `${identity.prefix}:${requiredPhysicalLogicalId(
+        record,
+        identity.key,
+        String(record.recordType),
+      )}`;
     }
     case "comparisons":
       return record.recordType === "comparison"
-        ? `comparison:${logicalId}`
+        ? `comparison:${requiredPhysicalLogicalId(record, "comparisonId", "comparison")}`
         : record.recordType === "gap_card"
-          ? `gap:${logicalId}`
+          ? `gap:${requiredPhysicalLogicalId(record, "gapCardId", "gap card")}`
           : (() => {
               throw new Error(
                 "Lark comparison row has no recognized physical entity type",
@@ -1821,6 +2127,13 @@ function physicalStableRecordId(
         "Commit marker physical IDs are assigned at the marker boundary",
       );
   }
+}
+
+export function physicalStableRecordIdForTest(
+  tableKey: LarkProjectionTableKey,
+  record: Record<string, unknown>,
+): string {
+  return physicalStableRecordId(tableKey, record);
 }
 
 function tableRows(
@@ -1952,11 +2265,7 @@ function withMaterializedPageEvidenceUrls(
   const replace = (value: unknown): unknown => {
     if (value instanceof Uint8Array) return Uint8Array.from(value);
     if (typeof value === "string") {
-      return replacements.reduce(
-        (current, [placeholder, url]) =>
-          current.split(placeholder).join(url),
-        value,
-      );
+      return replaceLarkPageEvidencePlaceholders(value, replacements);
     }
     if (Array.isArray(value)) return value.map(replace);
     if (value !== null && typeof value === "object") {
@@ -1970,6 +2279,29 @@ function withMaterializedPageEvidenceUrls(
     return value;
   };
   return replace(snapshot) as FeishuProjectionSnapshot;
+}
+
+function replaceLarkPageEvidencePlaceholders(
+  value: string,
+  replacements: readonly (readonly [string, string])[],
+): string {
+  return [...replacements]
+    .sort(
+      ([left], [right]) =>
+        right.length - left.length || left.localeCompare(right),
+    )
+    .reduce(
+      (current, [placeholder, url]) =>
+        current.split(placeholder).join(url),
+      value,
+    );
+}
+
+export function replaceLarkPageEvidencePlaceholdersForTest(
+  value: string,
+  replacements: readonly (readonly [string, string])[],
+): string {
+  return replaceLarkPageEvidencePlaceholders(value, replacements);
 }
 
 function assertNoMockFeishuUris(
@@ -2079,7 +2411,6 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
   readonly #transport: LarkBaseProjectionTransportPort;
   readonly #clock: ClockPort;
   #baselineRemoteBatchHash: `sha256:${string}` | null = null;
-  #baselineRemoteBatchHashInitialized = false;
   #materializationTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -2116,12 +2447,9 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
   protected override async captureRemoteBatchHash(
     jobId: string,
   ): Promise<`sha256:${string}` | null> {
-    if (!this.#baselineRemoteBatchHashInitialized) {
-      this.#baselineRemoteBatchHash =
-        (await this.#transport.readCommitMarker({ jobId }))?.batchHash ??
-        null;
-      this.#baselineRemoteBatchHashInitialized = true;
-    }
+    this.#baselineRemoteBatchHash =
+      (await this.#transport.readCommitMarker({ jobId }))?.batchHash ??
+      null;
     return this.#baselineRemoteBatchHash;
   }
 
@@ -2131,7 +2459,6 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
     this.#baselineRemoteBatchHash = sha256Bytes(
       canonicalJsonBytes(snapshot),
     );
-    this.#baselineRemoteBatchHashInitialized = true;
   }
 
   protected override async materializeAuthorizedSnapshot(
@@ -2930,6 +3257,22 @@ export function isHarnessOwnedLarkBaseProjection(
   return HARNESS_OWNED_LARK_PROJECTIONS.has(projection);
 }
 
+export async function readHarnessOwnedLarkCommittedAuxiliaryReportState(
+  projection: object,
+  jobId: string,
+): Promise<LarkCommittedAuxiliaryReportState> {
+  const transport = HARNESS_OWNED_LARK_PROJECTIONS.get(projection);
+  if (
+    transport === undefined ||
+    transport.readCommittedAuxiliaryReportState === undefined
+  ) {
+    throw new Error(
+      "Production auxiliary-report retry requires durable Lark marker, exact Docx, and persisted comparison refresh",
+    );
+  }
+  return await transport.readCommittedAuxiliaryReportState({ jobId });
+}
+
 const OPERATIONAL_LEDGER_CONTENT_FIELDS = Object.freeze([
   "case_table",
   "run_record_table",
@@ -3107,6 +3450,7 @@ interface LarkCliSubprocessLimits extends LarkCliRunOptions {
   readonly deadlineMs: number;
   readonly stdoutByteCap: number;
   readonly stderrByteCap: number;
+  readonly forceTerminationConfirmationFailureForTest?: boolean;
 }
 
 function signalProcessGroup(
@@ -3146,17 +3490,26 @@ function processGroupExists(processId: number): boolean {
 
 async function confirmProcessGroupAbsent(
   processId: number,
+  forceFailureForTest = false,
 ): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (processGroupExists(processId) && Date.now() < deadline) {
-    signalProcessGroup(processId, "SIGKILL");
-    await new Promise<void>((resolveWait) => {
-      setTimeout(resolveWait, 10);
-    });
-  }
-  if (processGroupExists(processId)) {
-    throw new Error(
-      "lark-cli process group remained active after termination",
+  try {
+    const deadline = Date.now() + 2_000;
+    while (processGroupExists(processId) && Date.now() < deadline) {
+      signalProcessGroup(processId, "SIGKILL");
+      await new Promise<void>((resolveWait) => {
+        setTimeout(resolveWait, 10);
+      });
+    }
+    if (forceFailureForTest || processGroupExists(processId)) {
+      throw new Error(
+        "lark-cli process group remained active after termination",
+      );
+    }
+  } catch (error) {
+    if (isOwnerFailStopRequiredError(error)) throw error;
+    throw new ProcessGroupTerminationIncompleteError(
+      processId,
+      error,
     );
   }
 }
@@ -3284,7 +3637,17 @@ async function spawnLarkCliBytesWithLimits(
         if (settled) return;
         settled = true;
         clearSupervisorState();
-        await confirmProcessGroupAbsent(processId);
+        try {
+          await confirmProcessGroupAbsent(
+            processId,
+            input.forceTerminationConfirmationFailureForTest,
+          );
+        } catch (error) {
+          if (isOwnerFailStopRequiredError(error)) {
+            await failStopOwnerProcess(error);
+          }
+          throw error;
+        }
         if (terminationError !== null) {
           rejectOutput(terminationError);
           return;
@@ -3331,6 +3694,7 @@ export async function runLarkCliSubprocessForTest(options: {
   readonly deadlineMs: number;
   readonly stdoutByteCap: number;
   readonly stderrByteCap: number;
+  readonly forceTerminationConfirmationFailureForTest?: boolean;
 }): Promise<unknown> {
   return await spawnLarkCliJsonWithLimits(options);
 }
@@ -3646,6 +4010,7 @@ class VerifiedLarkCliTransport
   readonly #attestIdentity: LarkCliIdentityAttestor;
   readonly #disposeExecutableSnapshot: () => Promise<void>;
   readonly #assertLockRootCurrent: () => Promise<void>;
+  readonly #requireRootExternalAnchor: boolean;
   readonly #mutexContext =
     new AsyncLocalStorage<ReadonlySet<string>>();
   readonly #activeInvocations = new Set<Promise<unknown>>();
@@ -3668,6 +4033,7 @@ class VerifiedLarkCliTransport
       async () => undefined,
     assertLockRootCurrent: () => Promise<void> =
       async () => undefined,
+    requireRootExternalAnchor = false,
   ) {
     this.#binaryPath = binaryPath;
     this.#egressAuthorization = egressAuthorization;
@@ -3687,6 +4053,7 @@ class VerifiedLarkCliTransport
     this.#attestIdentity = attestIdentity;
     this.#disposeExecutableSnapshot = disposeExecutableSnapshot;
     this.#assertLockRootCurrent = assertLockRootCurrent;
+    this.#requireRootExternalAnchor = requireRootExternalAnchor;
     this.#configuration = Object.freeze({
       ...configuration,
       tables: Object.freeze({ ...configuration.tables }),
@@ -3808,6 +4175,7 @@ class VerifiedLarkCliTransport
       {
         resourceIdentities: missingResources,
         assertLockRootCurrent: this.#assertLockRootCurrent,
+        requireRootExternalAnchor: this.#requireRootExternalAnchor,
       },
     );
     try {
@@ -4213,6 +4581,90 @@ class VerifiedLarkCliTransport
       return fields[this.#configuration.stableIdField] === stableId;
     });
     return matches;
+  }
+
+  async #listRecords(
+    tableKey: LarkProjectionTableKey,
+  ): Promise<readonly Record<string, unknown>[]> {
+    const response = await this.#run([
+      "base",
+      "+record-search",
+      "--base-token",
+      this.#baseToken(),
+      "--table-id",
+      this.#configuration.tables[tableKey],
+      "--field-id",
+      this.#configuration.stableIdField,
+      "--field-id",
+      this.#configuration.payloadField,
+      "--field-id",
+      this.#configuration.payloadHashField,
+      "--limit",
+      "200",
+      "--format",
+      "json",
+      "--as",
+      "user",
+    ]);
+    return parseLarkRecordSearchEnvelope(response);
+  }
+
+  #readPersistedRecordPayload(
+    record: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const fields =
+      record.fields !== null && typeof record.fields === "object"
+        ? (record.fields as Record<string, unknown>)
+        : record;
+    const payload = fields[this.#configuration.payloadField];
+    const payloadHash =
+      fields[this.#configuration.payloadHashField];
+    let parsed: unknown;
+    try {
+      parsed = typeof payload === "string" ? JSON.parse(payload) : null;
+    } catch {
+      parsed = null;
+    }
+    if (
+      typeof payload !== "string" ||
+      typeof payloadHash !== "string" ||
+      sha256(canonicalPayload(parsed)) !== payloadHash
+    ) {
+      throw new Error(
+        "Lark persisted projection row payload integrity is invalid",
+      );
+    }
+    return asObject(parsed, "persisted projection row payload");
+  }
+
+  #assertPersistedPhysicalIdentity(
+    tableKey: LarkProjectionTableKey,
+    record: Record<string, unknown>,
+    payload: Record<string, unknown>,
+  ): void {
+    const fields =
+      record.fields !== null && typeof record.fields === "object"
+        ? (record.fields as Record<string, unknown>)
+        : record;
+    const storedStableId =
+      fields[this.#configuration.stableIdField];
+    const expectedStableId = physicalStableRecordId(
+      tableKey,
+      payload,
+    );
+    if (storedStableId === expectedStableId) return;
+    if (
+      tableKey === "comparisons" &&
+      payload.recordType === "gap_card" &&
+      storedStableId === `gap:${String(payload.comparisonId)}`
+    ) {
+      throw new Error(
+        "Legacy Lark gap-card stable IDs collide by comparison; operator migration is required before auxiliary-report retry",
+      );
+    }
+    throw new Error(
+      "Lark persisted projection row physical identity conflicts with its typed business key",
+    );
   }
 
   async #findRecord(
@@ -5047,6 +5499,106 @@ class VerifiedLarkCliTransport
     };
   }
 
+  async readCommittedAuxiliaryReportState(command: {
+    readonly jobId: string;
+  }): Promise<LarkCommittedAuxiliaryReportState> {
+    this.#assertActive();
+    const readState = async (): Promise<LarkCommittedAuxiliaryReportState> => {
+      const marker = await this.readCommitMarker(command);
+      if (marker === null) {
+        return {
+          marker: null,
+          bakeoffJob: null,
+          productGapCardTable: [],
+          reportCollection: [],
+        };
+      }
+      const [runRows, comparisonRows] = await Promise.all([
+        this.#listRecords("runs"),
+        this.#listRecords("comparisons"),
+      ]);
+      const runPayloads = runRows.map((row) =>
+        this.#readPersistedRecordPayload(row),
+      );
+      const bakeoffJobs = runPayloads.filter(
+        (record) =>
+          record.recordType === "bakeoff_job" &&
+          record.jobId === command.jobId,
+      );
+      if (bakeoffJobs.length !== 1) {
+        throw new Error(
+          "Lark committed auxiliary state has no unique Bakeoff Job row",
+        );
+      }
+      const productGapCardTable = comparisonRows
+        .map((row) => {
+          const payload = this.#readPersistedRecordPayload(row);
+          this.#assertPersistedPhysicalIdentity(
+            "comparisons",
+            row,
+            payload,
+          );
+          return payload;
+        })
+        .filter((record) => record.jobId === command.jobId)
+        .map((record) => {
+          if (
+            record.recordType !== "comparison" &&
+            record.recordType !== "gap_card"
+          ) {
+            throw new Error(
+              "Lark committed auxiliary state has an invalid comparison row",
+            );
+          }
+          return record as unknown as
+            | DynamicComparisonView
+            | ProductGapCardRecord;
+        })
+        .sort((left, right) => {
+          const leftId =
+            left.recordType === "comparison"
+              ? left.comparisonId
+              : left.gapCardId;
+          const rightId =
+            right.recordType === "comparison"
+              ? right.comparisonId
+              : right.gapCardId;
+          return leftId.localeCompare(rightId);
+        });
+      let reportCollection: LarkCommittedAuxiliaryReportState["reportCollection"] =
+        [];
+      if (marker.reportCollectionHash !== null) {
+        const document = await this.#fetchReportDocument();
+        reportCollection = parseLarkReportCollectionMarkdown({
+          jobId: command.jobId,
+          content: document.content,
+          marker,
+          documentUrl: document.url,
+          documentRevision: document.revisionId,
+        });
+      }
+      const markerAfterRead = await this.readCommitMarker(command);
+      if (!isDeepStrictEqual(markerAfterRead, marker)) {
+        throw new ProjectionStaleBaselineError(
+          "Lark committed auxiliary state advanced during durable refresh",
+        );
+      }
+      return {
+        marker,
+        bakeoffJob: bakeoffJobs[0] as unknown as RunRecord,
+        productGapCardTable,
+        reportCollection,
+      };
+    };
+    return this.withProjectionMutex === undefined
+      ? await readState()
+      : await this.withProjectionMutex(
+          command.jobId,
+          readState,
+          { requireReportDocument: true },
+        );
+  }
+
   async readProductionJobState(command: {
     readonly jobId: string;
     readonly runIds: readonly string[];
@@ -5776,6 +6328,7 @@ export async function createVerifiedLarkCliTransport(options: {
         ),
       executableSnapshot.dispose,
       assertLockRootCurrent,
+      true,
     );
     VERIFIED_LARK_TRANSPORTS.add(transport);
     VERIFIED_LARK_DESTINATIONS.set(transport, {

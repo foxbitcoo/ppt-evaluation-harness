@@ -27,10 +27,19 @@ drifts.
 Because multiple logical entities share a physical table, `稳定ID` is a
 namespaced physical identity: `job:<id>`, `run:<id>`, `attempt:<id>`,
 `artifact:<id>`, `page:<artifactId>:<n>`, `claim:<jobId>`, and
-`commit:<jobId>`. The unprefixed domain identity remains in the canonical
+`commit:<jobId>`, plus typed comparison/workflow identities such as
+`comparison:<comparisonId>`, `gap:<gapCardId>`, and
+`gap-workflow:<workflowEventId>`. The unprefixed domain identity remains in the canonical
 payload. Recovery, attachment readback, replay, and marker lookup use the same
 physical identity. A single-table acceptance fake retains all entity kinds
 simultaneously and proves replay does not add duplicates.
+
+Pre-T10 rows that used `gap:<comparisonId>` or another parent ID for a child
+entity are not auto-migrated: those IDs can collide and cannot prove a complete
+collection. Durable auxiliary-report refresh detects the legacy gap form and
+fails closed with an operator-migration requirement. The operator must remove
+or rewrite the colliding legacy rows to the typed IDs above before retrying;
+the harness does not silently treat them as compatible.
 
 Production Base mutation is deliberately limited to one workstation. Verified
 production accepts only the build-reviewed machine-global lock root
@@ -189,7 +198,7 @@ real WPS, Qwen, or Doubao run has not yet been accepted.
 - Codex Judge:
   `/Applications/ChatGPT.app/Contents/Resources/codex`
   - SHA-256:
-    `fb2b6b35789e59c885cf4d2aee12475809dd67b2c10df580e638122fd6b3438e`
+    `d96ae1ca1ff6fc8587842fa04c92d3ee4d31651a811c2f89b65fcfd9c28473e2`
 - macOS Seatbelt:
   `/usr/bin/sandbox-exec`
   - SHA-256:

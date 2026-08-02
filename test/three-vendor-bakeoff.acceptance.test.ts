@@ -98,7 +98,7 @@ test("ordered submission state resolves explicit non-submission but never downgr
       intent,
       explicitNotSubmitted,
     ]),
-    "not_submitted",
+    "unknown",
   );
   assert.equal(
     attemptSubmissionState([intent, control]),
@@ -1453,10 +1453,14 @@ test("the 30-minute wall-clock deadline aborts a hung adapter without trusting a
   assert.equal(wpsAttempt?.terminalReason, "vendor_timeout");
 });
 
-test("a timed-out Attempt cannot finalize before adapter shutdown and reconciliation complete", async () => {
-  const feishu = new InMemoryFeishuProjection();
-  const incompleteDeadline = {
+test("production rejects a caller deadline seam before adapter execution or egress", async () => {
+  const feishu = new InMemoryFeishuProjection({
+    targetEnvironment: "production",
+  });
+  let deadlineCalls = 0;
+  const callerDeadline = {
     async run() {
+      deadlineCalls += 1;
       return {
         timedOut: true,
         elapsedMs: VENDOR_GENERATION_TIMEOUT_MS,
@@ -1469,13 +1473,14 @@ test("a timed-out Attempt cannot finalize before adapter shutdown and reconcilia
     createBakeoffHarness({
       feishu,
       productAdapter: new MockWpsProductAdapter(),
-      attemptDeadline: incompleteDeadline,
+      attemptDeadline: callerDeadline,
     }).startBakeoffJob({
-      environment: "test",
+      environment: "production",
       caseId: VOLCANO_CASE_ID,
     }),
-    /shutdown.*reconciliation.*complete/i,
+    /production.*caller.*deadline|production.*deadline.*seam/i,
   );
+  assert.equal(deadlineCalls, 0);
   assert.equal(
     feishu
       .snapshot()

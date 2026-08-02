@@ -26,6 +26,8 @@ import {
   createLarkCliTransportForMutationBoundaryTest,
   createVerifiedLarkCliTransport,
   REVIEWED_LARK_MACHINE_LOCK_ROOT,
+  physicalStableRecordIdForTest,
+  replaceLarkPageEvidencePlaceholdersForTest,
   runLarkCliSubprocessForTest,
   type LarkCliProjectionConfiguration,
 } from "../src/lark-base-projection.ts";
@@ -89,6 +91,57 @@ const allowLarkMutation = {
     };
   },
 } satisfies EgressAuthorizationPort;
+
+test("typed Lark physical IDs keep sibling gap cards and workflow events distinct", () => {
+  assert.deepEqual(
+    ["gap-a", "gap-b"].map((gapCardId) =>
+      physicalStableRecordIdForTest("comparisons", {
+        recordType: "gap_card",
+        comparisonId: "comparison-shared",
+        gapCardId,
+      }),
+    ),
+    ["gap:gap-a", "gap:gap-b"],
+  );
+  assert.deepEqual(
+    ["event-a", "event-b"].map((workflowEventId) =>
+      physicalStableRecordIdForTest("workflow_events", {
+        recordType: "gap_card_workflow_event",
+        gapCardId: "gap-shared",
+        workflowEventId,
+      }),
+    ),
+    ["gap-workflow:event-a", "gap-workflow:event-b"],
+  );
+  assert.throws(
+    () =>
+      physicalStableRecordIdForTest("comparisons", {
+        recordType: "gap_card",
+        comparisonId: "comparison-shared",
+      }),
+    /no gapCardId physical identity/i,
+  );
+});
+
+test("Lark page-evidence materialization cannot let page 1 corrupt page 10 or page 16", () => {
+  const prefix = "https://evidence.example.test/artifact/pages/";
+  const source = `${prefix}1|${prefix}10|${prefix}16`;
+  const materialized = replaceLarkPageEvidencePlaceholdersForTest(
+    source,
+    [
+      [`${prefix}1`, "https://trusted.example.test/record/page-1"],
+      [`${prefix}10`, "https://trusted.example.test/record/page-10"],
+      [`${prefix}16`, "https://trusted.example.test/record/page-16"],
+    ],
+  );
+
+  assert.equal(
+    materialized,
+    "https://trusted.example.test/record/page-1|" +
+      "https://trusted.example.test/record/page-10|" +
+      "https://trusted.example.test/record/page-16",
+  );
+});
 
 test("the single-workstation advisory mutex is released after its owner crashes", async () => {
   const lockRoot = await mkdtemp(
@@ -1414,6 +1467,62 @@ test("a Lark CLI spawn failure rejects without terminating the caller process gr
   assert.equal(stdout, "caught\n");
 });
 
+test("the Lark CLI supervisor fail-stops its owner when process-group absence cannot be confirmed", async () => {
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const workerScript = [
+    `import { runLarkCliSubprocessForTest } from ${JSON.stringify(moduleUrl)};`,
+    "await runLarkCliSubprocessForTest({",
+    `  executablePath: ${JSON.stringify(process.execPath)},`,
+    '  args: ["-e", "process.stdout.write(JSON.stringify({ok:true}))"],',
+    "  deadlineMs: 2_000,",
+    "  stdoutByteCap: 1_024,",
+    "  stderrByteCap: 1_024,",
+    "  forceTerminationConfirmationFailureForTest: true,",
+    "});",
+    'process.stdout.write("unexpected-return\\n");',
+  ].join("\n");
+  const worker = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      workerScript,
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  worker.stdout.setEncoding("utf8");
+  worker.stdout.on("data", (value: string) => {
+    stdout += value;
+  });
+  worker.stderr.setEncoding("utf8");
+  worker.stderr.on("data", (value: string) => {
+    stderr += value;
+  });
+  const exit = await new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveExit, rejectExit) => {
+    worker.once("error", rejectExit);
+    worker.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+
+  assert.deepEqual(
+    exit,
+    { code: null, signal: "SIGKILL" },
+    `Lark cleanup-confirmation worker did not fail-stop; stderr=${stderr}`,
+  );
+  assert.equal(stdout, "");
+});
+
 test("the Lark CLI supervisor keeps cleanup alive until orphan descendants are absent", async () => {
   const moduleUrl = new URL(
     "../src/lark-base-projection.ts",
@@ -1847,6 +1956,7 @@ test("the machine-root policy rejects inode drift after registration", async () 
     "/Users/Shared/ppt-lark-root-drift-test-",
   );
   const identityPath = `${lockRoot}.identity-v1`;
+  const anchorPath = `${lockRoot}.critical-section-v1.lock`;
   try {
     const release =
       await acquireLarkSingleWorkstationMutexForTest({
@@ -1870,6 +1980,7 @@ test("the machine-root policy rejects inode drift after registration", async () 
     await rm(lockRoot, { recursive: true, force: true });
     await rm(identityPath, { force: true });
     await rm(`${identityPath}.lock`, { force: true });
+    await rm(anchorPath, { force: true });
   }
 });
 
@@ -1879,6 +1990,7 @@ test("the machine-root identity remains bound across fresh processes after the r
   );
   const identityPath = `${lockRoot}.identity-v1`;
   const registrationLockPath = `${identityPath}.lock`;
+  const anchorPath = `${lockRoot}.critical-section-v1.lock`;
   const moduleUrl = new URL(
     "../src/lark-base-projection.ts",
     import.meta.url,
@@ -1923,6 +2035,93 @@ test("the machine-root identity remains bound across fresh processes after the r
     await rm(lockRoot, { recursive: true, force: true });
     await rm(identityPath, { force: true });
     await rm(registrationLockPath, { force: true });
+    await rm(anchorPath, { force: true });
+  }
+});
+
+test("a Lark mutex owner fail-stops if the verified root drifts before its critical section ends", async () => {
+  const lockRoot = await mkdtemp(
+    "/Users/Shared/ppt-lark-root-owner-drift-test-",
+  );
+  const identityPath = `${lockRoot}.identity-v1`;
+  const registrationLockPath = `${identityPath}.lock`;
+  const anchorPath = `${lockRoot}.critical-section-v1.lock`;
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  const childScript = [
+    `import { acquireLarkSingleWorkstationMutexForTest } from ${JSON.stringify(moduleUrl)};`,
+    `const release = await acquireLarkSingleWorkstationMutexForTest({ lockRoot: ${JSON.stringify(lockRoot)}, scope: "owner-root-drift", enforceMachineRootPolicyForTest: true });`,
+    'process.stdout.write("acquired\\n");',
+    "process.stdin.resume();",
+    "await new Promise((resolve) => process.stdin.once(\"end\", resolve));",
+    "await release();",
+    'process.stdout.write("released\\n");',
+  ].join("\n");
+  const owner = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      childScript,
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  owner.stdout.setEncoding("utf8");
+  owner.stdout.on("data", (value: string) => {
+    stdout += value;
+  });
+  owner.stderr.setEncoding("utf8");
+  owner.stderr.on("data", (value: string) => {
+    stderr += value;
+  });
+  try {
+    await new Promise<void>((resolveAcquired, rejectAcquired) => {
+      owner.once("error", rejectAcquired);
+      const deadline = setTimeout(() => {
+        rejectAcquired(new Error("Lark root-drift owner did not acquire"));
+      }, 5_000);
+      owner.stdout.on("data", () => {
+        if (!stdout.includes("acquired\n")) return;
+        clearTimeout(deadline);
+        resolveAcquired();
+      });
+    });
+
+    await rm(lockRoot, { recursive: true, force: true });
+    await mkdir(lockRoot, { mode: 0o700 });
+    owner.stdin.end();
+    const exit = await new Promise<{
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }>((resolveExit, rejectExit) => {
+      owner.once("error", rejectExit);
+      owner.once("close", (code, signal) => {
+        resolveExit({ code, signal });
+      });
+    });
+
+    assert.deepEqual(
+      exit,
+      { code: null, signal: "SIGKILL" },
+      `root-drift owner did not fail-stop; stdout=${stdout}; stderr=${stderr}`,
+    );
+    assert.doesNotMatch(stdout, /released/);
+  } finally {
+    try {
+      owner.kill("SIGKILL");
+    } catch {
+      // The expected fail-stop path already terminated it.
+    }
+    await rm(lockRoot, { recursive: true, force: true });
+    await rm(identityPath, { force: true });
+    await rm(registrationLockPath, { force: true });
+    await rm(anchorPath, { force: true });
   }
 });
 

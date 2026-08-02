@@ -223,6 +223,96 @@ test("adjudication append and readback reject invalid human-final fields", async
   assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
 });
 
+test("review append and readback accept only causal human acceptance events", async (t) => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const modelOriginal = score?.scorecard.dimensions[0];
+  assert.ok(score);
+  assert.ok(modelOriginal);
+  const validReview: ReviewEventRecord = {
+    recordType: "review_event",
+    schemaVersion: "review-event-v1",
+    reviewEventId: "review-runtime-validation",
+    scorecardId,
+    artifactId: score.artifactId,
+    runId: score.runId,
+    jobId: score.jobId,
+    reviewedDimensions: [modelOriginal.dimension],
+    decision: "accepted_model_scores",
+    actorId: "pm-runtime-reviewer",
+    occurredAt: "2026-08-02T00:00:00.000Z",
+    createdAt: "2026-08-02T00:00:00.000Z",
+    lastSyncedAt: "2026-08-02T00:00:00.000Z",
+    reason: "Runtime review validation fixture.",
+    priorReviewEventId: null,
+    provenance: score.provenance,
+    environmentOrigin: score.environmentOrigin,
+  };
+  const invalidReviews = [
+    {
+      label: "rejected decision",
+      event: {
+        ...validReview,
+        decision: "rejected_model_scores",
+      },
+    },
+    {
+      label: "blank actor",
+      event: { ...validReview, actorId: " " },
+    },
+    {
+      label: "blank reason",
+      event: { ...validReview, reason: "" },
+    },
+    {
+      label: "invalid timestamp",
+      event: { ...validReview, occurredAt: "not-a-date" },
+    },
+    {
+      label: "impossible calendar timestamp",
+      event: {
+        ...validReview,
+        occurredAt: "2026-02-30T00:00:00.000Z",
+      },
+    },
+    {
+      label: "unknown reviewed dimension",
+      event: {
+        ...validReview,
+        reviewedDimensions: ["invented_dimension"],
+      },
+    },
+    {
+      label: "non-causal sync timestamp",
+      event: {
+        ...validReview,
+        lastSyncedAt: "2026-07-31T23:59:59.000Z",
+      },
+    },
+    {
+      label: "invalid schema",
+      event: { ...validReview, schemaVersion: "review-event-v0" },
+    },
+  ] as const;
+
+  for (const { label, event } of invalidReviews) {
+    await t.test(label, async () => {
+      const invalid = event as unknown as ReviewEventRecord;
+      await assert.rejects(
+        feishu.appendReviewEvent(invalid),
+        /Review Event.*(?:schema|decision|actor|reason|timestamp|dimension)/i,
+      );
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withReviewEvents(feishu, () => [invalid]),
+        }).getEffectiveScorecard(scorecardId),
+        /Review Event.*(?:schema|decision|actor|reason|timestamp|dimension)/i,
+      );
+    });
+  }
+  assert.deepEqual(feishu.snapshot().reviewEventTable, []);
+});
+
 test("effective Scorecard readback rejects foreign adjudication and review lineage", async (t) => {
   const { feishu, scorecardId } =
     await createScoredWpsProjection();

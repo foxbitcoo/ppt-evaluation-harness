@@ -32,6 +32,11 @@ import {
 import {
   assertHarnessOwnedDurableJudgeEgressAudit,
 } from "./file-system-operational-durability.ts";
+import {
+  failStopOwnerProcess,
+  isOwnerFailStopRequiredError,
+  ProcessGroupTerminationIncompleteError,
+} from "./process-group-supervisor.ts";
 
 export const CODEX_CLI_JUDGE_ADAPTER_VERSION =
   "codex-cli-judge@1" as const;
@@ -133,6 +138,7 @@ interface CodexCliJudgeProcessOptions {
   readonly stdoutByteLimit: number;
   readonly stderrByteLimit: number;
   readonly terminationGraceMs: number;
+  readonly forceTerminationConfirmationFailureForTest?: boolean;
 }
 
 interface CodexCliJudgeProcessResult {
@@ -270,6 +276,16 @@ async function runBoundedCodexCliJudgeProcess(
         ) {
           return;
         }
+        if (
+          options.forceTerminationConfirmationFailureForTest === true
+        ) {
+          throw new ProcessGroupTerminationIncompleteError(
+            child.pid,
+            new Error(
+              "Codex CLI Judge could not verify subprocess group termination",
+            ),
+          );
+        }
         const deadline =
           Date.now() + Math.max(terminationGraceMs, 1_000);
         while (true) {
@@ -283,14 +299,13 @@ async function runBoundedCodexCliJudgeProcess(
             ) {
               return;
             }
-            throw new Error(
-              "Codex CLI Judge could not verify subprocess group termination",
+            throw new ProcessGroupTerminationIncompleteError(
+              child.pid,
+              error,
             );
           }
           if (Date.now() >= deadline) {
-            throw new Error(
-              "Codex CLI Judge subprocess group did not terminate",
-            );
+            throw new ProcessGroupTerminationIncompleteError(child.pid);
           }
           signalProcessGroup("SIGKILL");
           await new Promise<void>((resolveWait) => {
@@ -356,7 +371,10 @@ async function runBoundedCodexCliJudgeProcess(
           signalProcessGroup("SIGKILL");
           try {
             await waitForProcessGroupExit();
-          } catch {
+          } catch (error) {
+            if (isOwnerFailStopRequiredError(error)) {
+              await failStopOwnerProcess(error);
+            }
             rejectOutput(
               new Error(
                 "Codex CLI Judge subprocess group cleanup could not be verified",

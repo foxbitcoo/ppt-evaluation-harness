@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   mkdir,
   mkdtemp,
@@ -512,6 +513,66 @@ test("Codex CLI Judge enforces a hard subprocess deadline and waits for terminat
     Date.now() - startedAt < 2_000,
     "deadline termination must not leave the caller hanging",
   );
+});
+
+test("Codex CLI Judge fail-stops its owner when process-group absence cannot be confirmed", async () => {
+  const moduleUrl = new URL(
+    "../src/codex-cli-judge.ts",
+    import.meta.url,
+  ).href;
+  const workerScript = [
+    `import { runCodexCliJudgeProcessForTest } from ${JSON.stringify(moduleUrl)};`,
+    "await runCodexCliJudgeProcessForTest({",
+    `  executable: ${JSON.stringify(process.execPath)},`,
+    '  args: ["-e", "setInterval(() => {}, 1_000)"],',
+    "  stdin: null,",
+    `  cwd: ${JSON.stringify(process.cwd())},`,
+    "  env: process.env,",
+    "  deadlineMs: 50,",
+    "  stdoutByteLimit: 1_024,",
+    "  stderrByteLimit: 1_024,",
+    "  terminationGraceMs: 25,",
+    "  forceTerminationConfirmationFailureForTest: true,",
+    "});",
+    'process.stdout.write("unexpected-return\\n");',
+  ].join("\n");
+  const worker = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      workerScript,
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  worker.stdout.setEncoding("utf8");
+  worker.stdout.on("data", (value: string) => {
+    stdout += value;
+  });
+  worker.stderr.setEncoding("utf8");
+  worker.stderr.on("data", (value: string) => {
+    stderr += value;
+  });
+  const exit = await new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveExit, rejectExit) => {
+    worker.once("error", rejectExit);
+    worker.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+
+  assert.deepEqual(
+    exit,
+    { code: null, signal: "SIGKILL" },
+    `Codex cleanup-confirmation worker did not fail-stop; stderr=${stderr}`,
+  );
+  assert.equal(stdout, "");
 });
 
 test("Codex CLI Judge caps stdout by raw bytes instead of decoded characters", async () => {

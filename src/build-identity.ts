@@ -4,6 +4,7 @@ import { relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { EMBEDDED_BUILD_MANIFEST } from "./embedded-build-manifest.ts";
+import { currentRuntimeToolchainArchiveEntries } from "./runtime-toolchain-identity.ts";
 
 function sha256(content: string | Uint8Array): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
@@ -43,6 +44,7 @@ const archiveEntries = Object.freeze(
       path: relative(projectRootPath, fileURLToPath(url)),
       contentHash: sha256(readFileSync(url)),
     }))
+    .concat(currentRuntimeToolchainArchiveEntries())
     .sort((left, right) => left.path.localeCompare(right.path)),
 );
 const sourceArchiveDigest = sha256(JSON.stringify(archiveEntries));

@@ -13,10 +13,13 @@ import type {
   ProductGapEvidence,
   RunRecord,
   ScoreDimension,
+  FeishuReportDraft,
+  FeishuReport,
 } from "./domain.ts";
 import {
   ProjectionStaleBaselineError,
   type FeishuProjectionPort,
+  type FeishuProjectionSnapshot,
 } from "./feishu.ts";
 import type {
   ClockPort,
@@ -24,8 +27,14 @@ import type {
   EgressAuthorizationPort,
 } from "./egress-authorization.ts";
 import {
+  requireEgressAuthorization,
+  SYSTEM_CLOCK,
+} from "./egress-authorization.ts";
+import {
   isHarnessOwnedLarkBaseProjection,
   persistHarnessOwnedLarkProjectionSnapshot,
+  readHarnessOwnedLarkCommittedAuxiliaryReportState,
+  type LarkCommittedAuxiliaryReportState,
 } from "./lark-base-projection.ts";
 import {
   captureExecutionProvenance,
@@ -213,6 +222,263 @@ function compatibleComparisonLineage(
     ) &&
     compatibleJudgeConfiguration(left.score, right.score)
   );
+}
+
+function mergeCommittedAuxiliaryState(
+  local: FeishuProjectionSnapshot,
+  state: LarkCommittedAuxiliaryReportState,
+): FeishuProjectionSnapshot {
+  if (state.marker === null) return local;
+  if (state.bakeoffJob === null) {
+    throw new Error(
+      "Durable Lark auxiliary state is missing its Bakeoff Job",
+    );
+  }
+  const identity = (
+    record: FeishuProjectionSnapshot["productGapCardTable"][number],
+  ) =>
+    record.recordType === "comparison"
+      ? `comparison:${record.comparisonId}`
+      : `gap:${record.gapCardId}`;
+  const localJobs = local.runRecordTable.filter(
+    (record) =>
+      record.recordType === "bakeoff_job" &&
+      record.jobId === state.bakeoffJob!.jobId,
+  );
+  const localJob = localJobs[0];
+  if (localJobs.length !== 1 || localJob === undefined) {
+    throw new Error(
+      "Durable Lark auxiliary state has no unique local Bakeoff Job lineage",
+    );
+  }
+  const {
+    reportUrl: _durableReportUrl,
+    auxiliaryReportUrls: _durableAuxiliaryReportUrls,
+    environmentOrigin: durableEnvironmentOrigin,
+    ...durableStableJob
+  } = state.bakeoffJob;
+  const {
+    reportUrl: _localReportUrl,
+    auxiliaryReportUrls: _localAuxiliaryReportUrls,
+    environmentOrigin: localEnvironmentOrigin,
+    ...localStableJob
+  } = localJob;
+  if (
+    !isDeepStrictEqual(
+      durableEnvironmentOrigin,
+      localEnvironmentOrigin,
+    ) ||
+    !isDeepStrictEqual(durableStableJob, localStableJob)
+  ) {
+    throw new Error(
+      "Durable Lark Bakeoff Job lineage or environment conflicts with the verified local projection",
+    );
+  }
+  const durableProductGapCardTable = state.productGapCardTable.map(
+    (record) => {
+      if (
+        !isDeepStrictEqual(
+          record.environmentOrigin,
+          localEnvironmentOrigin,
+        )
+      ) {
+        throw new Error(
+          "Durable Lark Comparison or Gap Card environment conflicts with the verified local projection",
+        );
+      }
+      return {
+        ...record,
+        environmentOrigin: localEnvironmentOrigin,
+      };
+    },
+  );
+  const durableIds = new Set(
+    durableProductGapCardTable.map(identity),
+  );
+  return {
+    ...local,
+    runRecordTable: local.runRecordTable.map((record) =>
+      record.recordType === "bakeoff_job" &&
+      record.jobId === state.bakeoffJob!.jobId
+        ? {
+            ...record,
+            reportUrl: state.bakeoffJob!.reportUrl,
+            auxiliaryReportUrls:
+              state.bakeoffJob!.auxiliaryReportUrls,
+            // Persisted JSON carries the same origin payload but not the
+            // registered in-process origin object. Preserve the verified
+            // local identity while refreshing durable mutable Job fields.
+            environmentOrigin: record.environmentOrigin,
+          }
+        : record,
+    ),
+    productGapCardTable: [
+      ...local.productGapCardTable.filter(
+        (record) => !durableIds.has(identity(record)),
+      ),
+      ...durableProductGapCardTable,
+    ],
+  };
+}
+
+function comparisonOrderCandidates(
+  comparisons: readonly DynamicComparisonView[],
+): readonly (readonly DynamicComparisonView[])[] {
+  if (comparisons.length > 6) {
+    throw new Error(
+      "Durable auxiliary report refresh exceeds the deterministic comparison merge bound",
+    );
+  }
+  const ordered = [...comparisons].sort((left, right) =>
+    left.comparisonId.localeCompare(right.comparisonId),
+  );
+  const candidates: DynamicComparisonView[][] = [];
+  const visit = (
+    prefix: readonly DynamicComparisonView[],
+    remaining: readonly DynamicComparisonView[],
+  ) => {
+    if (prefix.length > 0) candidates.push([...prefix]);
+    for (let index = 0; index < remaining.length; index += 1) {
+      visit(
+        [...prefix, remaining[index]!],
+        remaining.filter((_, candidateIndex) => candidateIndex !== index),
+      );
+    }
+  };
+  visit([], ordered);
+  return candidates;
+}
+
+async function hydrateCommittedReports(command: {
+  readonly projection: FeishuProjectionPort;
+  readonly state: LarkCommittedAuxiliaryReportState;
+  readonly source: Awaited<
+    ReturnType<FeishuProjectionPort["loadComparisonReportSource"]>
+  >;
+  readonly effectiveScores: readonly EffectiveArtifactScoreTableRecord[];
+}): Promise<void> {
+  if (command.state.reportCollection.length === 0) return;
+  const comparisons = command.state.productGapCardTable.filter(
+    (record): record is DynamicComparisonView =>
+      record.recordType === "comparison",
+  );
+  const persistedGaps = new Map(
+    command.state.productGapCardTable.flatMap((record) =>
+      record.recordType === "gap_card"
+        ? [[record.gapCardId, record] as const]
+        : [],
+    ),
+  );
+  const trustedReportOrigins = new Set(
+    (command.state.marker?.reportUrls ?? []).map(({ url }) =>
+      new URL(url).origin,
+    ),
+  );
+  if (trustedReportOrigins.size !== 1) {
+    throw new Error(
+      "Durable Lark report marker has no unique trusted origin",
+    );
+  }
+  const trustedOrigin = [...trustedReportOrigins][0]!;
+  const durablePageEvidenceUrls = new Map<string, string>();
+  for (const entry of command.state.marker?.pageEvidenceUrls ?? []) {
+    const key = `${entry.artifactId}:${entry.pageNumber}`;
+    let trusted: URL;
+    try {
+      trusted = new URL(entry.url);
+    } catch {
+      throw new Error(
+        `Durable Lark page-evidence URL is invalid: ${key}`,
+      );
+    }
+    if (
+      trusted.protocol !== "https:" ||
+      trusted.username !== "" ||
+      trusted.password !== "" ||
+      trusted.search !== "" ||
+      trusted.hash !== "" ||
+      trusted.origin !== trustedOrigin ||
+      durablePageEvidenceUrls.has(key)
+    ) {
+      throw new Error(
+        `Durable Lark page-evidence marker has an untrusted or conflicting entry: ${key}`,
+      );
+    }
+    durablePageEvidenceUrls.set(key, trusted.toString());
+  }
+  const durableEvidenceUrl = (
+    artifactId: string,
+    pageNumber: number,
+  ): string => {
+    const key = `${artifactId}:${pageNumber}`;
+    const url = durablePageEvidenceUrls.get(key);
+    if (url === undefined) {
+      throw new Error(
+        `Durable Lark page-evidence marker is missing a referenced page: ${key}`,
+      );
+    }
+    return url;
+  };
+  const candidates = comparisonOrderCandidates(comparisons);
+  for (const persisted of command.state.reportCollection) {
+    let matched: FeishuReportDraft | undefined;
+    for (const candidateComparisons of candidates) {
+      const candidateGaps = createGapCards(
+        durableEvidenceUrl,
+        candidateComparisons,
+        command.source.vendorRuns,
+        command.effectiveScores,
+      );
+      const gapsMatch = candidateGaps.every((gap) =>
+        isDeepStrictEqual(persistedGaps.get(gap.gapCardId), gap),
+      );
+      const vendorSummaries = deriveCanonicalVendorSummaries(
+        durableEvidenceUrl,
+        candidateComparisons,
+        command.source.vendorRuns,
+        command.effectiveScores,
+      );
+      const draft = buildCanonicalComparisonReportDraft({
+        resolveEvidenceUrl: durableEvidenceUrl,
+        job: command.source.job,
+        vendorRuns: command.source.vendorRuns,
+        capturedArtifacts: command.source.capturedArtifacts,
+        comparisons: candidateComparisons,
+        gapCards: candidateGaps,
+        vendorSummaries,
+        scores: command.effectiveScores,
+      });
+      const payloadHash = `sha256:${createHash("sha256")
+        .update(
+          JSON.stringify({
+            reportId: draft.reportId,
+            title: draft.title,
+            markdown: draft.markdown,
+          }),
+        )
+        .digest("hex")}` as const;
+      if (
+        gapsMatch &&
+        draft.reportId === persisted.reportId &&
+        draft.title === persisted.title &&
+        draft.markdown === persisted.markdown &&
+        payloadHash === persisted.payloadHash
+      ) {
+        matched = draft;
+        break;
+      }
+    }
+    if (matched === undefined) {
+      throw new Error(
+        `Durable Lark report collection cannot be deterministically reconstructed: ${persisted.reportId}`,
+      );
+    }
+    const materializedReport: FeishuReport = {
+      ...matched,
+      url: persisted.url,
+    };
+    await command.projection.createReport(materializedReport);
+  }
 }
 
 function comparePair(
@@ -426,7 +692,7 @@ const DIMENSION_SPECS: Readonly<
 };
 
 function evidenceForDimension(
-  feishu: FeishuProjectionPort,
+  resolveEvidenceUrl: (artifactId: string, pageNumber: number) => string,
   scoredRun: ScoredRun,
   dimension: ScoreDimension,
 ): ProductGapEvidence {
@@ -451,7 +717,7 @@ function evidenceForDimension(
       .slice(0, 3)
       .map((pageNumber) => ({
         pageNumber,
-        url: feishu.artifactPageEvidenceUrl(
+        url: resolveEvidenceUrl(
           scoredRun.score.artifactId,
           pageNumber,
         ),
@@ -460,7 +726,7 @@ function evidenceForDimension(
 }
 
 function createGapCards(
-  feishu: FeishuProjectionPort,
+  resolveEvidenceUrl: (artifactId: string, pageNumber: number) => string,
   comparisons: readonly DynamicComparisonView[],
   vendorRuns: readonly RunRecord[],
   scores: readonly EffectiveArtifactScoreTableRecord[],
@@ -495,12 +761,12 @@ function createGapCards(
         comparison.rightScorecardId,
       );
       const leftEvidence = evidenceForDimension(
-        feishu,
+        resolveEvidenceUrl,
         left,
         dimension.dimension,
       );
       const rightEvidence = evidenceForDimension(
-        feishu,
+        resolveEvidenceUrl,
         right,
         dimension.dimension,
       );
@@ -677,13 +943,69 @@ export function createComparisonReportService({
           "Production dynamic comparison requires authorized Lark persistence",
         );
       }
+      if (requiresAuthorizedPersistence) {
+        const localSource = await feishu.loadComparisonReportSource(
+          command.jobId,
+        );
+        const readPayloadHash = `sha256:${createHash("sha256")
+          .update(JSON.stringify(feishu.snapshot()))
+          .digest("hex")}` as const;
+        const readAuthorization = await requireEgressAuthorization(
+          egressAuthorization!,
+          {
+            requestId: `lark-auxiliary-state-read:${command.jobId}:${readPayloadHash}`,
+            jobId: command.jobId,
+            runId: null,
+            attemptId: null,
+            dataClassification:
+              localSource.evaluationCase.dataClassification,
+            sourceOwner: localSource.evaluationCase.sourceOwner,
+            processingPurpose: "operational_ledger_projection_storage",
+            targetKind: "storage",
+            targetService: feishu.egressDestination.targetService,
+            targetAccount: feishu.egressDestination.targetAccount,
+            targetRegion: feishu.egressDestination.targetRegion,
+            subprocessors: feishu.egressDestination.subprocessors,
+            contentFields: [
+              "commit_marker",
+              "bakeoff_job",
+              "comparison_and_product_gap_card_table",
+              "report_collection",
+            ],
+            payloadHash: readPayloadHash,
+            requiredRedactions: [],
+          },
+          clock ?? SYSTEM_CLOCK,
+        );
+        await egressAudit!.append(readAuthorization);
+      }
       for (let staleRetry = 0; ; staleRetry += 1) {
         try {
+          const durableState = requiresAuthorizedPersistence
+            ? await readHarnessOwnedLarkCommittedAuxiliaryReportState(
+                feishu,
+                command.jobId,
+              )
+            : undefined;
           const baseline = requiresAuthorizedPersistence
             ? await feishu.captureCommitBaseline(command.jobId)
             : undefined;
+          if (
+            durableState !== undefined &&
+            (durableState.marker?.batchHash ?? null) !==
+              baseline!.remoteBatchHash
+          ) {
+            throw new ProjectionStaleBaselineError(
+              "Lark durable auxiliary state and commit baseline differ",
+            );
+          }
           const writeProjection = requiresAuthorizedPersistence
-            ? feishu.forkForStaging(baseline!.localSnapshot)
+            ? feishu.forkForStaging(
+                mergeCommittedAuxiliaryState(
+                  baseline!.localSnapshot,
+                  durableState!,
+                ),
+              )
             : feishu;
           const source = await writeProjection.loadComparisonReportSource(
             command.jobId,
@@ -708,6 +1030,14 @@ export function createComparisonReportService({
                   ),
               })),
             );
+          if (durableState !== undefined) {
+            await hydrateCommittedReports({
+              projection: writeProjection,
+              state: durableState,
+              source,
+              effectiveScores,
+            });
+          }
           const pairs =
             command.pairs === undefined
               ? planCompatibleComparisonPairs({
@@ -740,7 +1070,11 @@ export function createComparisonReportService({
             await writeProjection.appendComparison(comparison);
           }
           const gapCards = createGapCards(
-            feishu,
+            (artifactId, pageNumber) =>
+              feishu.artifactPageEvidenceUrl(
+                artifactId,
+                pageNumber,
+              ),
             comparisons,
             source.vendorRuns,
             effectiveScores,

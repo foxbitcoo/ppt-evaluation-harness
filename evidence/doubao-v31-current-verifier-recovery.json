@@ -1,9 +1,9 @@
 {
   "schemaVersion": "doubao-current-verifier-trusted-recovery-evidence-v1",
   "status": "recovery_succeeded",
-  "recordedOn": "2026-07-31",
+  "recordedOn": "2026-08-02",
   "timingBasis": "date_only_unobserved_exact_time",
-  "registryId": "doubao-real-provider-20260730-t09-v30",
+  "registryId": "doubao-real-provider-20260802-t10-v31",
   "checkpointId": "doubao-volcano-20260727-real-provider-v1",
   "artifactContentHash": "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
   "artifactManifestHash": "sha256:1697e0128db2880c3bf7de7dc7fc03d376582d0bc16b3e293fbe68229c12a53a",
@@ -18,12 +18,12 @@
   },
   "verifierBuildIdentity": {
     "schemaVersion": "ppt-evaluation-build-identity-v1",
-    "specCommitSha": "2d795e4e5c9dae6f77663b44598d396106181b6e",
+    "specCommitSha": "56058f12032b16effaeb079802014406ac0e7e92",
     "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-    "sourceArchiveDigest": "sha256:3221b6178f50903cea22371415a53ac39809d22a4103414402cd718beb2e910c",
-    "sourceArchiveEntryCount": 54,
-    "embeddedManifestHash": "sha256:6c11f272c6d780de411fc1d5b83cea9ff750a296aacd4ea3f9c6e94f11bf0512",
-    "manifestHash": "sha256:c819aff2d4414467b825e5cadc661483d50882b905acb8c0fe345e1785d1816e"
+    "sourceArchiveDigest": "sha256:b34f966123e92f57dcb0d98a5acc9612c4d89ede5a80ba813b8644bc77667c0f",
+    "sourceArchiveEntryCount": 56,
+    "embeddedManifestHash": "sha256:37369f6443cddfdf4d7c9d66b6ee5ae4f76fef158aa0157ed30fc0dc5543868b",
+    "manifestHash": "sha256:855fb3be13c38cb1f1f39ffce3ae4781a6c680cf8394010bf7e33a0202453602"
   },
   "rendererAuthorizationEvidence": {
     "decisionId": "doubao-replay:b7b30a5f6730e1de522c6164",
@@ -44,29 +44,29 @@
   },
   "recoveryCliEvidence": {
     "schemaVersion": "doubao-recovery-cli-evidence-v1",
-    "rawResultReference": "evidence/doubao-v30-final-recovery-cli-result.json",
+    "rawResultReference": "evidence/doubao-v31-final-recovery-cli-result.json",
     "rawResultHashScope": "exact_stdout_bytes_including_terminal_lf",
-    "rawResultHash": "sha256:dc7f192d7062ab680054867b66dde15bc5fd0d949c94c3f8518ea0c2115f61e2",
+    "rawResultHash": "sha256:38c2449402d0c2db63a391d782f0cede0c1474d0a557e03beb7276ce5fe1a7ba",
     "rawResultVerifierBuildIdentity": {
       "schemaVersion": "ppt-evaluation-build-identity-v1",
-      "specCommitSha": "2d795e4e5c9dae6f77663b44598d396106181b6e",
+      "specCommitSha": "56058f12032b16effaeb079802014406ac0e7e92",
       "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-      "sourceArchiveDigest": "sha256:3221b6178f50903cea22371415a53ac39809d22a4103414402cd718beb2e910c",
-      "sourceArchiveEntryCount": 54,
-      "embeddedManifestHash": "sha256:6c11f272c6d780de411fc1d5b83cea9ff750a296aacd4ea3f9c6e94f11bf0512",
-      "manifestHash": "sha256:c819aff2d4414467b825e5cadc661483d50882b905acb8c0fe345e1785d1816e"
+      "sourceArchiveDigest": "sha256:b34f966123e92f57dcb0d98a5acc9612c4d89ede5a80ba813b8644bc77667c0f",
+      "sourceArchiveEntryCount": 56,
+      "embeddedManifestHash": "sha256:37369f6443cddfdf4d7c9d66b6ee5ae4f76fef158aa0157ed30fc0dc5543868b",
+      "manifestHash": "sha256:855fb3be13c38cb1f1f39ffce3ae4781a6c680cf8394010bf7e33a0202453602"
     },
     "attestedResultSchemaVersion": "doubao-recovery-result-attestation-v1",
-    "attestedResultHash": "sha256:2dd62b501ad029f1ef5def7c7e403957586789953dbe96b762a8890627ce825b",
+    "attestedResultHash": "sha256:803656d78fdc93d70453879ca9394b1dbefb75a1a05438f88f839ba133c4c9ad",
     "attestedResultVerifierBuildIdentity": {
       "schemaVersion": "ppt-evaluation-build-identity-v1",
-      "specCommitSha": "2d795e4e5c9dae6f77663b44598d396106181b6e",
+      "specCommitSha": "56058f12032b16effaeb079802014406ac0e7e92",
       "source": "EMBEDDED_VERIFIED_BUILD_MANIFEST",
-      "sourceArchiveDigest": "sha256:3221b6178f50903cea22371415a53ac39809d22a4103414402cd718beb2e910c",
-      "sourceArchiveEntryCount": 54,
-      "embeddedManifestHash": "sha256:6c11f272c6d780de411fc1d5b83cea9ff750a296aacd4ea3f9c6e94f11bf0512",
-      "manifestHash": "sha256:c819aff2d4414467b825e5cadc661483d50882b905acb8c0fe345e1785d1816e"
+      "sourceArchiveDigest": "sha256:b34f966123e92f57dcb0d98a5acc9612c4d89ede5a80ba813b8644bc77667c0f",
+      "sourceArchiveEntryCount": 56,
+      "embeddedManifestHash": "sha256:37369f6443cddfdf4d7c9d66b6ee5ae4f76fef158aa0157ed30fc0dc5543868b",
+      "manifestHash": "sha256:855fb3be13c38cb1f1f39ffce3ae4781a6c680cf8394010bf7e33a0202453602"
     }
   },
-  "resultHash": "sha256:61deb6c84f12fb2a329f4f3bcaffe66000687548b416087624a69a5f9201a187"
+  "resultHash": "sha256:79db5336375ac96fcf0d025c96c1d33a0b798f16542ccccd6de40fbbfa9b71cf"
 }

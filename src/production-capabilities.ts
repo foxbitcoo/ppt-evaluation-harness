@@ -937,28 +937,76 @@ function backendAttestation(
 ): {
   readonly deviceIdentity: `fs-device:sha256:${string}`;
   readonly backendInstanceIdentity: `fs-backend:sha256:${string}`;
+  readonly canonicalPath: string;
+  readonly deviceId: string;
+  readonly inodeId: string;
+  readonly ownerUid: number;
+  readonly mode: number;
 } {
   const root = resolve(configuration.rootPath);
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  const stat = statSync(root);
+  const requestedMetadata = lstatSync(root);
+  if (requestedMetadata.isSymbolicLink()) {
+    throw new Error(
+      "Production durable root rejects a symbolic link root",
+    );
+  }
+  if (!requestedMetadata.isDirectory()) {
+    throw new Error("Production durable root is not a directory");
+  }
+  const canonicalPath = realpathSync(root);
+  const metadata = lstatSync(canonicalPath);
+  if (
+    metadata.isSymbolicLink() ||
+    !metadata.isDirectory() ||
+    requestedMetadata.dev !== metadata.dev ||
+    requestedMetadata.ino !== metadata.ino
+  ) {
+    throw new Error(
+      "Production durable root identity changed during attestation",
+    );
+  }
+  const currentUid = typeof process.getuid === "function"
+    ? process.getuid()
+    : null;
+  if (currentUid === null || metadata.uid !== currentUid) {
+    throw new Error(
+      "Production durable root must be owned by the current user",
+    );
+  }
+  if ((metadata.mode & 0o022) !== 0) {
+    throw new Error(
+      "Production durable root must not be group/other writable",
+    );
+  }
   return Object.freeze({
     deviceIdentity:
-      `fs-device:${sha256(String(stat.dev))}` as const,
+      `fs-device:${sha256(String(metadata.dev))}` as const,
     backendInstanceIdentity:
       `fs-backend:${sha256(
         JSON.stringify({
-          dev: stat.dev,
-          ino: stat.ino,
-          root,
+          dev: String(metadata.dev),
+          ino: String(metadata.ino),
+          uid: metadata.uid,
+          mode: metadata.mode,
+          root: canonicalPath,
           storeId: configuration.storeId,
         }),
       )}` as const,
+    canonicalPath,
+    deviceId: String(metadata.dev),
+    inodeId: String(metadata.ino),
+    ownerUid: metadata.uid,
+    mode: metadata.mode,
   });
 }
 
 export function createHarnessOwnedProductionCapabilities(input: {
   readonly artifactPrimary: FailureDomainConfiguration;
   readonly artifactRecovery: FailureDomainConfiguration;
+  readonly artifactStorageIsolationRequirement?:
+    | "allow_single_failure_domain"
+    | "require_device_separated";
   readonly runSpecification: FailureDomainConfiguration;
   readonly checkpoint: {
     readonly rootPath: string;
@@ -976,12 +1024,20 @@ export function createHarnessOwnedProductionCapabilities(input: {
   readonly egressAuthorization: EgressAuthorizationPort;
   readonly egressAudit: EgressAuthorizationAuditPort;
 }): HarnessOwnedProductionCapabilities {
-  const primaryRoot = resolve(input.artifactPrimary.rootPath);
-  const recoveryRoot = resolve(input.artifactRecovery.rootPath);
+  if (
+    input.artifactStorageIsolationRequirement !== undefined &&
+    input.artifactStorageIsolationRequirement !==
+      "allow_single_failure_domain" &&
+    input.artifactStorageIsolationRequirement !==
+      "require_device_separated"
+  ) {
+    throw new Error(
+      "Production Artifact storage isolation requirement is invalid",
+    );
+  }
   if (
     input.artifactPrimary.rootReference ===
-      input.artifactRecovery.rootReference ||
-    primaryRoot === recoveryRoot
+      input.artifactRecovery.rootReference
   ) {
     throw new Error(
       "Production Artifact primary and recovery stores require distinct roots",
@@ -1042,20 +1098,42 @@ export function createHarnessOwnedProductionCapabilities(input: {
   const runSpecificationAttestation = backendAttestation(
     input.runSpecification,
   );
+  if (
+    primaryAttestation.canonicalPath ===
+      recoveryAttestation.canonicalPath ||
+    (primaryAttestation.deviceId === recoveryAttestation.deviceId &&
+      primaryAttestation.inodeId === recoveryAttestation.inodeId)
+  ) {
+    throw new Error(
+      "Production Artifact primary and recovery stores resolve to the same filesystem root identity",
+    );
+  }
+  if (
+    input.artifactStorageIsolationRequirement ===
+      "require_device_separated" &&
+    primaryAttestation.deviceId === recoveryAttestation.deviceId
+  ) {
+    throw new Error(
+      "Production Artifact storage contract requires device-separated failure domains",
+    );
+  }
 
   const primary = new FileSystemImmutableBlobStore({
     storeId: input.artifactPrimary.storeId,
-    rootPath: input.artifactPrimary.rootPath,
+    rootPath: primaryAttestation.canonicalPath,
+    expectedRootIdentity: primaryAttestation,
     tombstones: input.tombstones,
   });
   const secondary = new FileSystemImmutableBlobStore({
     storeId: input.artifactRecovery.storeId,
-    rootPath: input.artifactRecovery.rootPath,
+    rootPath: recoveryAttestation.canonicalPath,
+    expectedRootIdentity: recoveryAttestation,
     tombstones: input.tombstones,
   });
   const runSpecificationStore = new FileSystemImmutableBlobStore({
     storeId: input.runSpecification.storeId,
-    rootPath: input.runSpecification.rootPath,
+    rootPath: runSpecificationAttestation.canonicalPath,
+    expectedRootIdentity: runSpecificationAttestation,
     tombstones: input.tombstones,
   });
   const artifactVault = createArtifactVault({

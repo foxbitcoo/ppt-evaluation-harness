@@ -1734,6 +1734,23 @@ async function executeVendor(
         attemptId,
         attemptSeq,
       });
+      if (
+        targetEnvironment === "production" &&
+        attemptCheckpointStore.registerAdapterClaim === undefined
+      ) {
+        throw new Error(
+          "Production provider execution requires a durable harness adapter claim",
+        );
+      }
+      await attemptCheckpointStore.registerAdapterClaim?.({
+        jobId: context.jobId,
+        caseId: context.evaluationCase.caseId,
+        runId,
+        attemptId,
+        attemptSeq,
+        adapterVersion: productPackage.adapterVersion,
+        claimEpoch: attemptSeq,
+      });
       const vendorAuthorization =
         await requireEgressAuthorization(egressAuthorization, {
           requestId: `vendor-generation:${attemptId}`,
@@ -1794,14 +1811,6 @@ async function executeVendor(
           observedBudgetRemainingMs - deadlineResult.elapsedMs,
         );
         measuredElapsedMs = deadlineResult.elapsedMs;
-        if (
-          deadlineResult.timedOut &&
-          deadlineResult.shutdownCompleted !== true
-        ) {
-          throw new Error(
-            "Attempt cannot finalize before adapter shutdown and durable reconciliation complete",
-          );
-        }
         if (deadlineResult.timedOut) {
           let durableCheckpoints: readonly ObservableAttemptEvent[];
           try {
@@ -3225,6 +3234,16 @@ export function createBakeoffHarness({
       }
       if (
         commandSnapshot.environment === "production" &&
+        configuredAttemptDeadline !== undefined
+      ) {
+        return Promise.reject(
+          new Error(
+            "Production Bakeoff rejects the caller-supplied deadline seam before egress",
+          ),
+        );
+      }
+      if (
+        commandSnapshot.environment === "production" &&
         wpsAiPptBrowserDriver?.provenance === "TEST_FAKE" &&
         selectedProductAdapters.some(
           ({ executionConfigurationPackage }) =>
@@ -3370,6 +3389,16 @@ export function createBakeoffHarness({
           return Promise.reject(
             new Error(
               "Production Bakeoff requires an explicit durable checkpoint store",
+            ),
+          );
+        }
+        if (
+          attemptCheckpointStore.checkpointIntegrity !==
+          "authenticated_hash_chain"
+        ) {
+          return Promise.reject(
+            new Error(
+              "Production Bakeoff requires an authenticated hash-chain checkpoint store; legacy checkpoints are recovery-only",
             ),
           );
         }

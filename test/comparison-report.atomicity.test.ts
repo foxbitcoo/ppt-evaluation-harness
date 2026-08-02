@@ -29,6 +29,7 @@ import {
   type FeishuProjectionPort,
   type FeishuProjectionSnapshot,
   type LarkBaseProjectionTransportPort,
+  type LarkCommitMarker,
 } from "../src/index.ts";
 
 function sha256(
@@ -418,6 +419,7 @@ async function replayComparisonSource(
 
 async function seededProductionProjection(
   transport?: LarkBaseProjectionTransportPort,
+  seed?: FeishuProjectionSnapshot,
 ): Promise<FeishuProjectionPort> {
   const selectedTransport =
     transport ?? (await verifiedTransport());
@@ -431,7 +433,7 @@ async function seededProductionProjection(
   });
   await replayComparisonSource(
     projection,
-    await threeVendorProductionSeed(),
+    seed ?? (await threeVendorProductionSeed()),
   );
   return projection;
 }
@@ -1151,93 +1153,310 @@ test("a response-loss retry converges the local projection and preserves dynamic
   );
 });
 
-test("two dynamic reports staged from one baseline cannot overwrite each other and converge after a stale retry", async () => {
-  const projection = new HttpsMaterializingProjection();
-  const bakeoff = await createBakeoffHarness({
-    feishu: projection,
-    productAdapters: [
-      new MockWpsProductAdapter(),
-      new MockQwenProductAdapter(),
-      new MockDoubaoProductAdapter(),
-    ],
-  }).startBakeoffJob({
-    environment: "test",
-    caseId: VOLCANO_CASE_ID,
+test("two independent Lark projections merge different auxiliary pairs after a durable stale retry", async () => {
+  const transport = await createVerifiedLarkCliTransport({
+    configuration: LARK_TEST_CONFIGURATION,
+    egressAuthorization: allowLarkMutation,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
   });
-  const baseline = await projection.captureCommitBaseline(
-    bakeoff.job.jobId,
-  );
-  const stage = async (
-    pairs: NonNullable<Parameters<
-      ReturnType<typeof createComparisonReportService>["createReport"]
-    >[0]["pairs"]>,
-  ) => {
-    const staged = projection.forkForStaging(
-      baseline.localSnapshot,
-    );
-    const outcome = await createComparisonReportService({
-      feishu: staged,
-    }).createReport({
-      jobId: bakeoff.job.jobId,
-      pairs,
+  const records = new Map<
+    string,
+    { readonly payload: string; readonly payloadHash: `sha256:${string}` }
+  >();
+  const attachments = new Map<string, Uint8Array>();
+  let marker: LarkCommitMarker | null = null;
+  let reportCollection: readonly {
+    readonly reportId: string;
+    readonly title: string;
+    readonly markdown: string;
+    readonly payloadHash: `sha256:${string}`;
+  }[] = [];
+  let reportRevision = 0;
+  let durableStateReadCount = 0;
+  let materializationAttemptCount = 0;
+  let committedBatchCount = 0;
+  let corruptDurableEnvironmentOrigin = false;
+  let corruptDurableGapEnvironmentOrigin = false;
+  let exclusiveTail = Promise.resolve();
+  let pauseNextMaterialization = false;
+  let resolvePaused!: () => void;
+  let resumeMaterialization!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    resolvePaused = resolve;
+  });
+  const resume = new Promise<void>((resolve) => {
+    resumeMaterialization = resolve;
+  });
+  transport.preflight = async () => {};
+  transport.withProjectionMutex = async (_jobId, operation) => {
+    if (pauseNextMaterialization) {
+      pauseNextMaterialization = false;
+      resolvePaused();
+      await resume;
+    }
+    const previous = exclusiveTail;
+    let release!: () => void;
+    exclusiveTail = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    return { staged, outcome };
+    await previous;
+    try {
+      materializationAttemptCount += 1;
+      return await operation();
+    } finally {
+      release();
+    }
   };
-  const first = await stage(dynamicPair);
-  const reversePair = [
-    {
-      leftRunId: "MOCK-run-doubao-volcano-v1",
-      rightRunId: "MOCK-run-qwen-volcano-v1",
-    },
-  ] as const;
-  const second = await stage(reversePair);
+  transport.readCommitMarker = async () =>
+    marker === null ? null : structuredClone(marker);
+  transport.readCommittedAuxiliaryReportState = async ({ jobId }) => {
+    durableStateReadCount += 1;
+    if (marker === null) {
+      return {
+        marker: null,
+        bakeoffJob: null,
+        productGapCardTable: [],
+        reportCollection: [],
+      };
+    }
+    const payloads = [...records.entries()].map(([key, value]) => ({
+      key,
+      value: JSON.parse(value.payload) as Record<string, unknown>,
+    }));
+    const bakeoffJob = payloads.find(
+      ({ key, value }) =>
+        key.startsWith("runs:") &&
+        value.recordType === "bakeoff_job" &&
+        value.jobId === jobId,
+    )?.value;
+    assert.ok(bakeoffJob);
+    let productGapCardTable = payloads
+      .filter(
+        ({ key, value }) =>
+          key.startsWith("comparisons:") && value.jobId === jobId,
+      )
+      .map(({ value }) => value) as unknown as FeishuProjectionSnapshot["productGapCardTable"];
+    if (corruptDurableGapEnvironmentOrigin) {
+      productGapCardTable = productGapCardTable.map((record, index) =>
+        index === 0
+          ? {
+              ...record,
+              environmentOrigin: {
+                originId: "production:conflicting-gap-origin",
+                environment: "production",
+              },
+            }
+          : record,
+      ) as unknown as FeishuProjectionSnapshot["productGapCardTable"];
+    }
+    const exactCollectionHash = sha256Bytes(
+      canonicalJsonBytes(reportCollection),
+    );
+    assert.equal(marker.reportCollectionHash, exactCollectionHash);
+    assert.equal(marker.reportDocumentRevision, reportRevision);
+    const url = marker.reportUrls[0]?.url;
+    assert.ok(url);
+    const durableBakeoffJob = structuredClone(bakeoffJob);
+    if (corruptDurableEnvironmentOrigin) {
+      durableBakeoffJob.environmentOrigin = {
+        originId: "production:conflicting-origin",
+        environment: "production",
+      };
+    }
+    return {
+      marker: structuredClone(marker),
+      bakeoffJob: durableBakeoffJob as unknown as FeishuProjectionSnapshot["runRecordTable"][number],
+      productGapCardTable,
+      reportCollection: reportCollection.map((report) => ({
+        ...report,
+        url,
+      })),
+    };
+  };
+  transport.upsertRecord = async (command) => {
+    records.set(`${command.tableKey}:${command.stableId}`, {
+      payload: command.payload,
+      payloadHash: command.payloadHash,
+    });
+    return {
+      remoteRecordId: `${command.tableKey}:${command.stableId}`,
+      recordUrl: `https://example.feishu.cn/record/${encodeURIComponent(command.stableId)}`,
+    };
+  };
+  transport.verifyRecord = async (command) => {
+    assert.deepEqual(records.get(`${command.tableKey}:${command.stableId}`), {
+      payload: command.payload,
+      payloadHash: command.payloadHash,
+    });
+  };
+  transport.uploadAttachment = async (command) => {
+    const fileToken = sha256(`${command.stableId}:${command.attachmentRole}`).slice(7);
+    attachments.set(fileToken, Uint8Array.from(command.content));
+    return {
+      fileToken,
+      remoteHash: command.contentHash,
+      attachmentUrl: `https://example.feishu.cn/drive/${fileToken}`,
+    };
+  };
+  transport.downloadAttachment = async (command) =>
+    Uint8Array.from(attachments.get(command.fileToken)!);
+  transport.createRecordShareLink = async (command) =>
+    `https://example.feishu.cn/record/${sha256(command.remoteRecordId).slice(7)}`;
+  transport.verifyPageEvidence = async () => {};
+  transport.upsertReportCollection = async (command) => {
+    reportCollection = structuredClone(command.reports);
+    reportRevision += 1;
+    return {
+      url: `https://example.feishu.cn/docx/${command.jobId}`,
+      remoteContentHash: sha256(
+        createLarkReportCollectionMarkdown(command),
+      ),
+      revisionId: reportRevision,
+    };
+  };
+  transport.verifyReportCollection = async (command) => {
+    assert.deepEqual(command.reports, reportCollection);
+    assert.equal(command.expectedRevisionId, reportRevision);
+  };
+  transport.commitBatch = async (command) => {
+    if (
+      command.previousBatchHash !== (marker?.batchHash ?? null) ||
+      command.revision !== (marker?.revision ?? 0) + 1
+    ) {
+      throw new ProjectionStaleBaselineError();
+    }
+    const { authorization: _authorization, ...persisted } = command;
+    marker = structuredClone(persisted);
+    committedBatchCount += 1;
+  };
 
-  await projection.commitAuthorizedSnapshot(
-    first.staged.snapshot(),
-    await authorizeSnapshot(projection, first.staged.snapshot()),
-    baseline,
-  );
-  await assert.rejects(
-    projection.commitAuthorizedSnapshot(
-      second.staged.snapshot(),
-      await authorizeSnapshot(projection, second.staged.snapshot()),
-      baseline,
-    ),
-    ProjectionStaleBaselineError,
-  );
+  try {
+    const sharedSeed = await threeVendorProductionSeed();
+    const [firstProjection, secondProjection] = await Promise.all([
+      seededProductionProjection(transport, sharedSeed),
+      seededProductionProjection(transport, sharedSeed),
+    ]);
+    let observedStaleBaselineCount = 0;
+    const commitSecond =
+      secondProjection.commitAuthorizedSnapshot.bind(secondProjection);
+    secondProjection.commitAuthorizedSnapshot = async (...args) => {
+      try {
+        return await commitSecond(...args);
+      } catch (error) {
+        if (error instanceof ProjectionStaleBaselineError) {
+          observedStaleBaselineCount += 1;
+        }
+        throw error;
+      }
+    };
+    const firstPair = [
+      {
+        leftRunId: "MOCK-run-wps-volcano-v1",
+        rightRunId: "MOCK-run-qwen-volcano-v1",
+      },
+    ] as const;
+    pauseNextMaterialization = true;
+    const secondPending = createComparisonReportService({
+      feishu: secondProjection,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+    }).createReport({
+      jobId: "MOCK-job-volcano-v1",
+      pairs: dynamicPair,
+    });
+    await paused;
+    const first = await createComparisonReportService({
+      feishu: firstProjection,
+      egressAuthorization: allowLarkMutation,
+      egressAudit: new InMemoryEgressAuthorizationAudit(),
+    }).createReport({
+      jobId: "MOCK-job-volcano-v1",
+      pairs: firstPair,
+    });
+    resumeMaterialization();
+    const second = await secondPending;
 
-  const retryBaseline = await projection.captureCommitBaseline(
-    bakeoff.job.jobId,
-  );
-  const retry = projection.forkForStaging(
-    retryBaseline.localSnapshot,
-  );
-  const retried = await createComparisonReportService({
-    feishu: retry,
-  }).createReport({
-    jobId: bakeoff.job.jobId,
-    pairs: reversePair,
-  });
-  await projection.commitAuthorizedSnapshot(
-    retry.snapshot(),
-    await authorizeSnapshot(projection, retry.snapshot()),
-    retryBaseline,
-  );
+    assert.notEqual(first.report.reportId, second.report.reportId);
+    assert.equal(
+      durableStateReadCount,
+      3,
+      "the stale second instance must reread durable state before merging",
+    );
+    assert.equal(
+      materializationAttemptCount,
+      3,
+      "one stale materialization attempt must fail before the retry commits",
+    );
+    assert.equal(observedStaleBaselineCount, 1);
+    assert.equal(committedBatchCount, 2);
+    const converged = secondProjection.snapshot();
+    assert.deepEqual(
+      new Set(converged.reports.map(({ reportId }) => reportId)),
+      new Set([first.report.reportId, second.report.reportId]),
+    );
+    assert.equal(
+      converged.productGapCardTable.filter(
+        ({ recordType }) => recordType === "comparison",
+      ).length,
+      2,
+    );
+    const job = converged.runRecordTable.find(
+      ({ recordType }) => recordType === "bakeoff_job",
+    );
+    assert.deepEqual(
+      new Set(job?.auxiliaryReportUrls),
+      new Set([first.report.url, second.report.url]),
+    );
 
-  const job = projection.snapshot().runRecordTable.find(
-    ({ recordType }) => recordType === "bakeoff_job",
-  );
-  assert.deepEqual(
-    new Set(job?.auxiliaryReportUrls),
-    new Set([
-      `https://example.test/docx/${first.outcome.report.reportId}`,
-    ]),
-  );
-  assert.equal(
-    retried.report.reportId,
-    first.outcome.report.reportId,
-  );
-  assert.equal(projection.snapshot().reports.length, 2);
+    const conflictingProjection = await seededProductionProjection(
+      transport,
+      sharedSeed,
+    );
+    corruptDurableEnvironmentOrigin = true;
+    await assert.rejects(
+      createComparisonReportService({
+        feishu: conflictingProjection,
+        egressAuthorization: allowLarkMutation,
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }).createReport({
+        jobId: "MOCK-job-volcano-v1",
+        pairs: [
+          {
+            leftRunId: "MOCK-run-wps-volcano-v1",
+            rightRunId: "MOCK-run-doubao-volcano-v1",
+          },
+        ],
+      }),
+      /Bakeoff Job lineage or environment conflicts/i,
+    );
+    assert.equal(committedBatchCount, 2);
+
+    corruptDurableEnvironmentOrigin = false;
+    corruptDurableGapEnvironmentOrigin = true;
+    const conflictingGapProjection = await seededProductionProjection(
+      transport,
+      sharedSeed,
+    );
+    await assert.rejects(
+      createComparisonReportService({
+        feishu: conflictingGapProjection,
+        egressAuthorization: allowLarkMutation,
+        egressAudit: new InMemoryEgressAuthorizationAudit(),
+      }).createReport({
+        jobId: "MOCK-job-volcano-v1",
+        pairs: [
+          {
+            leftRunId: "MOCK-run-wps-volcano-v1",
+            rightRunId: "MOCK-run-doubao-volcano-v1",
+          },
+        ],
+      }),
+      /Comparison or Gap Card environment conflicts/i,
+    );
+    assert.equal(committedBatchCount, 2);
+  } finally {
+    await transport.dispose?.();
+  }
 });
 
 test("production dynamic comparison without persistence authorization leaves the local projection unchanged", async () => {

@@ -16,6 +16,7 @@ import type {
 } from "./domain.ts";
 import type { EnvironmentOrigin } from "./environment-origin.ts";
 import type { EgressDestinationMetadata } from "./egress-authorization.ts";
+import { durableTerminalNonSubmissionProof } from "./file-system-checkpoint-store.ts";
 
 export interface ProductPackageSnapshot {
   readonly packageId: string;
@@ -252,11 +253,27 @@ export interface ProductAttemptResult {
 export interface AttemptCheckpointPort {
   readonly checkpointStoreId: string;
   readonly durability?: "ephemeral" | "durable";
+  readonly checkpointIntegrity?:
+    | "authenticated_hash_chain"
+    | "legacy_unverified_read_only";
   readonly recoveryReferencePrefix?: string;
   append(event: ObservableAttemptEvent): Promise<void>;
   readAttempt?(
     attemptId: string,
   ): Promise<readonly ObservableAttemptEvent[]>;
+  registerAdapterClaim?(
+    claim: AttemptCheckpointAdapterClaim,
+  ): Promise<void>;
+}
+
+export interface AttemptCheckpointAdapterClaim {
+  readonly jobId: string;
+  readonly caseId: string;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly attemptSeq: number;
+  readonly adapterVersion: string;
+  readonly claimEpoch: number;
 }
 
 export const PROVIDER_SUBMISSION_INTENT_EVENT_TYPE =
@@ -467,13 +484,26 @@ export function attemptSubmissionState(
           event.vendorTaskId === undefined) &&
         /^not_submitted@[1-9]\d*$/.test(
           event.taskStateVersion ?? "",
-        )
+        ) &&
+        isHarnessVerifiedTerminalNonSubmission(event)
       ) {
         state = "not_submitted";
       }
     }
   }
   return state;
+}
+
+const IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS =
+  new WeakSet<ObservableAttemptEvent>();
+
+function isHarnessVerifiedTerminalNonSubmission(
+  event: ObservableAttemptEvent,
+): boolean {
+  return (
+    durableTerminalNonSubmissionProof(event) !== null ||
+    IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS.has(event)
+  );
 }
 
 export function submissionEvidenceBoundToCheckpoints(
@@ -502,6 +532,10 @@ export class InMemoryAttemptCheckpointStore
   readonly durability = "ephemeral" as const;
   readonly recoveryReferencePrefix = "unavailable";
   readonly #events: ObservableAttemptEvent[] = [];
+  readonly #adapterClaims = new Map<
+    string,
+    AttemptCheckpointAdapterClaim
+  >();
 
   constructor(
     checkpointStoreId = "in-memory-attempt-checkpoints",
@@ -520,7 +554,33 @@ export class InMemoryAttemptCheckpointStore
       throw new Error(`Attempt checkpoint identity conflict: ${event.eventId}`);
     }
     if (existing !== undefined) return;
-    this.#events.push(Object.freeze(structuredClone(event)));
+    const stored = Object.freeze(structuredClone(event));
+    if (
+      stored.eventType === "query_not_submitted" &&
+      [...this.#events].reverse().some(
+        (prior) =>
+          prior.attemptId === stored.attemptId &&
+          prior.eventType === PROVIDER_SUBMISSION_INTENT_EVENT_TYPE &&
+          prior.adapterVersion === stored.adapterVersion,
+      )
+    ) {
+      IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS.add(stored);
+    }
+    this.#events.push(stored);
+  }
+
+  async registerAdapterClaim(
+    claim: AttemptCheckpointAdapterClaim,
+  ): Promise<void> {
+    const key = `${claim.attemptId}:${claim.claimEpoch}`;
+    const existing = this.#adapterClaims.get(key);
+    if (
+      existing !== undefined &&
+      !isDeepStrictEqual(existing, claim)
+    ) {
+      throw new Error("Attempt adapter claim epoch conflicts");
+    }
+    this.#adapterClaims.set(key, Object.freeze(structuredClone(claim)));
   }
 
   async readAttempt(
@@ -529,13 +589,27 @@ export class InMemoryAttemptCheckpointStore
     return Object.freeze(
       this.#events
         .filter((event) => event.attemptId === attemptId)
-        .map((event) => Object.freeze(structuredClone(event))),
+        .map((event) => {
+          const clone = Object.freeze(structuredClone(event));
+          if (
+            IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS.has(event)
+          ) {
+            IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS.add(clone);
+          }
+          return clone;
+        }),
     );
   }
 
   snapshot(): readonly ObservableAttemptEvent[] {
     return Object.freeze(
-      this.#events.map((event) => Object.freeze(structuredClone(event))),
+      this.#events.map((event) => {
+        const clone = Object.freeze(structuredClone(event));
+        if (IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS.has(event)) {
+          IN_MEMORY_VERIFIED_TERMINAL_NON_SUBMISSIONS.add(clone);
+        }
+        return clone;
+      }),
     );
   }
 }

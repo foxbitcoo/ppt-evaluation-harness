@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
@@ -84,6 +91,13 @@ async function capabilityFixture(
   renderer: Parameters<
     typeof createHarnessOwnedProductionCapabilities
   >[0]["renderer"],
+  artifactRoots?: {
+    readonly primary: string;
+    readonly recovery: string;
+  },
+  artifactStorageIsolationRequirement?:
+    | "allow_single_failure_domain"
+    | "require_device_separated",
 ) {
   const tombstones = new InMemoryTombstoneLedger(
     "production-renderer-tombstones",
@@ -91,13 +105,13 @@ async function capabilityFixture(
   return createHarnessOwnedProductionCapabilities({
     artifactPrimary: {
       operatorDomainLabel: "production-renderer-primary",
-      rootPath: join(root, "primary"),
+      rootPath: artifactRoots?.primary ?? join(root, "primary"),
       rootReference: "root:production-renderer-primary",
       storeId: "production-renderer-primary",
     },
     artifactRecovery: {
       operatorDomainLabel: "production-renderer-recovery",
-      rootPath: join(root, "recovery"),
+      rootPath: artifactRoots?.recovery ?? join(root, "recovery"),
       rootReference: "root:production-renderer-recovery",
       storeId: "production-renderer-recovery",
     },
@@ -107,6 +121,9 @@ async function capabilityFixture(
       rootReference: "root:production-renderer-run-spec",
       storeId: "production-renderer-run-spec",
     },
+    ...(artifactStorageIsolationRequirement === undefined
+      ? {}
+      : { artifactStorageIsolationRequirement }),
     checkpoint: {
       rootPath: join(root, "checkpoints"),
       rootReference: "root:production-renderer-checkpoints",
@@ -128,6 +145,120 @@ async function capabilityFixture(
     egressAudit: new InMemoryEgressAuthorizationAudit(),
   });
 }
+
+test("production capabilities reject two lexical roots that resolve to one directory identity", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "production-capability-root-alias-"),
+  );
+  const shared = join(root, "shared-artifacts");
+  try {
+    await mkdir(shared, { mode: 0o700 });
+    await assert.rejects(
+      capabilityFixture(
+        root,
+        {
+          rendererId: "root-alias-renderer",
+          slidesDirectory: "/tmp/unused-renderer-slides",
+          extractedTextPrefix: "page",
+          fontPack: "test",
+          resolution: "1x1",
+          colorProfile: "sRGB",
+          fidelityNotes: ["test"],
+        },
+        {
+          primary: shared,
+          recovery: join(shared, "."),
+        },
+      ),
+      /same filesystem root identity/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("production capabilities reject a symbolic recovery root", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "production-capability-root-symlink-"),
+  );
+  const primary = join(root, "primary-artifacts");
+  const recoveryAlias = join(root, "recovery-alias");
+  try {
+    await mkdir(primary, { mode: 0o700 });
+    await symlink(primary, recoveryAlias, "dir");
+    await assert.rejects(
+      capabilityFixture(
+        root,
+        {
+          rendererId: "root-symlink-renderer",
+          slidesDirectory: "/tmp/unused-renderer-slides",
+          extractedTextPrefix: "page",
+          fontPack: "test",
+          resolution: "1x1",
+          colorProfile: "sRGB",
+          fidelityNotes: ["test"],
+        },
+        { primary, recovery: recoveryAlias },
+      ),
+      /symbolic link/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a device-separated storage contract fails closed on one filesystem", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "production-capability-device-contract-"),
+  );
+  try {
+    await assert.rejects(
+      capabilityFixture(
+        root,
+        {
+          rendererId: "device-contract-renderer",
+          slidesDirectory: "/tmp/unused-renderer-slides",
+          extractedTextPrefix: "page",
+          fontPack: "test",
+          resolution: "1x1",
+          colorProfile: "sRGB",
+          fidelityNotes: ["test"],
+        },
+        undefined,
+        "require_device_separated",
+      ),
+      /requires device-separated failure domains/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("production capabilities reject a group-writable durable root", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "production-capability-root-mode-"),
+  );
+  const primary = join(root, "primary");
+  try {
+    await mkdir(primary, { mode: 0o700 });
+    await chmod(primary, 0o720);
+    await assert.rejects(
+      capabilityFixture(root, {
+        rendererId: "root-mode-renderer",
+        slidesDirectory: "/tmp/unused-renderer-slides",
+        extractedTextPrefix: "page",
+        fontPack: "test",
+        resolution: "1x1",
+        colorProfile: "sRGB",
+        fidelityNotes: ["test"],
+      }),
+      /group\/other writable/i,
+    );
+  } finally {
+    await chmod(primary, 0o700);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 async function writeLegacySlides(root: string, source: Artifact) {
   const artifactDirectory = join(

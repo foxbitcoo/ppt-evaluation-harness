@@ -34,6 +34,17 @@ export class ProcessGroupTerminationIncompleteError
   }
 }
 
+export async function failStopOwnerProcess(
+  error: Error & OwnerFailStopRequired,
+): Promise<never> {
+  process.kill(process.pid, "SIGKILL");
+  await new Promise<never>(() => {
+    // Keep the event loop owned until the non-catchable signal is delivered.
+    setInterval(() => {}, 1_000);
+  });
+  throw error;
+}
+
 function positiveTimeout(value: number, label: string): number {
   if (!Number.isFinite(value) || value <= 0) {
     throw new Error(`${label} must be a positive finite duration`);

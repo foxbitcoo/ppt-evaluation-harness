@@ -351,6 +351,9 @@ function normalizedProductionTaskId(rawVendorTaskId: string): string {
 async function validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
   command: DoubaoProductionRecoveryCommand,
   trustedCheckpoint: TrustedDoubaoRecoveryCheckpoint,
+  checkpointReadMode:
+    | "legacy_read_only"
+    | "authenticated_hash_chain",
 ) {
 const {
   registryId,
@@ -383,6 +386,7 @@ const runSpecificationStore = new FileSystemImmutableBlobStore({
 const checkpointStore = new FileSystemAttemptCheckpointStore({
   checkpointStoreId,
   rootPath: resolveDurableRoot(registry, checkpointRootReference),
+  legacyReadOnly: checkpointReadMode === "legacy_read_only",
 });
 const [manifest, original, runSpecification, checkpoints] =
   await Promise.all([
@@ -2044,6 +2048,7 @@ export async function validateDoubaoRecoveryStoresAgainstCheckpoint(
   return validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
     command,
     trustedCheckpoint,
+    "legacy_read_only",
   );
 }
 
@@ -2059,6 +2064,7 @@ export async function validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTes
   return validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
     command,
     trustedCheckpoint,
+    "legacy_read_only",
   );
 }
 

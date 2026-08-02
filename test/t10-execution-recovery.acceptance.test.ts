@@ -3,8 +3,12 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
+  appendFile,
+  mkdir,
   mkdtemp,
+  readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -79,6 +83,7 @@ async function knownWpsRecoveryPayloads() {
   const checkpointStore = new FileSystemAttemptCheckpointStore({
     checkpointStoreId: WPS_TRUSTED_CHECKPOINT.storeIds.checkpoint,
     rootPath: join(WPS_RECOVERY_ROOT, "checkpoint"),
+    legacyReadOnly: true,
   });
   const [manifest, original, runSpecification, checkpoints] =
     await Promise.all([
@@ -329,7 +334,7 @@ test("the real WPS trace keeps configuration non-terminal and cannot trigger a d
       configurationObserved,
       terminalNotSubmitted,
     ]),
-    "not_submitted",
+    "unknown",
   );
   assert.equal(
     attemptSubmissionState([
@@ -368,6 +373,270 @@ test("the real WPS trace keeps configuration non-terminal and cannot trigger a d
       .length,
     1,
   );
+});
+
+test("durable terminal non-submission requires a harness adapter claim and cannot be forged by appending JSONL", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "t10-checkpoint-forgery-"),
+  );
+  const store = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "t10-forgery-resistant-checkpoints",
+    rootPath: root,
+  });
+  const intent = createProviderSubmissionIntentCheckpoint(
+    COMMAND,
+    "wps-aippt-browser@1",
+    "2026-08-02T00:00:00.000Z",
+  );
+  const terminalNotSubmitted: ObservableAttemptEvent = {
+    ...intent,
+    eventId: `${COMMAND.attemptId}-terminal-not-submitted`,
+    eventType: "query_not_submitted",
+    sourceAt: "2026-08-02T00:00:01.000Z",
+    observedAt: "2026-08-02T00:00:01.000Z",
+    evidenceRef: "ev_t10_terminal_not_submitted",
+    submissionEvidenceAtCheckpoint: "not_submitted",
+    taskStateVersion: "not_submitted@1",
+  };
+  try {
+    await store.append(intent);
+    await assert.rejects(
+      store.append(terminalNotSubmitted),
+      /adapter claim|terminal non-submission/i,
+    );
+    await store.registerAdapterClaim({
+      jobId: COMMAND.jobId,
+      caseId: COMMAND.evaluationCase.caseId,
+      runId: COMMAND.runId,
+      attemptId: COMMAND.attemptId,
+      attemptSeq: COMMAND.attemptSeq,
+      adapterVersion: "wps-aippt-browser@1",
+      claimEpoch: 1,
+    });
+    await assert.rejects(
+      store.append({
+        ...terminalNotSubmitted,
+        taskStateVersion: "not_submitted@999",
+      }),
+      /claim epoch|task state.*claim/i,
+    );
+    await store.append(terminalNotSubmitted);
+    assert.equal(
+      attemptSubmissionState(
+        await store.readAttempt(COMMAND.attemptId),
+      ),
+      "not_submitted",
+    );
+
+    const digest = createHash("sha256")
+      .update(COMMAND.attemptId)
+      .digest("hex");
+    const ledgerPath = join(root, `${digest}.jsonl`);
+    const forged = {
+      ...terminalNotSubmitted,
+      eventId: `${COMMAND.attemptId}-forged-terminal`,
+      evidenceRef: "ev_forged_terminal",
+    };
+    await appendFile(ledgerPath, `${JSON.stringify(forged)}\n`, "utf8");
+    await assert.rejects(
+      store.readAttempt(COMMAND.attemptId),
+      /schema|authenticated|checkpoint record/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint ledgers reject reordered authenticated records", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "t10-checkpoint-order-"),
+  );
+  const store = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "t10-ordered-checkpoints",
+    rootPath: root,
+  });
+  const first = createProviderSubmissionIntentCheckpoint(
+    COMMAND,
+    "qwen-web@1",
+    "2026-08-02T00:00:00.000Z",
+  );
+  const second: ObservableAttemptEvent = {
+    ...first,
+    eventId: `${COMMAND.attemptId}-submitted`,
+    eventType: "query_submitted",
+    sourceAt: "2026-08-02T00:00:01.000Z",
+    observedAt: "2026-08-02T00:00:01.000Z",
+    evidenceRef: "ev_t10_submitted",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_t10_submitted",
+    taskStateVersion: "submitted@1",
+  };
+  try {
+    await store.append(first);
+    await store.append(second);
+    const digest = createHash("sha256")
+      .update(COMMAND.attemptId)
+      .digest("hex");
+    const ledgerPath = join(root, `${digest}.jsonl`);
+    const lines = (await readFile(ledgerPath, "utf8"))
+      .trimEnd()
+      .split("\n");
+    await writeFile(
+      ledgerPath,
+      `${lines.reverse().join("\n")}\n`,
+      "utf8",
+    );
+    await assert.rejects(
+      store.readAttempt(COMMAND.attemptId),
+      /sequence|parent|order/i,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint append serializes real concurrent writers across processes", async () => {
+  const root = await mkdtemp(
+    join(tmpdir(), "t10-checkpoint-concurrency-"),
+  );
+  const checkpointUrl = pathToFileURL(
+    resolve("src/file-system-checkpoint-store.ts"),
+  ).href;
+  const childProgram = `
+    import { FileSystemAttemptCheckpointStore } from ${JSON.stringify(checkpointUrl)};
+    const index = Number(process.argv[2]);
+    const store = new FileSystemAttemptCheckpointStore({
+      checkpointStoreId: "t10-concurrent-checkpoints",
+      rootPath: process.argv[1],
+    });
+    await store.append({
+      eventId: \`concurrent-attempt-event-\${index}\`,
+      jobId: "concurrent-job",
+      caseId: "volcano-query-v1",
+      runId: "concurrent-run",
+      attemptId: "concurrent-attempt",
+      attemptSeq: 1,
+      eventType: "preflight_observed",
+      sourceAt: "2026-08-02T00:00:00.000Z",
+      observedAt: "2026-08-02T00:00:00.000Z",
+      writerId: "concurrent-adapter@1",
+      evidenceRef: \`ev_concurrent_\${index}\`,
+    });
+  `;
+  try {
+    const children = Array.from({ length: 8 }, (_, index) =>
+      spawn(
+        process.execPath,
+        [
+          "--import",
+          "tsx",
+          "--input-type=module",
+          "-e",
+          childProgram,
+          root,
+          String(index),
+        ],
+        { stdio: ["ignore", "ignore", "pipe"] },
+      ),
+    );
+    await Promise.all(
+      children.map(
+        (child) =>
+          new Promise<void>((resolveExit, rejectExit) => {
+            let stderr = "";
+            child.stderr.setEncoding("utf8");
+            child.stderr.on("data", (value: string) => {
+              stderr += value;
+            });
+            child.once("error", rejectExit);
+            child.once("exit", (code, signal) => {
+              if (code === 0 && signal === null) {
+                resolveExit();
+              } else {
+                rejectExit(
+                  new Error(
+                    `checkpoint child failed: ${code}/${signal}: ${stderr}`,
+                  ),
+                );
+              }
+            });
+          }),
+      ),
+    );
+    const events = await new FileSystemAttemptCheckpointStore({
+      checkpointStoreId: "t10-concurrent-checkpoints",
+      rootPath: root,
+    }).readAttempt("concurrent-attempt");
+    assert.equal(events.length, 8);
+    assert.equal(new Set(events.map(({ eventId }) => eventId)).size, 8);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint storage rejects symlink leaves and a replaced root identity", async () => {
+  const symlinkRoot = await mkdtemp(
+    join(tmpdir(), "t10-checkpoint-symlink-"),
+  );
+  const symlinkTarget = `${symlinkRoot}-target`;
+  const attemptId = "t10-symlink-attempt";
+  const event: ObservableAttemptEvent = {
+    eventId: `${attemptId}-event-1`,
+    jobId: "t10-symlink-job",
+    caseId: VOLCANO_EVALUATION_CASE.caseId,
+    runId: "t10-symlink-run",
+    attemptId,
+    attemptSeq: 1,
+    eventType: "preflight_observed",
+    sourceAt: "2026-08-02T00:00:00.000Z",
+    observedAt: "2026-08-02T00:00:00.000Z",
+    writerId: "t10-adapter@1",
+    evidenceRef: "ev_t10_symlink",
+  };
+  try {
+    await writeFile(symlinkTarget, "must-not-be-overwritten", "utf8");
+    const digest = createHash("sha256")
+      .update(attemptId)
+      .digest("hex");
+    await symlink(symlinkTarget, join(symlinkRoot, `${digest}.jsonl`));
+    await assert.rejects(
+      new FileSystemAttemptCheckpointStore({
+        checkpointStoreId: "t10-symlink-checkpoints",
+        rootPath: symlinkRoot,
+      }).append(event),
+      /symbolic|unsafe|ELOOP|too many levels/i,
+    );
+    assert.equal(
+      await readFile(symlinkTarget, "utf8"),
+      "must-not-be-overwritten",
+    );
+  } finally {
+    await rm(symlinkRoot, { recursive: true, force: true });
+    await rm(symlinkTarget, { force: true });
+  }
+
+  const driftRoot = await mkdtemp(
+    join(tmpdir(), "t10-checkpoint-root-drift-"),
+  );
+  const driftStore = new FileSystemAttemptCheckpointStore({
+    checkpointStoreId: "t10-root-drift-checkpoints",
+    rootPath: driftRoot,
+  });
+  try {
+    await driftStore.append({
+      ...event,
+      eventId: "t10-root-drift-event-1",
+      attemptId: "t10-root-drift-attempt",
+    });
+    await rm(driftRoot, { recursive: true, force: true });
+    await mkdir(driftRoot, { mode: 0o700 });
+    await assert.rejects(
+      driftStore.readAttempt("t10-root-drift-attempt"),
+      /root identity.*conflict/i,
+    );
+  } finally {
+    await rm(driftRoot, { recursive: true, force: true });
+  }
 });
 
 test("all three provider adapters start one idempotent next submission epoch after proven non-submission", async () => {

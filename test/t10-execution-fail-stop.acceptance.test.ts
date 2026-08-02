@@ -36,6 +36,40 @@ test("the wall-clock deadline preserves a typed fail-stop raised during abort sh
   );
 });
 
+test("the wall-clock deadline owns abort and does not return until the background operation settles", async () => {
+  const deadline = createWallClockAttemptDeadline({
+    shutdownGraceMs: 250,
+  });
+  let aborted = false;
+  let settled = false;
+  const result = await deadline.run(
+    (signal) =>
+      new Promise<string>((resolveOperation) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            setTimeout(() => {
+              settled = true;
+              resolveOperation("settled-after-abort");
+            }, 20);
+          },
+          { once: true },
+        );
+      }),
+    1,
+  );
+
+  assert.equal(aborted, true);
+  assert.equal(settled, true);
+  assert.deepEqual(result, {
+    timedOut: true,
+    elapsedMs: 1,
+    shutdownCompleted: true,
+    shutdownValue: "settled-after-abort",
+  });
+});
+
 test("an unresolved adapter shutdown fail-stops its owner before finalization or profile-lock release", async () => {
   const rootPath = await mkdtemp(
     join(tmpdir(), "t10-adapter-shutdown-fail-stop-"),

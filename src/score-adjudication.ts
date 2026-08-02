@@ -12,7 +12,10 @@ import type {
   AdjudicationEventTablePort,
   ReviewEventTablePort,
 } from "./feishu.ts";
-import { assertValidAdjudicationEventFields } from "./adjudication-validation.ts";
+import {
+  assertValidAdjudicationEventFields,
+  assertValidReviewEventFields,
+} from "./adjudication-validation.ts";
 import { renderedPageNumbers } from "./artifact-projection-validation.ts";
 
 export interface AdjudicateDimensionCommand {
@@ -141,6 +144,67 @@ function causalAdjudicationHead(
   return head;
 }
 
+function causalReviewHistory(
+  reviews: readonly ReviewEventRecord[],
+): readonly ReviewEventRecord[] {
+  reviews.forEach(assertValidReviewEventFields);
+  if (reviews.length === 0) return [];
+  const byId = new Map(
+    reviews.map((review) => [review.reviewEventId, review]),
+  );
+  if (byId.size !== reviews.length) {
+    throw new Error("Invalid review causal history: duplicate event ID");
+  }
+  const children = new Map<string, ReviewEventRecord>();
+  const roots: ReviewEventRecord[] = [];
+  for (const review of reviews) {
+    const parentId = review.priorReviewEventId;
+    if (parentId === null) {
+      roots.push(review);
+      continue;
+    }
+    const parent = byId.get(parentId);
+    if (parent === undefined) {
+      throw new Error(
+        `Invalid review causal history: missing parent ${parentId}`,
+      );
+    }
+    if (children.has(parentId)) {
+      throw new Error(
+        `Invalid review causal history: fork at ${parentId}`,
+      );
+    }
+    if (Date.parse(review.occurredAt) < Date.parse(parent.occurredAt)) {
+      throw new Error(
+        "Invalid review causal history: child precedes parent",
+      );
+    }
+    children.set(parentId, review);
+  }
+  if (roots.length !== 1) {
+    throw new Error(
+      "Invalid review causal history: expected one causal root",
+    );
+  }
+  const ordered: ReviewEventRecord[] = [];
+  const visited = new Set<string>();
+  let current: ReviewEventRecord | undefined = roots[0];
+  while (current !== undefined) {
+    if (visited.has(current.reviewEventId)) {
+      throw new Error("Invalid review causal history: cycle detected");
+    }
+    visited.add(current.reviewEventId);
+    ordered.push(current);
+    current = children.get(current.reviewEventId);
+  }
+  if (visited.size !== reviews.length) {
+    throw new Error(
+      "Invalid review causal history: disconnected events",
+    );
+  }
+  return ordered;
+}
+
 function effectiveScorecard(
   score: Awaited<
     ReturnType<AdjudicationEventTablePort["loadArtifactScoreByScorecardId"]>
@@ -149,6 +213,7 @@ function effectiveScorecard(
   reviews: readonly ReviewEventRecord[],
 ): EffectiveArtifactScorecard {
   events.forEach(assertValidAdjudicationEventFields);
+  const causalReviews = causalReviewHistory(reviews);
   if (
     events.some(
       (event) =>
@@ -168,7 +233,7 @@ function effectiveScorecard(
     );
   }
   if (
-    reviews.some(
+    causalReviews.some(
       (review) =>
         review.scorecardId !== score.scorecard.scorecardId ||
         review.artifactId !== score.artifactId ||
@@ -237,7 +302,7 @@ function effectiveScorecard(
         );
       }
       const latest = causalAdjudicationHead(matching);
-      const acceptedByHuman = reviews.some((review) =>
+      const acceptedByHuman = causalReviews.some((review) =>
         review.reviewedDimensions.includes(modelOriginal.dimension),
       );
       return latest === undefined
