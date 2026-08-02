@@ -41,3 +41,15 @@ node mvp/live-wps-capture-only.mjs \
 ```
 
 当前构建缺少经过证明的外部 Chrome 桥接程序，因此命令会有意以状态码 `2` 退出，并记录 `waiting_for_human / not_submitted`。即使尚未提交，它仍会保存冻结后的请求、Trace、分钟耗时和接管说明。流程不会导出 Cookie，也不会重试状态未知或已经提交的任务。
+
+千问与豆包也提供相同的 capture-only CLI 契约。千问使用专家模式并在运行时记录实际模型；豆包使用 `PPT 生成 / 篇幅详细 / 智能匹配`。模型或套餐名称未在界面暴露时记录为 `ui_unavailable`，不会猜测。
+
+统一三厂商入口：
+
+```bash
+node mvp/live-three-vendor-job.mjs \
+  --job-id job-live-volcano-001 \
+  --output-dir tmp/live-three-vendor-volcano-001
+```
+
+该 Job 固定按 WPS AI PPT、千问、豆包各执行一次。某个 Runner 阻塞或异常时，后续厂商仍继续；没有权威提交状态的异常统一记录为 `unknown` 且禁止自动重试。只有三条 Run 都携带真实 `LIVE_PRODUCTION` 产物时，Job 才返回完成状态。
