@@ -1099,9 +1099,9 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
     schemaVersion:
       "doubao-current-verifier-trusted-recovery-evidence-v1",
     status: "recovery_succeeded",
-    recordedOn: "2026-07-31",
+    recordedOn: "2026-08-02",
     timingBasis: "date_only_unobserved_exact_time",
-    registryId: "doubao-real-provider-20260730-t09-v30",
+    registryId: "doubao-real-provider-20260802-t10-v31",
     checkpointId: DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
@@ -1161,16 +1161,16 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
       rawResultHashScope:
         "exact_stdout_bytes_including_terminal_lf",
       rawResultHash:
-        "sha256:dc7f192d7062ab680054867b66dde15bc5fd0d949c94c3f8518ea0c2115f61e2",
+        "sha256:38c2449402d0c2db63a391d782f0cede0c1474d0a557e03beb7276ce5fe1a7ba",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
       attestedResultSchemaVersion:
         "doubao-recovery-result-attestation-v1",
       attestedResultHash:
-        "sha256:2dd62b501ad029f1ef5def7c7e403957586789953dbe96b762a8890627ce825b",
+        "sha256:803656d78fdc93d70453879ca9394b1dbefb75a1a05438f88f839ba133c4c9ad",
       attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
     },
     resultHash:
-      "sha256:61deb6c84f12fb2a329f4f3bcaffe66000687548b416087624a69a5f9201a187",
+      "sha256:162b42d55c473f4697ddb6af9147693da7a010872268d34eb170a998492a2979",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,

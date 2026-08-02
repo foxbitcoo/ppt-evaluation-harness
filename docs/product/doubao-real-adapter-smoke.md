@@ -70,6 +70,13 @@ source is frozen. The evidence records the exact verifier build identity that
 produced both hashes and retains the raw post-freeze CLI result as a separate
 checked-in evidence file.
 
+The 2026-08-02 T10 rehearsal used durable-root registry
+`doubao-real-provider-20260802-t10-v31`. The previous v30 registry was retained
+unchanged after macOS reported a different filesystem device identity; v31
+explicitly re-attests the same six narrow retained roots before recovery. This
+is a verifier-side storage re-attestation, not a new provider generation or a
+change to the retained Artifact.
+
 ## Fixed protocol
 
 - Use the current signed-in account.
