@@ -30,7 +30,7 @@ import {
   type ArtifactScoreTableRecord,
   type AttemptCheckpointPort,
   type AttemptDeadlinePort,
-  type ComparisonRecord,
+  type DynamicComparisonView,
   type EvaluationCaseRecord,
   type FeishuReportDraft,
   type ObservableAttemptEvent,
@@ -608,7 +608,7 @@ test("the Feishu projections preserve stable Case, Run, Artifact, score, and pro
     ],
   );
   const comparisonRecords = projection.productGapCardTable.filter(
-    (record): record is ComparisonRecord =>
+    (record): record is DynamicComparisonView =>
       record.recordType === "comparison",
   );
   const gapCardRecords = projection.productGapCardTable.filter(
@@ -1074,7 +1074,8 @@ test("production rejects every Mock lineage even when every visible provenance l
     },
   } as ArtifactScoreTableRecord;
   const comparison = snapshot.productGapCardTable.find(
-    (record): record is ComparisonRecord => record.recordType === "comparison",
+    (record): record is DynamicComparisonView =>
+      record.recordType === "comparison",
   );
   const gapCard = snapshot.productGapCardTable.find(
     (record): record is ProductGapCardRecord =>
@@ -1086,7 +1087,7 @@ test("production rejects every Mock lineage even when every visible provenance l
     ...comparison,
     ...productionLabel,
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
-  } as ComparisonRecord;
+  } as DynamicComparisonView;
   const relabeledGapCard = {
     ...gapCard,
     ...productionLabel,
@@ -1238,7 +1239,8 @@ test("Comparison and Gap Card are separate neutral lineage records without a per
   });
   const records = feishu.snapshot().productGapCardTable;
   const comparisons = records.filter(
-    (record): record is ComparisonRecord => record.recordType === "comparison",
+    (record): record is DynamicComparisonView =>
+      record.recordType === "comparison",
   );
   const gapCards = records.filter(
     (record): record is ProductGapCardRecord =>

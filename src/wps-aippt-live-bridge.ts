@@ -9,6 +9,7 @@ import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 import { EMBEDDED_BUILD_MANIFEST } from "./embedded-build-manifest.ts";
+import { terminateChildProcessGroup } from "./process-group-supervisor.ts";
 
 export interface HarnessOwnedWpsLiveBridgeSession {
   readonly executableHash: `sha256:${string}`;
@@ -86,6 +87,7 @@ export async function startHarnessOwnedWpsLiveBridge():
   const child = spawn(fixedExecutableUrl.pathname, [], {
     stdio: ["pipe", "ignore", "ignore"],
     env: {},
+    detached: true,
   });
   child.stdin.end(Buffer.from(challenge).toString("base64"));
   const session: InternalLiveBridgeSession = {
@@ -177,22 +179,5 @@ export async function stopHarnessOwnedWpsLiveBridge(
   const internal = internalSession(session);
   liveSessions.delete(internal);
   transcriptBySession.delete(internal);
-  if (internal.child.exitCode === null) {
-    internal.child.kill("SIGTERM");
-  }
-  await Promise.race([
-    new Promise<void>((resolveExit) => {
-      if (internal.child.exitCode !== null) {
-        resolveExit();
-        return;
-      }
-      internal.child.once("exit", () => resolveExit());
-    }),
-    new Promise<void>((resolveGrace) => {
-      setTimeout(resolveGrace, 2_000);
-    }),
-  ]);
-  if (internal.child.exitCode === null) {
-    internal.child.kill("SIGKILL");
-  }
+  await terminateChildProcessGroup(internal.child);
 }

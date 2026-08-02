@@ -15,6 +15,7 @@ import {
   canonicalJsonBytes,
   createBakeoffHarness,
   createComparisonReportService,
+  createScoreAdjudicationService,
   createHarnessOwnedLarkBaseProjection,
   createLarkReportCollectionMarkdown,
   createVerifiedLarkCliTransport,
@@ -418,8 +419,13 @@ async function replayComparisonSource(
 async function seededProductionProjection(
   transport?: LarkBaseProjectionTransportPort,
 ): Promise<FeishuProjectionPort> {
+  const selectedTransport =
+    transport ?? (await verifiedTransport());
+  if (transport === undefined) {
+    selectedTransport.readCommitMarker = async () => null;
+  }
   const projection = createHarnessOwnedLarkBaseProjection({
-    transport: transport ?? (await verifiedTransport()),
+    transport: selectedTransport,
     targetAccount: "test-account",
     targetRegion: "cn",
   });
@@ -482,6 +488,213 @@ test("authorized snapshot validation rejects cross-table lineage before material
   assert.equal(
     projection.materializationCalls,
     materializationCallsBeforeInvalidCommit,
+  );
+});
+
+test("authorized snapshot validation rejects caller-authored Comparison conclusions and Report prose", async (t) => {
+  const projection = new ObservedMaterializingProjection();
+  await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+      new MockDoubaoProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const snapshot = projection.snapshot();
+  const comparisonIndex = snapshot.productGapCardTable.findIndex(
+    (record) => record.recordType === "comparison",
+  );
+  const comparison =
+    snapshot.productGapCardTable[comparisonIndex];
+  assert.ok(comparison?.recordType === "comparison");
+  const firstDimension = comparison.dimensions[0];
+  assert.ok(firstDimension);
+
+  await t.test("derived Comparison score", async () => {
+    const invalidSnapshot: FeishuProjectionSnapshot = {
+      ...snapshot,
+      productGapCardTable:
+        snapshot.productGapCardTable.map((record, index) =>
+          index !== comparisonIndex
+            ? record
+            : {
+                ...comparison,
+                dimensions: comparison.dimensions.map(
+                  (dimension, dimensionIndex) =>
+                    dimensionIndex === 0
+                      ? {
+                          ...dimension,
+                          leftValue:
+                            dimension.leftValue === 1
+                              ? 2
+                              : 1,
+                        }
+                      : dimension,
+                ),
+              },
+        ),
+    };
+    await assert.rejects(
+      projection.commitAuthorizedSnapshot(
+        invalidSnapshot,
+        await authorizeSnapshot(
+          projection,
+          invalidSnapshot,
+        ),
+      ),
+      /Comparison derived|effective Scorecards/i,
+    );
+  });
+
+  await t.test("canonical Report score prose", async () => {
+    const invalidSnapshot: FeishuProjectionSnapshot = {
+      ...snapshot,
+      reports: snapshot.reports.map((report, index) =>
+        index === 0
+          ? {
+              ...report,
+              markdown: report.markdown.replace(
+                /（模型未复核）/,
+                "（模型未复核，伪造赢家）",
+              ),
+            }
+          : report,
+      ),
+    };
+    assert.notDeepEqual(
+      invalidSnapshot.reports,
+      snapshot.reports,
+    );
+    await assert.rejects(
+      projection.commitAuthorizedSnapshot(
+        invalidSnapshot,
+        await authorizeSnapshot(
+          projection,
+          invalidSnapshot,
+        ),
+      ),
+      /Report content.*canonical derivation/i,
+    );
+  });
+});
+
+test("a Product Gap Card must use the adjudication head bound by its Comparison", async () => {
+  const projection = new ObservedMaterializingProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: projection,
+    productAdapters: [
+      new MockWpsProductAdapter(),
+      new MockQwenProductAdapter(),
+    ],
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const dimension =
+    "visual_aesthetics_and_professional_finish" as const;
+  const service = createScoreAdjudicationService({
+    feishu: projection,
+  });
+  await service.adjudicateDimension({
+    adjudicationEventId: "adj-wps-visual-stale",
+    scorecardId: "MOCK-scorecard-wps-volcano-v1",
+    dimension,
+    humanFinalScore: 5,
+    actorId: "pm-test",
+    occurredAt: "2026-07-27T06:00:00.000Z",
+    reason: "旧裁决：达到 5 分锚点。",
+    priorAdjudicationEventId: null,
+  });
+  await service.adjudicateDimension({
+    adjudicationEventId: "adj-wps-visual-current",
+    scorecardId: "MOCK-scorecard-wps-volcano-v1",
+    dimension,
+    humanFinalScore: 1,
+    actorId: "pm-test",
+    occurredAt: "2026-07-27T06:01:00.000Z",
+    reason: "当前裁决：仅达到 1 分锚点。",
+    priorAdjudicationEventId: "adj-wps-visual-stale",
+  });
+  const report = await createComparisonReportService({
+    feishu: projection,
+  }).createReport({
+    jobId: bakeoff.job.jobId,
+    pairs: [
+      {
+        leftRunId: "MOCK-run-wps-volcano-v1",
+        rightRunId: "MOCK-run-qwen-volcano-v1",
+      },
+    ],
+  });
+  const comparison = report.comparisons[0];
+  assert.ok(comparison);
+  const gap = report.gapCards.find(
+    (candidate) =>
+      candidate.comparisonId === comparison.comparisonId &&
+      candidate.dimension === dimension,
+  );
+  assert.ok(gap);
+  const snapshot = projection.snapshot();
+  const staleEvent = snapshot.adjudicationEventTable.find(
+    ({ adjudicationEventId }) =>
+      adjudicationEventId === "adj-wps-visual-stale",
+  );
+  assert.ok(staleEvent);
+  const invalidSnapshot: FeishuProjectionSnapshot = {
+    ...snapshot,
+    productGapCardTable:
+      snapshot.productGapCardTable.map((record) => {
+        if (
+          record.recordType !== "gap_card" ||
+          record.gapCardId !== gap.gapCardId
+        ) {
+          return record;
+        }
+        const wpsIsLeft =
+          record.leftEvidence.runId ===
+          "MOCK-run-wps-volcano-v1";
+        const staleEvidence = {
+          ...(wpsIsLeft
+            ? record.leftEvidence
+            : record.rightEvidence),
+          value: staleEvent.humanFinalScore,
+          rationale: staleEvent.reason,
+          links: staleEvent.evidencePages
+            .slice(0, 3)
+            .map((pageNumber) => ({
+              pageNumber,
+              url: projection.artifactPageEvidenceUrl(
+                "MOCK-artifact-wps-volcano-v1",
+                pageNumber,
+              ),
+            })),
+        };
+        return {
+          ...record,
+          keyPages: {
+            ...record.keyPages,
+            [wpsIsLeft ? "left" : "right"]:
+              staleEvent.evidencePages.slice(0, 3),
+          },
+          leftEvidence: wpsIsLeft
+            ? staleEvidence
+            : record.leftEvidence,
+          rightEvidence: wpsIsLeft
+            ? record.rightEvidence
+            : staleEvidence,
+        };
+      }),
+  };
+  await assert.rejects(
+    projection.commitAuthorizedSnapshot(
+      invalidSnapshot,
+      await authorizeSnapshot(projection, invalidSnapshot),
+    ),
+    /Gap Card.*evidence.*lineage|persisted assessment/i,
   );
 });
 

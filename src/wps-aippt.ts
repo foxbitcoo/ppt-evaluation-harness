@@ -40,6 +40,9 @@ import {
   type WpsAiPptBrowserDriverPort,
   type WpsAiPptTaskReconciliationEvidence,
 } from "./wps-aippt-driver.ts";
+import {
+  isOwnerFailStopRequiredError,
+} from "./process-group-supervisor.ts";
 
 export const WPS_AIPPT_URL = "https://aippt.wps.cn/aippt/" as const;
 export const WPS_AIPPT_ADAPTER_VERSION = "wps-aippt-browser@1" as const;
@@ -1456,6 +1459,7 @@ function createWpsAiPptProductAdapterExecutor(
         pageCount: 16,
       });
     } catch (error) {
+      if (isOwnerFailStopRequiredError(error)) throw error;
       const latestTaskCheckpoint = [...persistedEvents].reverse().find(
         (event) =>
           event.vendorTaskId !== null &&

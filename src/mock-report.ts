@@ -4,6 +4,7 @@ import type {
   RunStatus,
   FeishuReportDraft,
   JudgeFailureLineage,
+  ProvenanceLabel,
   RenderManifest,
   ScoreDimension,
   TerminalReason,
@@ -16,7 +17,7 @@ export interface MockReportVendorResult {
   readonly product: string;
   readonly runId: string;
   readonly status: RunStatus;
-  readonly stateReason: TerminalReason;
+  readonly stateReason: TerminalReason | "human_intervention";
   readonly artifact: Artifact | null;
   readonly scorecard: ArtifactScorecard | null;
   readonly judgeFailure: JudgeFailureLineage | null;
@@ -34,10 +35,10 @@ const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
 
 export function createMockReportDraft(
   jobId: string,
-  jobStatus: "active" | "completed" | "partial" | "failed",
+  jobStatus: RunStatus,
   results: readonly MockReportVendorResult[],
   lineage: {
-    readonly provenance: "MOCK" | "PRODUCTION";
+    readonly provenance: ProvenanceLabel;
     readonly environmentOrigin: EnvironmentOrigin;
     readonly createdAt: string;
   } = {
@@ -143,6 +144,8 @@ Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分
     artifactIds: results.flatMap(({ artifact }) =>
       artifact === null ? [] : [artifact.artifactId],
     ),
+    comparisonIds: [],
+    gapCardIds: [],
     claimLevel: "case_sample",
     markdown,
     createdAt: lineage.createdAt,

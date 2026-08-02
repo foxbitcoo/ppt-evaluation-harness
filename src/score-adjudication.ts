@@ -290,6 +290,19 @@ function effectiveScorecard(
   };
 }
 
+/**
+ * Recomputes the effective score strictly from persisted source rows.
+ * Projection validators use this pure boundary so derived Comparison,
+ * Gap Card, and Report records cannot bless caller-supplied conclusions.
+ */
+export function effectiveScorecardFromPersistedRows(
+  score: ArtifactScoreTableRecord,
+  events: readonly AdjudicationEventRecord[],
+  reviews: readonly ReviewEventRecord[],
+): EffectiveArtifactScorecard {
+  return effectiveScorecard(score, events, reviews);
+}
+
 export function createScoreAdjudicationService({
   feishu,
 }: ScoreAdjudicationServiceDependencies): ScoreAdjudicationService {

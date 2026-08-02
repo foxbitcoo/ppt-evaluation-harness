@@ -548,7 +548,7 @@ test("Comparison projection rejects cross-wired Run and Scorecard lineage", asyn
     .snapshot()
     .productGapCardTable.find(
       (record) => record.recordType === "comparison",
-    );
+  );
   assert.ok(comparison);
 
   await assert.rejects(
@@ -568,8 +568,39 @@ test("Comparison projection enforces one ID for each unordered logical pair", as
     .snapshot()
     .productGapCardTable.find(
       (record) => record.recordType === "comparison",
-    );
+  );
   assert.ok(comparison);
+  const reversedComparison = (comparisonId: string) => ({
+    ...comparison,
+    comparisonId,
+    leftRunId: comparison.rightRunId,
+    leftScorecardId: comparison.rightScorecardId,
+    leftProduct: comparison.rightProduct,
+    rightRunId: comparison.leftRunId,
+    rightScorecardId: comparison.leftScorecardId,
+    rightProduct: comparison.leftProduct,
+    dimensions: comparison.dimensions.map((dimension) => ({
+      ...dimension,
+      leftAssessmentStatus: dimension.rightAssessmentStatus,
+      rightAssessmentStatus: dimension.leftAssessmentStatus,
+      leftValue: dimension.rightValue,
+      rightValue: dimension.leftValue,
+      difference:
+        dimension.difference === null
+          ? null
+          : -dimension.difference,
+      leftEvidencePages: dimension.rightEvidencePages,
+      rightEvidencePages: dimension.leftEvidencePages,
+      leftReviewState: dimension.rightReviewState,
+      rightReviewState: dimension.leftReviewState,
+      leftScoreSource: dimension.rightScoreSource,
+      rightScoreSource: dimension.leftScoreSource,
+      leftAdjudicationEventId:
+        dimension.rightAdjudicationEventId,
+      rightAdjudicationEventId:
+        dimension.leftAdjudicationEventId,
+    })),
+  });
 
   await t.test("same orientation with a new ID", async () => {
     await assert.rejects(
@@ -582,15 +613,12 @@ test("Comparison projection enforces one ID for each unordered logical pair", as
   });
   await t.test("reversed orientation with a new ID", async () => {
     await assert.rejects(
-      feishu.appendComparison({
-        ...comparison,
-        comparisonId: `${comparison.comparisonId}-reversed`,
-        leftRunId: comparison.rightRunId,
-        leftScorecardId: comparison.rightScorecardId,
-        rightRunId: comparison.leftRunId,
-        rightScorecardId: comparison.leftScorecardId,
-      }),
-      /Comparison.*logical|duplicate|unordered|identity/i,
+      feishu.appendComparison(
+        reversedComparison(
+          `${comparison.comparisonId}-reversed`,
+        ),
+      ),
+      /Comparison.*(?:logical|duplicate|unordered|identity|derived)/i,
     );
   });
   await t.test(
@@ -601,14 +629,9 @@ test("Comparison projection enforces one ID for each unordered logical pair", as
         ...snapshot,
         productGapCardTable: [
           ...snapshot.productGapCardTable,
-          {
-            ...comparison,
-            comparisonId: `${comparison.comparisonId}-readback-reversed`,
-            leftRunId: comparison.rightRunId,
-            leftScorecardId: comparison.rightScorecardId,
-            rightRunId: comparison.leftRunId,
-            rightScorecardId: comparison.leftScorecardId,
-          },
+          reversedComparison(
+            `${comparison.comparisonId}-readback-reversed`,
+          ),
         ],
       };
 

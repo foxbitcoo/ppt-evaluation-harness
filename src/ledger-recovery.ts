@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   AdjudicationEventRecord,
   ArtifactScorecard,
-  ComparisonRecord,
+  DynamicComparisonView,
   ComparisonCompatibilityFingerprint,
   EvaluationCaseRecord,
   FeishuReport,
@@ -94,7 +94,7 @@ export interface OperationalLedgerRecoveryExport {
   readonly gapCardWorkflowEvents: readonly ProductGapCardWorkflowEventRecord[];
   readonly githubIssueDeliveryReservations: readonly GitHubIssueDeliveryReservationRecord[];
   readonly githubIssueLinkEvents: readonly GitHubIssueLinkEventRecord[];
-  readonly comparisons: readonly ComparisonRecord[];
+  readonly comparisons: readonly DynamicComparisonView[];
   readonly productGapCards: readonly ProductGapCardRecord[];
   readonly reports: readonly FeishuReport[];
   readonly recordCount: number;
@@ -139,7 +139,7 @@ export interface RecoveredOperationalJob {
   readonly gapCardWorkflowEvents: readonly ProductGapCardWorkflowEventRecord[];
   readonly githubIssueDeliveryReservations: readonly GitHubIssueDeliveryReservationRecord[];
   readonly githubIssueLinkEvents: readonly GitHubIssueLinkEventRecord[];
-  readonly comparisons: readonly ComparisonRecord[];
+  readonly comparisons: readonly DynamicComparisonView[];
   readonly productGapCards: readonly ProductGapCardRecord[];
   readonly reports: readonly FeishuReport[];
 }
@@ -495,7 +495,7 @@ function createExport(
       gapCardIds.has(gapCardId),
     );
   const comparisons = command.snapshot.productGapCardTable.filter(
-    (record): record is ComparisonRecord =>
+    (record): record is DynamicComparisonView =>
       record.recordType === "comparison" &&
       record.jobId === command.jobId,
   );

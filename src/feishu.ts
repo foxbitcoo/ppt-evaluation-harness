@@ -7,6 +7,7 @@ import type {
   ArtifactScoreTableRecord,
   CapturedArtifactTableRecord,
   ComparisonRecord,
+  DynamicComparisonView,
   EvaluationCaseRecord,
   FeishuReport,
   FeishuReportDraft,
@@ -40,6 +41,14 @@ import {
   assertArtifactRenderManifestIntegrity,
   renderedPageNumbers,
 } from "./artifact-projection-validation.ts";
+import { effectiveScorecardFromPersistedRows } from "./score-adjudication.ts";
+import {
+  buildCanonicalComparisonReportDraft,
+  deriveCanonicalVendorSummaries,
+  normalizeReportEvidenceUrls,
+  type EffectiveArtifactScoreTableRecord,
+} from "./comparison-report-render.ts";
+import { createMockReportDraft } from "./mock-report.ts";
 
 function canonicalValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalValue);
@@ -88,25 +97,70 @@ function stableRunReplayPayload(record: RunRecord): unknown {
   return stable;
 }
 
-function stableReportReplayPayload(report: FeishuReport): unknown {
-  const { url: _url, ...stable } = report;
-  return stable;
+function stableReportReplayPayload(
+  report: FeishuReportDraft | FeishuReport,
+): Omit<FeishuReport, "url"> {
+  const { url: _url, ...stable } = report as FeishuReport;
+  return stable as Omit<FeishuReport, "url">;
 }
 
-function comparisonLogicalKey(record: ComparisonRecord): string {
+function comparisonLogicalKey(
+  record: DynamicComparisonView,
+): string {
+  const sideState = (
+    side: "left" | "right",
+  ) =>
+    record.dimensions.map((dimension) => ({
+      dimension: dimension.dimension,
+      assessmentStatus:
+        side === "left"
+          ? dimension.leftAssessmentStatus
+          : dimension.rightAssessmentStatus,
+      value:
+        side === "left"
+          ? dimension.leftValue
+          : dimension.rightValue,
+      evidencePages:
+        side === "left"
+          ? dimension.leftEvidencePages
+          : dimension.rightEvidencePages,
+      reviewState:
+        side === "left"
+          ? dimension.leftReviewState
+          : dimension.rightReviewState,
+      scoreSource:
+        side === "left"
+          ? dimension.leftScoreSource
+          : dimension.rightScoreSource,
+      adjudicationEventId:
+        side === "left"
+          ? dimension.leftAdjudicationEventId
+          : dimension.rightAdjudicationEventId,
+    }));
   const sides = [
-    [record.leftRunId, record.leftScorecardId],
-    [record.rightRunId, record.rightScorecardId],
+    [
+      record.leftRunId,
+      record.leftScorecardId,
+      sideState("left"),
+    ],
+    [
+      record.rightRunId,
+      record.rightScorecardId,
+      sideState("right"),
+    ],
   ].sort(
-    ([leftRun = "", leftScore = ""], [rightRun = "", rightScore = ""]) =>
-      leftRun.localeCompare(rightRun) ||
-      leftScore.localeCompare(rightScore),
+    (
+      [leftRun = "", leftScore = ""],
+      [rightRun = "", rightScore = ""],
+    ) =>
+      String(leftRun).localeCompare(String(rightRun)) ||
+      String(leftScore).localeCompare(String(rightScore)),
   );
   return JSON.stringify([record.jobId, record.caseId, sides]);
 }
 
 function assertComparisonLogicalIdentities(
-  records: readonly (ComparisonRecord | ProductGapCardRecord)[],
+  records: readonly (DynamicComparisonView | ProductGapCardRecord)[],
 ): void {
   const logicalKeys = new Set<string>();
   for (const record of records) {
@@ -272,7 +326,7 @@ export interface ProductGapCardWorkflowTablePort {
 }
 
 export interface ComparisonTablePort {
-  appendComparison(record: ComparisonRecord): Promise<void>;
+  appendComparison(record: DynamicComparisonView): Promise<void>;
 }
 
 export interface ReportDocumentPort {
@@ -350,7 +404,7 @@ export interface FeishuProjectionSnapshot {
   readonly githubIssueDeliveryReservationTable: readonly GitHubIssueDeliveryReservationRecord[];
   readonly githubIssueLinkEventTable: readonly GitHubIssueLinkEventRecord[];
   readonly productGapCardTable: readonly (
-    | ComparisonRecord
+    | DynamicComparisonView
     | ProductGapCardRecord
   )[];
   readonly reports: readonly FeishuReport[];
@@ -508,8 +562,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
   readonly #githubIssueDeliveryReservationTable: GitHubIssueDeliveryReservationRecord[] =
     [];
   readonly #githubIssueLinkEventTable: GitHubIssueLinkEventRecord[] = [];
-  readonly #productGapCardTable: (ComparisonRecord | ProductGapCardRecord)[] =
-    [];
+  readonly #productGapCardTable: (
+    | DynamicComparisonView
+    | ProductGapCardRecord
+  )[] = [];
   readonly #reports: FeishuReport[] = [];
   readonly #expiredJobIds = new Set<string>();
   readonly #expiredCaseIds = new Set<string>();
@@ -752,7 +808,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     return { evaluationCase, job, run };
   }
 
-  #assertComparisonRelations(record: ComparisonRecord): void {
+  #assertComparisonRelations(
+    record: DynamicComparisonView,
+    requireCurrentHead = true,
+  ): void {
     if (
       record.leftRunId === record.rightRunId ||
       record.leftScorecardId === record.rightScorecardId
@@ -866,11 +925,219 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       this.#capturedArtifactTable,
       [leftScore, rightScore],
     );
+    const effectiveFor = (score: ArtifactScoreTableRecord) =>
+      effectiveScorecardFromPersistedRows(
+        score,
+        this.#adjudicationEventTable.filter(
+          ({ scorecardId }) =>
+            scorecardId === score.scorecard.scorecardId,
+        ),
+        this.#reviewEventTable.filter(
+          ({ scorecardId }) =>
+            scorecardId === score.scorecard.scorecardId,
+        ),
+      );
+    const currentLeftEffective = effectiveFor(leftScore);
+    const currentRightEffective = effectiveFor(rightScore);
+    const currentRightByDimension = new Map(
+      currentRightEffective.dimensions.map((dimension) => [
+        dimension.dimension,
+        dimension,
+      ]),
+    );
+    const currentDimensions = currentLeftEffective.dimensions.map(
+      (leftDimension) => {
+        const rightDimension = currentRightByDimension.get(
+          leftDimension.dimension,
+        );
+        if (rightDimension === undefined) {
+          throw new Error(
+            "Comparison derived dimensions do not match the persisted effective Scorecards",
+          );
+        }
+        const leftAssessable =
+          leftDimension.effectiveAssessmentStatus === "ASSESSED" &&
+          leftDimension.effectiveValue !== null;
+        const rightAssessable =
+          rightDimension.effectiveAssessmentStatus === "ASSESSED" &&
+          rightDimension.effectiveValue !== null;
+        const assessable = leftAssessable && rightAssessable;
+        return {
+          dimension: leftDimension.dimension,
+          assessmentStatus: assessable
+            ? ("ASSESSED" as const)
+            : ("NOT_ASSESSABLE" as const),
+          leftAssessmentStatus: leftAssessable
+            ? ("ASSESSED" as const)
+            : ("NOT_ASSESSABLE" as const),
+          rightAssessmentStatus: rightAssessable
+            ? ("ASSESSED" as const)
+            : ("NOT_ASSESSABLE" as const),
+          leftValue: leftAssessable
+            ? leftDimension.effectiveValue
+            : null,
+          rightValue: rightAssessable
+            ? rightDimension.effectiveValue
+            : null,
+          difference: assessable
+            ? leftDimension.effectiveValue -
+              rightDimension.effectiveValue
+            : null,
+          leftEvidencePages: leftDimension.evidencePages,
+          rightEvidencePages: rightDimension.evidencePages,
+          leftReviewState: leftDimension.reviewState,
+          rightReviewState: rightDimension.reviewState,
+          leftScoreSource: leftDimension.source,
+          rightScoreSource: rightDimension.source,
+          leftAdjudicationEventId:
+            leftDimension.adjudicationEventId,
+          rightAdjudicationEventId:
+            rightDimension.adjudicationEventId,
+        };
+      },
+    );
+    const historicalSide = (
+      score: ArtifactScoreTableRecord,
+      dimension: DynamicComparisonView["dimensions"][number],
+      side: "left" | "right",
+    ) => {
+      const model = score.scorecard.dimensions.find(
+        (candidate) =>
+          candidate.dimension === dimension.dimension,
+      );
+      if (model === undefined) {
+        throw new Error(
+          "Comparison historical dimension is absent from the persisted Scorecard",
+        );
+      }
+      const adjudicationEventId =
+        side === "left"
+          ? dimension.leftAdjudicationEventId
+          : dimension.rightAdjudicationEventId;
+      const reviewState =
+        side === "left"
+          ? dimension.leftReviewState
+          : dimension.rightReviewState;
+      const event =
+        adjudicationEventId === null
+          ? undefined
+          : this.#adjudicationEventTable.find(
+              (candidate) =>
+                candidate.adjudicationEventId ===
+                adjudicationEventId,
+            );
+      if (
+        adjudicationEventId !== null &&
+        (event === undefined ||
+          event.scorecardId !==
+            score.scorecard.scorecardId ||
+          event.dimension !== dimension.dimension)
+      ) {
+        throw new Error(
+          "Comparison historical adjudication head does not match the persisted Scorecard dimension",
+        );
+      }
+      if (
+        reviewState === "human_reviewed" &&
+        event === undefined &&
+        !this.#reviewEventTable.some(
+          (review) =>
+            review.scorecardId ===
+              score.scorecard.scorecardId &&
+            review.reviewedDimensions.includes(
+              dimension.dimension,
+            ),
+        )
+      ) {
+        throw new Error(
+          "Comparison historical review state has no persisted Review Event",
+        );
+      }
+      return event === undefined
+        ? {
+            assessmentStatus: model.assessmentStatus,
+            value: model.value,
+            evidencePages: model.evidencePages,
+            reviewState,
+            scoreSource: "model_original" as const,
+            adjudicationEventId: null,
+          }
+        : {
+            assessmentStatus:
+              event.humanFinalAssessmentStatus,
+            value: event.humanFinalScore,
+            evidencePages: event.evidencePages,
+            reviewState,
+            scoreSource: "human_adjudication" as const,
+            adjudicationEventId:
+              event.adjudicationEventId,
+          };
+    };
+    const historicalDimensions = record.dimensions.map(
+      (dimension) => {
+        const left = historicalSide(
+          leftScore,
+          dimension,
+          "left",
+        );
+        const right = historicalSide(
+          rightScore,
+          dimension,
+          "right",
+        );
+        const leftAssessable =
+          left.assessmentStatus === "ASSESSED" &&
+          left.value !== null;
+        const rightAssessable =
+          right.assessmentStatus === "ASSESSED" &&
+          right.value !== null;
+        const assessable = leftAssessable && rightAssessable;
+        return {
+          dimension: dimension.dimension,
+          assessmentStatus: assessable
+            ? ("ASSESSED" as const)
+            : ("NOT_ASSESSABLE" as const),
+          leftAssessmentStatus: leftAssessable
+            ? ("ASSESSED" as const)
+            : ("NOT_ASSESSABLE" as const),
+          rightAssessmentStatus: rightAssessable
+            ? ("ASSESSED" as const)
+            : ("NOT_ASSESSABLE" as const),
+          leftValue: leftAssessable ? left.value : null,
+          rightValue: rightAssessable ? right.value : null,
+          difference: assessable
+            ? left.value! - right.value!
+            : null,
+          leftEvidencePages: left.evidencePages,
+          rightEvidencePages: right.evidencePages,
+          leftReviewState: left.reviewState,
+          rightReviewState: right.reviewState,
+          leftScoreSource: left.scoreSource,
+          rightScoreSource: right.scoreSource,
+          leftAdjudicationEventId:
+            left.adjudicationEventId,
+          rightAdjudicationEventId:
+            right.adjudicationEventId,
+        };
+      },
+    );
+    const expectedDimensions = requireCurrentHead
+      ? currentDimensions
+      : historicalDimensions;
+    if (
+      record.leftProduct !== leftRun.product ||
+      record.rightProduct !== rightRun.product ||
+      !isDeepStrictEqual(record.dimensions, expectedDimensions)
+    ) {
+      throw new Error(
+        "Comparison derived products, scores, evidence, or adjudication lineage do not match the persisted effective Scorecards",
+      );
+    }
   }
 
   #assertGapCardRelations(record: ProductGapCardRecord): void {
     const comparisons = this.#productGapCardTable.filter(
-      (candidate): candidate is ComparisonRecord =>
+      (candidate): candidate is DynamicComparisonView =>
         candidate.recordType === "comparison" &&
         candidate.comparisonId === record.comparisonId,
     );
@@ -887,7 +1154,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         "Gap Card lineage does not match exactly one persisted Comparison",
       );
     }
-    this.#assertComparisonRelations(comparison);
+    this.#assertComparisonRelations(comparison, false);
     const scoreFor = (
       scorecardId: string,
       side: "left" | "right",
@@ -924,12 +1191,33 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       const modelDimension = score.scorecard.dimensions.find(
         ({ dimension }) => dimension === record.dimension,
       );
-      const matchingAdjudications = this.#adjudicationEventTable
-        .filter(
-          (event) =>
-            event.scorecardId === score.scorecard.scorecardId &&
-            event.dimension === record.dimension,
-        );
+      const comparisonDimension = comparison.dimensions.find(
+        ({ dimension }) => dimension === record.dimension,
+      );
+      const expectedAdjudicationEventId =
+        side === "left"
+          ? comparisonDimension?.leftAdjudicationEventId
+          : comparisonDimension?.rightAdjudicationEventId;
+      const expectedAdjudication =
+        expectedAdjudicationEventId === null ||
+        expectedAdjudicationEventId === undefined
+          ? undefined
+          : this.#adjudicationEventTable.find(
+              ({ adjudicationEventId }) =>
+                adjudicationEventId ===
+                expectedAdjudicationEventId,
+            );
+      const expectedAssessment =
+        expectedAdjudication === undefined
+          ? modelDimension
+          : {
+              assessmentStatus:
+                expectedAdjudication.humanFinalAssessmentStatus,
+              value: expectedAdjudication.humanFinalScore,
+              evidencePages:
+                expectedAdjudication.evidencePages,
+              rationale: expectedAdjudication.reason,
+            };
       const linkedPages = evidence.links.map(
         ({ pageNumber }) => pageNumber,
       );
@@ -938,30 +1226,15 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       );
       const matchesPersistedAssessment =
         modelDimension !== undefined &&
-        [
-          {
-            assessmentStatus: modelDimension.assessmentStatus,
-            value: modelDimension.value,
-            evidencePages: modelDimension.evidencePages,
-            rationale: modelDimension.rationale,
-          },
-          ...matchingAdjudications.map((event) => ({
-            assessmentStatus:
-              event.humanFinalAssessmentStatus,
-            value: event.humanFinalScore,
-            evidencePages: event.evidencePages,
-            rationale: event.reason,
-          })),
-        ].some(
-          (assessment) =>
-            assessment.assessmentStatus === "ASSESSED" &&
-            assessment.value !== null &&
-            evidence.value === assessment.value &&
-            evidence.rationale === assessment.rationale &&
-            isDeepStrictEqual(
-              linkedPages,
-              assessment.evidencePages.slice(0, 3),
-            ),
+        comparisonDimension !== undefined &&
+        expectedAssessment !== undefined &&
+        expectedAssessment.assessmentStatus === "ASSESSED" &&
+        expectedAssessment.value !== null &&
+        evidence.value === expectedAssessment.value &&
+        evidence.rationale === expectedAssessment.rationale &&
+        isDeepStrictEqual(
+          linkedPages,
+          expectedAssessment.evidencePages.slice(0, 3),
         );
       if (
         run === undefined ||
@@ -1082,6 +1355,319 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     for (const capture of capturedArtifacts) {
       this.#assertArtifactProjectionRelations(capture);
+    }
+    if (
+      this.targetEnvironment === "test" &&
+      report.reportId !== "MOCK-report-volcano-v1" &&
+      !report.reportId.startsWith("comparison-report-")
+    ) {
+      return;
+    }
+    if (
+      new Set(report.comparisonIds).size !==
+        report.comparisonIds.length ||
+      new Set(report.gapCardIds).size !==
+        report.gapCardIds.length
+    ) {
+      throw new Error(
+        "Report derivation contains duplicate Comparison identities",
+      );
+    }
+    const comparisonIds = new Set(report.comparisonIds);
+    const gapCardIds = new Set(report.gapCardIds);
+    const comparisons = this.#productGapCardTable.filter(
+      (record): record is DynamicComparisonView =>
+        record.recordType === "comparison" &&
+        comparisonIds.has(record.comparisonId),
+    );
+    if (comparisons.length !== comparisonIds.size) {
+      throw new Error(
+        "Report derivation does not resolve every persisted Comparison identity",
+      );
+    }
+    const effectiveScores: EffectiveArtifactScoreTableRecord[] =
+      this.#artifactScoreTable
+        .filter(({ jobId }) => jobId === report.jobId)
+        .map((score) => ({
+          ...score,
+          effectiveScorecard:
+            effectiveScorecardFromPersistedRows(
+              score,
+              this.#adjudicationEventTable.filter(
+                ({ scorecardId }) =>
+                  scorecardId ===
+                  score.scorecard.scorecardId,
+              ),
+              this.#reviewEventTable.filter(
+                ({ scorecardId }) =>
+                  scorecardId ===
+                  score.scorecard.scorecardId,
+              ),
+            ),
+        }));
+    const placeholderEvidenceUrl = () =>
+      "<page-evidence-url>";
+    const expectedDraft =
+      comparisons.length > 0
+        ? (() => {
+            for (const comparison of comparisons) {
+              this.#assertComparisonRelations(
+                comparison,
+                false,
+              );
+            }
+            const gapCards = this.#productGapCardTable.filter(
+              (record): record is ProductGapCardRecord =>
+                record.recordType === "gap_card" &&
+                gapCardIds.has(record.gapCardId),
+            );
+            if (
+              gapCards.length !== gapCardIds.size ||
+              gapCards.some(
+                ({ comparisonId }) =>
+                  !comparisonIds.has(comparisonId),
+              )
+            ) {
+              throw new Error(
+                "Report derivation does not resolve every persisted Product Gap Card identity within its Comparison set",
+              );
+            }
+            for (const gapCard of gapCards) {
+              this.#assertGapCardRelations(gapCard);
+            }
+            const reportScores: EffectiveArtifactScoreTableRecord[] =
+              this.#artifactScoreTable
+                .filter(({ jobId }) => jobId === report.jobId)
+                .map((score) => {
+                  const dimensions =
+                    score.scorecard.dimensions.map((model) => {
+                      const states = comparisons.flatMap(
+                        (comparison) => {
+                          const side =
+                            comparison.leftScorecardId ===
+                            score.scorecard.scorecardId
+                              ? "left"
+                              : comparison.rightScorecardId ===
+                                  score.scorecard.scorecardId
+                                ? "right"
+                                : null;
+                          const dimension =
+                            comparison.dimensions.find(
+                              (candidate) =>
+                                candidate.dimension ===
+                                model.dimension,
+                            );
+                          if (
+                            side === null ||
+                            dimension === undefined
+                          ) {
+                            return [];
+                          }
+                          return [
+                            {
+                              effectiveAssessmentStatus:
+                                side === "left"
+                                  ? dimension.leftAssessmentStatus
+                                  : dimension.rightAssessmentStatus,
+                              effectiveValue:
+                                side === "left"
+                                  ? dimension.leftValue
+                                  : dimension.rightValue,
+                              evidencePages:
+                                side === "left"
+                                  ? dimension.leftEvidencePages
+                                  : dimension.rightEvidencePages,
+                              reviewState:
+                                side === "left"
+                                  ? dimension.leftReviewState
+                                  : dimension.rightReviewState,
+                              source:
+                                side === "left"
+                                  ? dimension.leftScoreSource
+                                  : dimension.rightScoreSource,
+                              adjudicationEventId:
+                                side === "left"
+                                  ? dimension.leftAdjudicationEventId
+                                  : dimension.rightAdjudicationEventId,
+                            },
+                          ];
+                        },
+                      );
+                      const state = states[0];
+                      if (
+                        states.some(
+                          (candidate) =>
+                            !isDeepStrictEqual(
+                              candidate,
+                              state,
+                            ),
+                        )
+                      ) {
+                        throw new Error(
+                          "Report Comparisons disagree on one effective Scorecard state",
+                        );
+                      }
+                      if (state === undefined) {
+                        return {
+                          dimension: model.dimension,
+                          modelOriginalAssessmentStatus:
+                            model.assessmentStatus,
+                          modelOriginalValue: model.value,
+                          effectiveAssessmentStatus:
+                            model.assessmentStatus,
+                          effectiveValue: model.value,
+                          evidencePages: model.evidencePages,
+                          rationale: model.rationale,
+                          reviewState:
+                            "model_not_reviewed" as const,
+                          source: "model_original" as const,
+                          adjudicationEventId: null,
+                        };
+                      }
+                      const adjudication =
+                        state.adjudicationEventId === null
+                          ? undefined
+                          : this.#adjudicationEventTable.find(
+                              ({ adjudicationEventId }) =>
+                                adjudicationEventId ===
+                                state.adjudicationEventId,
+                            );
+                      return {
+                        dimension: model.dimension,
+                        modelOriginalAssessmentStatus:
+                          model.assessmentStatus,
+                        modelOriginalValue: model.value,
+                        effectiveAssessmentStatus:
+                          state.effectiveAssessmentStatus,
+                        effectiveValue: state.effectiveValue,
+                        evidencePages: state.evidencePages,
+                        rationale:
+                          adjudication?.reason ??
+                          model.rationale,
+                        reviewState: state.reviewState,
+                        source: state.source,
+                        adjudicationEventId:
+                          state.adjudicationEventId,
+                      };
+                    });
+                  return {
+                    ...score,
+                    effectiveScorecard: {
+                      scorecardId:
+                        score.scorecard.scorecardId,
+                      artifactId: score.artifactId,
+                      runId: score.runId,
+                      jobId: score.jobId,
+                      originalScorecard: score.scorecard,
+                      dimensions,
+                      reviewState: dimensions.every(
+                        ({ reviewState }) =>
+                          reviewState === "human_reviewed",
+                      )
+                        ? "human_reviewed"
+                        : dimensions.some(
+                              ({ reviewState }) =>
+                                reviewState ===
+                                "human_reviewed",
+                            )
+                          ? "partially_human_reviewed"
+                          : "model_not_reviewed",
+                    },
+                  };
+                });
+            const vendorSummaries =
+              deriveCanonicalVendorSummaries(
+                placeholderEvidenceUrl,
+                comparisons,
+                vendorRuns,
+                reportScores,
+              );
+            return buildCanonicalComparisonReportDraft({
+              resolveEvidenceUrl: placeholderEvidenceUrl,
+              job,
+              vendorRuns,
+              capturedArtifacts,
+              comparisons,
+              gapCards,
+              vendorSummaries,
+              scores: reportScores,
+            });
+          })()
+        : (() => {
+            const results = vendorRuns.map((run) => {
+              if (run.product === null) {
+                throw new Error(
+                  "Report derivation requires a persisted vendor product",
+                );
+              }
+              const stateReason =
+                run.terminalReason ?? run.waitingReason;
+              if (stateReason === null) {
+                throw new Error(
+                  "Delivery Report derivation requires a persisted terminal or waiting reason",
+                );
+              }
+              const capture = capturedArtifacts.find(
+                ({ runId }) => runId === run.recordId,
+              );
+              const score = this.#artifactScoreTable.find(
+                ({ runId }) => runId === run.recordId,
+              );
+              return {
+                product: run.product,
+                runId: run.recordId,
+                status: run.status,
+                stateReason,
+                artifact: capture?.artifact ?? null,
+                scorecard: score?.scorecard ?? null,
+                judgeFailure: run.judgeFailure ?? null,
+                renderManifest:
+                  capture?.renderManifest ?? null,
+              };
+            });
+            return createMockReportDraft(
+              job.jobId,
+              job.status,
+              results,
+              {
+                provenance: job.provenance,
+                environmentOrigin: job.environmentOrigin,
+                createdAt: job.createdAt,
+              },
+            );
+          })();
+    const normalizedExpected = {
+      ...expectedDraft,
+      markdown: normalizeReportEvidenceUrls(
+        expectedDraft.markdown,
+      ),
+    };
+    const normalizedActual = {
+      ...stableReportReplayPayload(report),
+      markdown: normalizeReportEvidenceUrls(report.markdown),
+    };
+    if (
+      !isDeepStrictEqual(
+        normalizedActual,
+        normalizedExpected,
+      )
+    ) {
+      const mismatchedFields = Object.keys(
+        normalizedExpected,
+      ).filter(
+        (key) =>
+          !isDeepStrictEqual(
+            normalizedActual[
+              key as keyof typeof normalizedActual
+            ],
+            normalizedExpected[
+              key as keyof typeof normalizedExpected
+            ],
+          ),
+      );
+      throw new Error(
+        `Report content is not the canonical derivation of persisted delivery, Comparison, Gap Card, Score, and adjudication evidence: ${mismatchedFields.join(",")}`,
+      );
     }
   }
 
@@ -1533,10 +2119,20 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     this.#mutationVersion += 1;
   }
 
-  async appendComparison(record: ComparisonRecord): Promise<void> {
+  async appendComparison(record: DynamicComparisonView): Promise<void> {
+    await this.#appendComparisonRecord(record, true);
+  }
+
+  async #appendComparisonRecord(
+    record: DynamicComparisonView,
+    requireCurrentHead: boolean,
+  ): Promise<void> {
     this.#assertJobActive(record.jobId);
     this.#assertAllowed(record.environmentOrigin, "Comparison");
-    this.#assertComparisonRelations(record);
+    this.#assertComparisonRelations(
+      record,
+      requireCurrentHead,
+    );
     const existing = this.#productGapCardTable.find(
       (candidate) =>
         candidate.recordType === "comparison" &&
@@ -1551,7 +2147,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
       return;
     }
     const logicalExisting = this.#productGapCardTable.find(
-      (candidate): candidate is ComparisonRecord =>
+      (candidate): candidate is DynamicComparisonView =>
         candidate.recordType === "comparison" &&
         comparisonLogicalKey(candidate) ===
           comparisonLogicalKey(record),
@@ -2025,7 +2621,7 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
     }
     for (const record of snapshot.productGapCardTable) {
       if (record.recordType === "comparison") {
-        await validation.appendComparison(record);
+        await validation.#appendComparisonRecord(record, false);
       }
     }
     for (const record of snapshot.productGapCardTable) {
@@ -2435,7 +3031,10 @@ export class InMemoryFeishuProjection implements FeishuProjectionPort {
         }
         for (const record of materializedSnapshot.productGapCardTable) {
           if (record.recordType === "comparison") {
-            await working.appendComparison(record);
+            await working.#appendComparisonRecord(
+              record,
+              false,
+            );
           }
         }
         for (const record of materializedSnapshot.productGapCardTable) {

@@ -38,7 +38,7 @@ export const CODEX_CLI_JUDGE_ADAPTER_VERSION =
 export const FROZEN_CODEX_CLI_BINARY =
   "/Applications/ChatGPT.app/Contents/Resources/codex";
 export const FROZEN_CODEX_CLI_SHA256 =
-  "sha256:fb2b6b35789e59c885cf4d2aee12475809dd67b2c10df580e638122fd6b3438e" as const;
+  "sha256:d96ae1ca1ff6fc8587842fa04c92d3ee4d31651a811c2f89b65fcfd9c28473e2" as const;
 export const FROZEN_SANDBOX_EXEC_BINARY = "/usr/bin/sandbox-exec";
 export const FROZEN_SANDBOX_EXEC_SHA256 =
   "sha256:8290e4be7387a0df83cd1559e86afd880464f269450573d012795761fe298f16" as const;

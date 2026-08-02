@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -202,5 +202,115 @@ test("a browser profile owner fail-stops when its acquired lock holder crashes",
     }
     await ownerExit.catch(() => undefined);
     await rm(rootPath, { recursive: true, force: true });
+  }
+});
+
+test("replacing a browser profile lock root cannot create a second live lock domain", async () => {
+  const parentRoot = await mkdtemp(
+    join(tmpdir(), "t10-browser-lock-root-replacement-"),
+  );
+  const rootPath = join(parentRoot, "locks");
+  const displacedRoot = join(parentRoot, "locks-displaced");
+  await mkdir(rootPath, { mode: 0o700 });
+  const moduleUrl = pathToFileURL(
+    resolve("src/browser-profile-lock.ts"),
+  ).href;
+  const childProgram = `
+    import { FileSystemBrowserProfileLock } from ${JSON.stringify(moduleUrl)};
+    const lock = new FileSystemBrowserProfileLock({
+      lockId: "t10-root-replacement-owner",
+      rootPath: process.argv[1],
+      timeoutMs: 2_000,
+    });
+    await lock.runExclusive("shared-profile", async () => {
+      process.stdout.write("acquired\\n");
+      await new Promise((resolveRelease) => {
+        process.stdin.once("end", resolveRelease);
+        process.stdin.resume();
+      });
+    });
+  `;
+  const owner = spawn(
+    process.execPath,
+    [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "-e",
+      childProgram,
+      rootPath,
+    ],
+    { stdio: ["pipe", "pipe", "pipe"] },
+  );
+  let stdout = "";
+  let stderr = "";
+  owner.stdout.setEncoding("utf8");
+  owner.stdout.on("data", (value: string) => {
+    stdout += value;
+  });
+  owner.stderr.setEncoding("utf8");
+  owner.stderr.on("data", (value: string) => {
+    stderr += value;
+  });
+  const ownerExit = new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolveExit, rejectExit) => {
+    owner.once("error", rejectExit);
+    owner.once("close", (code, signal) => {
+      resolveExit({ code, signal });
+    });
+  });
+  try {
+    const acquiredDeadline = Date.now() + 3_000;
+    while (
+      !stdout.includes("acquired\n") &&
+      Date.now() < acquiredDeadline
+    ) {
+      await new Promise<void>((resolveWait) => {
+        setTimeout(resolveWait, 10);
+      });
+    }
+    assert.ok(
+      stdout.includes("acquired\n"),
+      `profile-lock owner did not acquire: ${stderr}`,
+    );
+
+    await rename(rootPath, displacedRoot);
+    await mkdir(rootPath, { mode: 0o700 });
+    let replacementEntered = false;
+    const replacement = new FileSystemBrowserProfileLock({
+      lockId: "t10-root-replacement-contender",
+      rootPath,
+      timeoutMs: 1_000,
+    });
+    await assert.rejects(
+      replacement.runExclusive("shared-profile", async () => {
+        replacementEntered = true;
+      }),
+      /root identity|root anchor|timed out/i,
+    );
+    assert.equal(replacementEntered, false);
+
+    owner.stdin.end();
+    assert.deepEqual(
+      await ownerExit,
+      { code: null, signal: "SIGKILL" },
+      stderr,
+    );
+    await assert.rejects(
+      replacement.runExclusive("shared-profile", async () => {
+        replacementEntered = true;
+      }),
+      /root identity/i,
+    );
+    assert.equal(replacementEntered, false);
+  } finally {
+    if (owner.exitCode === null && owner.signalCode === null) {
+      owner.kill("SIGKILL");
+    }
+    owner.stdin.destroy();
+    await ownerExit.catch(() => undefined);
+    await rm(parentRoot, { recursive: true, force: true });
   }
 });

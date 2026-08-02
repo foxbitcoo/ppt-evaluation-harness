@@ -1490,6 +1490,8 @@ test("Feishu projection commits one authorized canonical batch without rewriting
     jobId: unrelatedJobId,
     runIds: [unrelatedRunId],
     artifactIds: [],
+    comparisonIds: [],
+    gapCardIds: [],
     claimLevel: "case_sample",
     markdown: "unrelated",
     createdAt: "2026-01-01T00:00:00.000Z",

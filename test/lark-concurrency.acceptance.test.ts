@@ -1846,6 +1846,7 @@ test("the machine-root policy rejects inode drift after registration", async () 
   const lockRoot = await mkdtemp(
     "/Users/Shared/ppt-lark-root-drift-test-",
   );
+  const identityPath = `${lockRoot}.identity-v1`;
   try {
     const release =
       await acquireLarkSingleWorkstationMutexForTest({
@@ -1867,6 +1868,61 @@ test("the machine-root policy rejects inode drift after registration", async () 
     );
   } finally {
     await rm(lockRoot, { recursive: true, force: true });
+    await rm(identityPath, { force: true });
+    await rm(`${identityPath}.lock`, { force: true });
+  }
+});
+
+test("the machine-root identity remains bound across fresh processes after the root directory is replaced", async () => {
+  const lockRoot = await mkdtemp(
+    "/Users/Shared/ppt-lark-root-cross-process-test-",
+  );
+  const identityPath = `${lockRoot}.identity-v1`;
+  const registrationLockPath = `${identityPath}.lock`;
+  const moduleUrl = new URL(
+    "../src/lark-base-projection.ts",
+    import.meta.url,
+  ).href;
+  try {
+    const release =
+      await acquireLarkSingleWorkstationMutexForTest({
+        lockRoot,
+        scope: "register-cross-process-root",
+        enforceMachineRootPolicyForTest: true,
+      });
+    await release();
+    await rm(lockRoot, { recursive: true, force: true });
+    await mkdir(lockRoot, { mode: 0o700 });
+    const childScript = [
+      `import { acquireLarkSingleWorkstationMutexForTest } from ${JSON.stringify(moduleUrl)};`,
+      "try {",
+      `  const release = await acquireLarkSingleWorkstationMutexForTest({ lockRoot: ${JSON.stringify(lockRoot)}, scope: "fresh-process-after-replacement", enforceMachineRootPolicyForTest: true });`,
+      "  await release();",
+      '  process.stdout.write("unexpectedly-acquired");',
+      "} catch (error) {",
+      '  process.stdout.write(error instanceof Error ? error.message : String(error));',
+      "}",
+    ].join("\n");
+    const output = execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "tsx",
+        "--input-type=module",
+        "-e",
+        childScript,
+      ],
+      { encoding: "utf8" },
+    );
+
+    assert.match(
+      output,
+      /persisted.*identity|identity.*drifted/i,
+    );
+  } finally {
+    await rm(lockRoot, { recursive: true, force: true });
+    await rm(identityPath, { force: true });
+    await rm(registrationLockPath, { force: true });
   }
 });
 
@@ -3022,6 +3078,199 @@ test("a crashed, PID-reused, or safely aborted Base-backed claim is recovered by
   assert.equal(
     storedClaim.executionProcessStartIdentity,
     "process-start-d",
+  );
+});
+
+test("a legacy v2 production claim remains unknown and cannot be auto-upgraded into a runnable v3 lease", async (context) => {
+  const baseTokenVariable = "PPT_EVAL_LEGACY_CLAIM_BASE_TOKEN";
+  const reportTokenVariable = "PPT_EVAL_LEGACY_CLAIM_REPORT_TOKEN";
+  const previousBaseToken = process.env[baseTokenVariable];
+  const previousReportToken = process.env[reportTokenVariable];
+  process.env[baseTokenVariable] = "basLegacyClaimToken";
+  process.env[reportTokenVariable] = "DocLegacyClaim";
+  context.after(() => {
+    if (previousBaseToken === undefined) {
+      delete process.env[baseTokenVariable];
+    } else {
+      process.env[baseTokenVariable] = previousBaseToken;
+    }
+    if (previousReportToken === undefined) {
+      delete process.env[reportTokenVariable];
+    } else {
+      process.env[reportTokenVariable] = previousReportToken;
+    }
+  });
+  const clock = { clockId: "legacy-claim-clock", now: () => FIXED_TIME };
+  const claimHash =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" as const;
+  const legacyClaim = {
+    schemaVersion: "lark-production-job-claim-v2",
+    jobId: "job-legacy-claim",
+    runIds: ["run-legacy-claim"],
+    claimHash,
+    claimantId: "claimant-legacy",
+    claimAttemptId: "attempt-legacy",
+    authorizationDecisionId: "legacy-authorization",
+    claimedAt: FIXED_TIME,
+  };
+  let currentPayload = new TextDecoder().decode(
+    canonicalJsonBytes(legacyClaim),
+  );
+  let currentFields: Record<string, unknown> = {
+    稳定ID: "claim:job-legacy-claim",
+    载荷: currentPayload,
+    载荷哈希: sha256Bytes(new TextEncoder().encode(currentPayload)),
+  };
+  let reportRevision = 0;
+  let reportContent =
+    "# PPT 竞品自动评测｜报告槽位\n\n" +
+    "Owner schema: `lark-report-owner-v1`\n\n" +
+    "Owner Job: `job-legacy-claim`\n\n" +
+    "Owner claimant: `claimant-legacy`\n\n" +
+    "Owner claim attempt: `attempt-legacy`\n\n" +
+    `Owner claim hash: \`${claimHash}\`\n`;
+  let documentMutations = 0;
+  let baseMutations = 0;
+  const run = async (
+    args: readonly string[],
+    options?: {
+      readonly stdin?: string | Uint8Array;
+    },
+  ): Promise<unknown> => {
+    const service = args[0] ?? "";
+    const command = args[1] ?? "";
+    if (service === "docs" && command === "+fetch") {
+      return {
+        ok: true,
+        data: {
+          document: {
+            document_id: "DocLegacyClaim",
+            revision_id: reportRevision,
+            content: reportContent,
+            url: "https://example.feishu.cn/docx/DocLegacyClaim",
+          },
+        },
+      };
+    }
+    if (service === "docs" && command === "+update") {
+      documentMutations += 1;
+      reportRevision += 1;
+      reportContent =
+        typeof options?.stdin === "string"
+          ? options.stdin
+          : new TextDecoder().decode(options?.stdin);
+      return {
+        ok: true,
+        data: {
+          result: "success",
+          warnings: [],
+          document: {
+            revision_id: reportRevision,
+            url: "https://example.feishu.cn/docx/DocLegacyClaim",
+          },
+        },
+      };
+    }
+    if (service === "base" && command === "+record-search") {
+      return {
+        ok: true,
+        data: {
+          data: [[
+            currentFields["稳定ID"],
+            currentFields["载荷"],
+            currentFields["载荷哈希"],
+          ]],
+          field_id_list: ["fldStable", "fldPayload", "fldHash"],
+          fields: ["稳定ID", "载荷", "载荷哈希"],
+          has_more: false,
+          record_id_list: ["recLegacyClaim"],
+        },
+      };
+    }
+    if (service === "base" && command === "+record-upsert") {
+      baseMutations += 1;
+      currentFields = JSON.parse(
+        args[args.indexOf("--json") + 1]!,
+      ) as Record<string, unknown>;
+      currentPayload = currentFields["载荷"] as string;
+      return {
+        ok: true,
+        data: {
+          updated: true,
+          record: { record_id: "recLegacyClaim" },
+        },
+      };
+    }
+    throw new Error(`Unexpected command ${args.join(" ")}`);
+  };
+  const transport = createLarkCliTransportForMutationBoundaryTest({
+    configuration: {
+      ...LARK_TEST_CONFIGURATION,
+      baseTokenEnvironmentVariable: baseTokenVariable,
+      reportDocumentTokenEnvironmentVariable: reportTokenVariable,
+    },
+    egressAuthorization: allowLarkMutation,
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+    clock,
+    run,
+    claimLeaseForTest: {
+      leaseId: "lease-current",
+      processId: 2001,
+      processStartIdentity: "process-start-current",
+      async isActive(
+        leaseId,
+        processId,
+        processStartIdentity,
+      ) {
+        return (
+          leaseId === "lease-current" &&
+          processId === 2001 &&
+          processStartIdentity === "process-start-current"
+        );
+      },
+      async release() {},
+    },
+  });
+  const authorization = await requireEgressAuthorization(
+    allowLarkMutation,
+    {
+      requestId: "legacy-claim-parent",
+      jobId: legacyClaim.jobId,
+      runId: null,
+      attemptId: legacyClaim.claimAttemptId,
+      dataClassification: "public_or_synthetic",
+      sourceOwner: legacyClaim.claimantId,
+      processingPurpose: "operational_ledger_projection_storage",
+      targetKind: "storage",
+      targetService: "lark-base-operational-ledger",
+      targetAccount: "test-account",
+      targetRegion: "cn",
+      subprocessors: [],
+      contentFields: ["production_job_claim"],
+      payloadHash:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      requiredRedactions: [],
+    },
+    clock,
+  );
+
+  assert.equal(
+    await transport.claimProductionJob!({
+      jobId: legacyClaim.jobId,
+      runIds: legacyClaim.runIds,
+      claimHash,
+      claimantId: legacyClaim.claimantId,
+      claimAttemptId: legacyClaim.claimAttemptId,
+      authorization,
+      claimedAt: FIXED_TIME,
+    }),
+    "already_claimed",
+  );
+  assert.equal(documentMutations, 0);
+  assert.equal(baseMutations, 0);
+  assert.equal(
+    JSON.parse(currentPayload).schemaVersion,
+    "lark-production-job-claim-v2",
   );
 });
 

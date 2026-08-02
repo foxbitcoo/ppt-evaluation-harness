@@ -385,8 +385,25 @@ interface LarkMachineLockRootIdentity {
   readonly mode: number;
 }
 
+interface PersistedLarkMachineLockRootIdentity
+  extends LarkMachineLockRootIdentity {
+  readonly schemaVersion: "lark-machine-lock-root-identity-v1";
+}
+
 const registeredLarkMachineLockRoots =
   new Map<string, Promise<LarkMachineLockRootIdentity>>();
+
+function larkMachineLockRootIdentityPath(root: string): string {
+  return `${root}.identity-v1`;
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    error.code === code
+  );
+}
 
 async function readLarkMachineLockRootIdentity(
   root: string,
@@ -417,6 +434,87 @@ async function readLarkMachineLockRootIdentity(
   });
 }
 
+async function readPersistedLarkMachineLockRootIdentity(
+  root: string,
+): Promise<LarkMachineLockRootIdentity> {
+  const identityPath = larkMachineLockRootIdentityPath(root);
+  const [canonicalPath, metadata, content] = await Promise.all([
+    realpath(identityPath),
+    lstat(identityPath),
+    readFile(identityPath, "utf8"),
+  ]);
+  const ownerUserId = process.getuid?.();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    parsed = null;
+  }
+  const identity =
+    parsed !== null &&
+    typeof parsed === "object" &&
+    !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  const expectedKeys = [
+    "device",
+    "inode",
+    "mode",
+    "ownerUserId",
+    "path",
+    "schemaVersion",
+  ];
+  if (
+    canonicalPath !== identityPath ||
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1 ||
+    ownerUserId === undefined ||
+    metadata.uid !== ownerUserId ||
+    (metadata.mode & 0o777) !== 0o600 ||
+    metadata.size < 1 ||
+    metadata.size > 4_096 ||
+    canonicalPayload(parsed) !== content ||
+    !isDeepStrictEqual(Object.keys(identity).sort(), expectedKeys) ||
+    identity.schemaVersion !==
+      "lark-machine-lock-root-identity-v1" ||
+    identity.path !== root ||
+    !Number.isSafeInteger(identity.device) ||
+    !Number.isSafeInteger(identity.inode) ||
+    !Number.isSafeInteger(identity.ownerUserId) ||
+    identity.mode !== 0o700
+  ) {
+    throw new Error(
+      "Persisted Lark machine lock root identity is invalid",
+    );
+  }
+  return Object.freeze({
+    path: root,
+    device: identity.device as number,
+    inode: identity.inode as number,
+    ownerUserId: identity.ownerUserId as number,
+    mode: identity.mode as number,
+  });
+}
+
+async function persistLarkMachineLockRootIdentity(
+  identity: LarkMachineLockRootIdentity,
+): Promise<void> {
+  const identityPath = larkMachineLockRootIdentityPath(identity.path);
+  const persisted: PersistedLarkMachineLockRootIdentity = {
+    schemaVersion: "lark-machine-lock-root-identity-v1",
+    ...identity,
+  };
+  const handle = await open(identityPath, "wx", 0o600);
+  try {
+    await handle.writeFile(canonicalPayload(persisted), "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await chmod(identityPath, 0o600);
+}
+
 async function registerAndAssertLarkMachineLockRoot(
   configuredRoot: string,
   reviewedRoot: string,
@@ -429,15 +527,51 @@ async function registerAndAssertLarkMachineLockRoot(
   let registered = registeredLarkMachineLockRoots.get(reviewedRoot);
   if (registered === undefined) {
     registered = (async () => {
-      await mkdir(reviewedRoot, { recursive: true, mode: 0o700 });
-      return await readLarkMachineLockRootIdentity(reviewedRoot);
+      const identityPath =
+        larkMachineLockRootIdentityPath(reviewedRoot);
+      const releaseRegistrationLock =
+        await acquireMacOsAdvisoryLock(
+          `${identityPath}.lock`,
+          LARK_MUTEX_WAIT_TIMEOUT_MS,
+        );
+      try {
+        await mkdir(reviewedRoot, { recursive: true, mode: 0o700 });
+        const current =
+          await readLarkMachineLockRootIdentity(reviewedRoot);
+        let persisted: LarkMachineLockRootIdentity;
+        try {
+          persisted =
+            await readPersistedLarkMachineLockRootIdentity(
+              reviewedRoot,
+            );
+        } catch (error) {
+          if (!hasErrorCode(error, "ENOENT")) throw error;
+          await persistLarkMachineLockRootIdentity(current);
+          persisted =
+            await readPersistedLarkMachineLockRootIdentity(
+              reviewedRoot,
+            );
+        }
+        if (!isDeepStrictEqual(current, persisted)) {
+          throw new Error(
+            "Persisted Lark machine lock root identity drifted",
+          );
+        }
+        return current;
+      } finally {
+        await releaseRegistrationLock();
+      }
     })();
     registeredLarkMachineLockRoots.set(reviewedRoot, registered);
   }
   const expected = await registered;
   const assertCurrent = async (): Promise<void> => {
-    const current = await readLarkMachineLockRootIdentity(reviewedRoot);
+    const [current, persisted] = await Promise.all([
+      readLarkMachineLockRootIdentity(reviewedRoot),
+      readPersistedLarkMachineLockRootIdentity(reviewedRoot),
+    ]);
     if (
+      !isDeepStrictEqual(persisted, expected) ||
       current.device !== expected.device ||
       current.inode !== expected.inode ||
       current.ownerUserId !== expected.ownerUserId ||
@@ -1611,6 +1745,8 @@ function stableRecordId(
     "reportId",
     "comparisonId",
     "gapCardId",
+    "adjudicationEventId",
+    "reviewEventId",
     "workflowEventId",
     "reservationId",
     "linkEventId",
@@ -1942,7 +2078,8 @@ function serializedRow(value: Record<string, unknown>): {
 class LarkBaseProjection extends InMemoryFeishuProjection {
   readonly #transport: LarkBaseProjectionTransportPort;
   readonly #clock: ClockPort;
-  #committedRemoteBatchHash: `sha256:${string}` | null = null;
+  #baselineRemoteBatchHash: `sha256:${string}` | null = null;
+  #baselineRemoteBatchHashInitialized = false;
   #materializationTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -1977,17 +2114,24 @@ class LarkBaseProjection extends InMemoryFeishuProjection {
   }
 
   protected override async captureRemoteBatchHash(
-    _jobId: string,
+    jobId: string,
   ): Promise<`sha256:${string}` | null> {
-    return this.#committedRemoteBatchHash;
+    if (!this.#baselineRemoteBatchHashInitialized) {
+      this.#baselineRemoteBatchHash =
+        (await this.#transport.readCommitMarker({ jobId }))?.batchHash ??
+        null;
+      this.#baselineRemoteBatchHashInitialized = true;
+    }
+    return this.#baselineRemoteBatchHash;
   }
 
   protected override didCommitAuthorizedSnapshot(
     snapshot: FeishuProjectionSnapshot,
   ): void {
-    this.#committedRemoteBatchHash = sha256Bytes(
+    this.#baselineRemoteBatchHash = sha256Bytes(
       canonicalJsonBytes(snapshot),
     );
+    this.#baselineRemoteBatchHashInitialized = true;
   }
 
   protected override async materializeAuthorizedSnapshot(
@@ -4951,6 +5095,9 @@ class VerifiedLarkCliTransport
       readonly claimAttemptId: string;
     },
   ): {
+    readonly schemaVersion:
+      | "lark-production-job-claim-v2"
+      | "lark-production-job-claim-v3";
     readonly claimEpoch: number;
     readonly claimState:
       | "claimed"
@@ -5008,6 +5155,7 @@ class VerifiedLarkCliTransport
     }
     if (isV2) {
       return {
+        schemaVersion: "lark-production-job-claim-v2",
         claimEpoch: 0,
         claimState: "claimed",
         executionLeaseId: null,
@@ -5079,6 +5227,7 @@ class VerifiedLarkCliTransport
       );
     }
     return {
+      schemaVersion: "lark-production-job-claim-v3",
       claimEpoch: claim.claimEpoch as number,
       claimState,
       executionLeaseId: claim.executionLeaseId,
@@ -5165,6 +5314,14 @@ class VerifiedLarkCliTransport
       existing === null
         ? null
         : this.#assertProductionClaimRecord(existing, command);
+    if (
+      existingLease?.schemaVersion ===
+      "lark-production-job-claim-v2"
+    ) {
+      // v2 has no durable submission state or execution lease. Treat it as
+      // potentially submitted until an explicit recovery path resolves it.
+      return "already_claimed";
+    }
     const leaseIsActive = async (
       leaseId: string | null,
       processId: number | null,

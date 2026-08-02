@@ -1,7 +1,14 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+} from "node:fs/promises";
+import { dirname, resolve, sep } from "node:path";
 
 export interface BrowserProfileLockPort {
   readonly lockId: string;
@@ -10,6 +17,15 @@ export interface BrowserProfileLockPort {
     profileDigest: string,
     operation: () => Promise<T>,
   ): Promise<T>;
+}
+
+interface BrowserProfileLockRootIdentity {
+  readonly schemaVersion: "browser-profile-lock-root-identity-v1";
+  readonly canonicalPath: string;
+  readonly device: string;
+  readonly inode: string;
+  readonly ownerUserId: number;
+  readonly mode: number;
 }
 
 export class InProcessBrowserProfileLock
@@ -85,10 +101,193 @@ export class FileSystemBrowserProfileLock
     operation: () => Promise<T>,
   ): Promise<T> {
     await mkdir(this.#rootPath, { recursive: true, mode: 0o700 });
-    const digest = createHash("sha256")
-      .update(profileDigest)
+    const canonicalRootPath = await realpath(this.#rootPath);
+    const rootAnchorDigest = createHash("sha256")
+      .update(canonicalRootPath)
       .digest("hex");
-    const path = resolve(this.#rootPath, `${digest}.lock`);
+    const rootAnchorPath = resolve(
+      dirname(canonicalRootPath),
+      `.ppt-browser-profile-root-${rootAnchorDigest}.lock`,
+    );
+    const rootIdentityPath = resolve(
+      dirname(canonicalRootPath),
+      `.ppt-browser-profile-root-${rootAnchorDigest}.identity.json`,
+    );
+    await this.#prepareRootAnchor(rootAnchorPath);
+    return this.#runFileLockExclusive(
+      rootAnchorPath,
+      "browser profile root anchor",
+      async () => {
+        const rootIdentity =
+          await this.#bindRootIdentity(rootIdentityPath);
+        await this.#assertRootIdentity(rootIdentity);
+        const digest = createHash("sha256")
+          .update(profileDigest)
+          .digest("hex");
+        const path = resolve(this.#rootPath, `${digest}.lock`);
+        return this.#runFileLockExclusive(
+          path,
+          "WPS browser profile lock",
+          async () => {
+            await this.#assertRootIdentityOrFailStop(rootIdentity);
+            try {
+              return await operation();
+            } finally {
+              await this.#assertRootIdentityOrFailStop(rootIdentity);
+            }
+          },
+        );
+      },
+    );
+  }
+
+  async #observedRootIdentity():
+    Promise<BrowserProfileLockRootIdentity> {
+    const [metadata, canonicalPath] = await Promise.all([
+      lstat(this.#rootPath),
+      realpath(this.#rootPath),
+    ]);
+    const mode = metadata.mode & 0o777;
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      (process.getuid !== undefined &&
+        metadata.uid !== process.getuid()) ||
+      (mode & 0o077) !== 0
+    ) {
+      throw new Error(
+        "Browser profile lock root identity is unsafe",
+      );
+    }
+    return Object.freeze({
+      schemaVersion:
+        "browser-profile-lock-root-identity-v1" as const,
+      canonicalPath,
+      device: String(metadata.dev),
+      inode: String(metadata.ino),
+      ownerUserId: metadata.uid,
+      mode,
+    });
+  }
+
+  async #bindRootIdentity(
+    rootIdentityPath: string,
+  ): Promise<BrowserProfileLockRootIdentity> {
+    const observed = await this.#observedRootIdentity();
+    const canonicalPayload = `${JSON.stringify(observed)}\n`;
+    let existing: string;
+    try {
+      const identityMetadata = await lstat(rootIdentityPath);
+      if (
+        !identityMetadata.isFile() ||
+        identityMetadata.isSymbolicLink() ||
+        (process.getuid !== undefined &&
+          identityMetadata.uid !== process.getuid()) ||
+        (identityMetadata.mode & 0o077) !== 0
+      ) {
+        throw new Error(
+          "Browser profile lock root identity anchor is unsafe",
+        );
+      }
+      existing = await readFile(rootIdentityPath, "utf8");
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      ) {
+        throw error;
+      }
+      const handle = await open(rootIdentityPath, "wx", 0o600);
+      try {
+        await handle.writeFile(canonicalPayload, "utf8");
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await chmod(rootIdentityPath, 0o600);
+      return observed;
+    }
+    if (existing !== canonicalPayload) {
+      throw new Error(
+        "Browser profile lock root identity conflicts with its persistent anchor",
+      );
+    }
+    return observed;
+  }
+
+  async #prepareRootAnchor(rootAnchorPath: string): Promise<void> {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        const handle = await open(rootAnchorPath, "ax", 0o600);
+        await handle.close();
+        return;
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          !("code" in error) ||
+          error.code !== "EEXIST"
+        ) {
+          throw error;
+        }
+      }
+      try {
+        const metadata = await lstat(rootAnchorPath);
+        if (
+          !metadata.isFile() ||
+          metadata.isSymbolicLink() ||
+          (process.getuid !== undefined &&
+            metadata.uid !== process.getuid())
+        ) {
+          throw new Error(
+            "Browser profile root anchor is unsafe",
+          );
+        }
+        await chmod(rootAnchorPath, 0o600);
+        return;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          "code" in error &&
+          error.code === "ENOENT"
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error(
+      "Browser profile root anchor could not be stabilized",
+    );
+  }
+
+  async #assertRootIdentity(
+    expected: BrowserProfileLockRootIdentity,
+  ): Promise<void> {
+    const observed = await this.#observedRootIdentity();
+    if (JSON.stringify(observed) !== JSON.stringify(expected)) {
+      throw new Error(
+        "Browser profile lock root identity changed",
+      );
+    }
+  }
+
+  async #assertRootIdentityOrFailStop(
+    expected: BrowserProfileLockRootIdentity,
+  ): Promise<void> {
+    try {
+      await this.#assertRootIdentity(expected);
+    } catch {
+      process.kill(process.pid, "SIGKILL");
+      await new Promise<never>(() => {});
+    }
+  }
+
+  async #runFileLockExclusive<T>(
+    path: string,
+    label: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     const handshake = "ppt-browser-profile-lock-acquired-v1\n";
     const releaseCommand = "release\n";
     const holderScript = [
@@ -144,8 +343,8 @@ export class FileSystemBrowserProfileLock
           rejectAcquired(
             new Error(
               stderr.trim().length === 0
-                ? "Timed out acquiring WPS browser profile lock"
-                : `Timed out acquiring WPS browser profile lock: ${stderr.trim()}`,
+                ? `Timed out acquiring ${label}`
+                : `Timed out acquiring ${label}: ${stderr.trim()}`,
             ),
           );
         } else if (!releaseRequested) {

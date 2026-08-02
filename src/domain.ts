@@ -684,6 +684,13 @@ export interface FeishuReportDraft {
   readonly jobId: string;
   readonly runIds: readonly string[];
   readonly artifactIds: readonly string[];
+  /**
+   * Exact persisted Comparison inputs used to derive this report.
+   * Delivery-only reports use an empty list.
+   */
+  readonly comparisonIds: readonly string[];
+  /** Exact persisted Product Gap Cards rendered into this report. */
+  readonly gapCardIds: readonly string[];
   readonly claimLevel: "case_sample";
   readonly markdown: string;
   readonly createdAt: string;

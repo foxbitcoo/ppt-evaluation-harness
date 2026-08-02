@@ -35,6 +35,10 @@ import {
   type BrowserProfileLockPort,
 } from "./browser-profile-lock.ts";
 import {
+  isOwnerFailStopRequiredError,
+  type OwnerFailStopRequired,
+} from "./process-group-supervisor.ts";
+import {
   createComparisonReportService,
   planCompatibleComparisonPairs,
 } from "./comparison-report.ts";
@@ -275,72 +279,90 @@ export interface AttemptDeadlinePort {
   ): Promise<AttemptDeadlineResult<T>>;
 }
 
-const ADAPTER_SHUTDOWN_GRACE_MS = 10_000;
+const DEFAULT_ADAPTER_SHUTDOWN_GRACE_MS = 10_000;
 
-const WALL_CLOCK_ATTEMPT_DEADLINE: AttemptDeadlinePort = {
-  async run<T>(
-    operation: (signal: AbortSignal) => Promise<T>,
-    timeoutMs: number,
-  ): Promise<AttemptDeadlineResult<T>> {
-    const controller = new AbortController();
-    const startedAt = Date.now();
-    const operationSettlement = operation(controller.signal).then(
-      (value) => ({ kind: "value" as const, value }),
-      (error: unknown) => ({ kind: "error" as const, error }),
+export function createWallClockAttemptDeadline(
+  options: { readonly shutdownGraceMs?: number } = {},
+): AttemptDeadlinePort {
+  const shutdownGraceMs =
+    options.shutdownGraceMs ?? DEFAULT_ADAPTER_SHUTDOWN_GRACE_MS;
+  if (!Number.isFinite(shutdownGraceMs) || shutdownGraceMs <= 0) {
+    throw new Error(
+      "Adapter shutdown grace must be a positive finite duration",
     );
-    let timeoutHandle!: ReturnType<typeof setTimeout>;
-    const first = await Promise.race([
-      operationSettlement,
-      new Promise<{ readonly kind: "timeout" }>((resolveTimeout) => {
-        timeoutHandle = setTimeout(
-          () => resolveTimeout({ kind: "timeout" }),
-          timeoutMs,
-        );
-      }),
-    ]);
-    if (first.kind === "value") {
-      clearTimeout(timeoutHandle);
-      return {
-        timedOut: false,
-        value: first.value,
-        elapsedMs: Math.max(0, Date.now() - startedAt),
-      };
-    }
-    if (first.kind === "error") {
-      clearTimeout(timeoutHandle);
-      throw first.error;
-    }
-    controller.abort();
-    let graceHandle!: ReturnType<typeof setTimeout>;
-    const shutdown = await Promise.race([
-      operationSettlement,
-      new Promise<never>((_, rejectGrace) => {
-        graceHandle = setTimeout(
-          () =>
-            rejectGrace(
-              new Error(
-                "Adapter shutdown and durable reconciliation did not complete within the bounded grace period",
-              ),
-            ),
-          ADAPTER_SHUTDOWN_GRACE_MS,
-        );
-      }),
-    ]);
-    clearTimeout(graceHandle);
-    return shutdown.kind === "value"
-      ? {
-          timedOut: true,
-          elapsedMs: timeoutMs,
-          shutdownCompleted: true,
-          shutdownValue: shutdown.value,
-        }
-      : {
-          timedOut: true,
-          elapsedMs: timeoutMs,
-          shutdownCompleted: true,
+  }
+  return {
+    async run<T>(
+      operation: (signal: AbortSignal) => Promise<T>,
+      timeoutMs: number,
+    ): Promise<AttemptDeadlineResult<T>> {
+      const controller = new AbortController();
+      const startedAt = Date.now();
+      const operationSettlement = operation(controller.signal).then(
+        (value) => ({ kind: "value" as const, value }),
+        (error: unknown) => ({ kind: "error" as const, error }),
+      );
+      let timeoutHandle!: ReturnType<typeof setTimeout>;
+      const first = await Promise.race([
+        operationSettlement,
+        new Promise<{ readonly kind: "timeout" }>((resolveTimeout) => {
+          timeoutHandle = setTimeout(
+            () => resolveTimeout({ kind: "timeout" }),
+            timeoutMs,
+          );
+        }),
+      ]);
+      if (first.kind === "value") {
+        clearTimeout(timeoutHandle);
+        return {
+          timedOut: false,
+          value: first.value,
+          elapsedMs: Math.max(0, Date.now() - startedAt),
         };
-  },
-};
+      }
+      if (first.kind === "error") {
+        clearTimeout(timeoutHandle);
+        throw first.error;
+      }
+      controller.abort();
+      let graceHandle!: ReturnType<typeof setTimeout>;
+      const shutdown = await Promise.race([
+        operationSettlement,
+        new Promise<never>((_, rejectGrace) => {
+          graceHandle = setTimeout(
+            () =>
+              rejectGrace(
+                new AdapterShutdownIncompleteError(),
+              ),
+            shutdownGraceMs,
+          );
+        }),
+      ]);
+      clearTimeout(graceHandle);
+      if (
+        shutdown.kind === "error" &&
+        isOwnerFailStopRequiredError(shutdown.error)
+      ) {
+        throw shutdown.error;
+      }
+      return shutdown.kind === "value"
+        ? {
+            timedOut: true,
+            elapsedMs: timeoutMs,
+            shutdownCompleted: true,
+            shutdownValue: shutdown.value,
+          }
+        : {
+            timedOut: true,
+            elapsedMs: timeoutMs,
+            shutdownCompleted: true,
+          };
+    },
+  };
+}
+
+const WALL_CLOCK_ATTEMPT_DEADLINE =
+  createWallClockAttemptDeadline();
 
 export interface BakeoffHarness {
   startBakeoffJob(
@@ -798,6 +820,21 @@ class UnresolvedAttemptShutdownError extends Error {
       cause === undefined ? undefined : { cause },
     );
     this.name = "UnresolvedAttemptShutdownError";
+  }
+}
+
+export class AdapterShutdownIncompleteError
+  extends UnresolvedAttemptShutdownError
+  implements OwnerFailStopRequired
+{
+  readonly ownerFailStopRequired = true as const;
+
+  constructor() {
+    super(
+      "unknown-attempt",
+      "adapter shutdown and durable reconciliation did not complete within the bounded grace period; owner fail-stop is required",
+    );
+    this.name = "AdapterShutdownIncompleteError";
   }
 }
 
@@ -1838,6 +1875,7 @@ async function executeVendor(
       } catch (error) {
         if (
           error instanceof UnresolvedAttemptShutdownError ||
+          isOwnerFailStopRequiredError(error) ||
           (error instanceof Error &&
             /cannot finalize before adapter shutdown and durable reconciliation complete/i.test(
               error.message,
@@ -2778,12 +2816,23 @@ export function createBakeoffHarness({
                   }
                 : undefined,
             );
+          const failStopGuardedOperation = async () => {
+            try {
+              return await operation();
+            } catch (error) {
+              if (isOwnerFailStopRequiredError(error)) {
+                process.kill(process.pid, "SIGKILL");
+                return await new Promise<never>(() => {});
+              }
+              throw error;
+            }
+          };
           const evidence = selection.browserDriverEvidence;
           return evidence === null
-            ? operation()
+            ? failStopGuardedOperation()
             : browserProfileLock.runExclusive(
                 `${evidence.browserProfileDigest}:${selection.productPackage.egressDestination.targetAccount}`,
-                operation,
+                failStopGuardedOperation,
               );
         }),
       );

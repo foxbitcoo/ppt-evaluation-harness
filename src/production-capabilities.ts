@@ -245,7 +245,7 @@ const FROZEN_RENDERER_BUNDLE_ROOTS = Object.freeze([
   }),
 ] as const);
 const FROZEN_RENDERER_BUNDLE_SHA256 =
-  "sha256:4e5ea60511a1d9f11c5bbfd796f634c672d5ec6af23408a43e0a9b7a591d9fdc" as `sha256:${string}`;
+  "sha256:c6de9f24b9dd99ce8ddfb01497bf33e750379545b08fb393893f2b7ca8c30683" as `sha256:${string}`;
 const SYSTEM_VERSION_MANIFEST =
   "/System/Library/CoreServices/SystemVersion.plist";
 const SYSTEM_DYLD_EXECUTABLE = "/usr/lib/dyld";

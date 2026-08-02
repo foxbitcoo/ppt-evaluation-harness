@@ -16,6 +16,7 @@ import {
   createLarkReportCollectionMarkdown,
   createLarkBaseProjectionForTest,
   createComparisonReportService,
+  createScoreAdjudicationService,
   createLarkCliTransportForMutationBoundaryTest,
   createVerifiedLarkCliTransport,
   assertFrozenLarkCliInstallation,
@@ -330,6 +331,8 @@ async function authorizedSnapshot() {
     jobId: "job-volcano-v1",
     runIds: [],
     artifactIds: [],
+    comparisonIds: [],
+    gapCardIds: [],
     claimLevel: "case_sample",
     markdown: "# 火山 Case Sample",
     createdAt: FIXED_TIME,
@@ -490,6 +493,8 @@ test("a remote commit marker that advanced beyond the captured staging baseline 
     jobId: "job-volcano-v1",
     runIds: [],
     artifactIds: [],
+    comparisonIds: [],
+    gapCardIds: [],
     claimLevel: "case_sample",
     markdown: "# stale baseline",
     createdAt: FIXED_TIME,
@@ -518,6 +523,44 @@ test("a remote commit marker that advanced beyond the captured staging baseline 
     ),
     false,
   );
+});
+
+test("a fresh Lark projection process captures its baseline from the durable remote marker", async () => {
+  const {
+    projection: firstProcess,
+    snapshot,
+    authorization,
+    transport,
+  } = await authorizedSnapshot();
+  await firstProcess.commitAuthorizedSnapshot(snapshot, authorization);
+  const committed = firstProcess.snapshot();
+  const job = committed.runRecordTable.find(
+    (record) => record.recordType === "bakeoff_job",
+  );
+  const evaluationCase = committed.caseTable[0];
+  const primaryReport = committed.reports[0];
+  assert.ok(job);
+  assert.ok(evaluationCase);
+  assert.ok(primaryReport);
+  const restarted = createLarkBaseProjectionForTest({ transport });
+  await restarted.upsertCase(evaluationCase);
+  await restarted.appendRunRecord({
+    ...job,
+    reportUrl: null,
+    auxiliaryReportUrls: null,
+  });
+  await restarted.createReport(primaryReport);
+  await restarted.linkReportToBakeoffJob(
+    job.jobId,
+    primaryReport.url,
+  );
+  assert.deepEqual(restarted.snapshot(), committed);
+  const marker = transport.markers.get(job.jobId);
+  assert.ok(marker);
+
+  const baseline = await restarted.captureCommitBaseline(job.jobId);
+
+  assert.equal(baseline.remoteBatchHash, marker.batchHash);
 });
 
 test("Bakeoff outcome returns the post-commit Docx readback instead of the staged mock-feishu report URL", async () => {
@@ -666,6 +709,69 @@ test("Lark Base projection uploads the original plus every static derivative and
     transport.records.size,
     physicalRecordCount,
     "replay must not duplicate physical records",
+  );
+});
+
+test("Lark Base projection persists valid score adjudication and review event identities", async () => {
+  const source = new InMemoryFeishuProjection();
+  const bakeoff = await createBakeoffHarness({
+    feishu: source,
+    productAdapter: new MockWpsProductAdapter(),
+  }).startBakeoffJob({
+    environment: "test",
+    caseId: VOLCANO_CASE_ID,
+  });
+  const scorecard = bakeoff.scorecard;
+  assert.ok(scorecard);
+  const assessedDimensions = scorecard.dimensions.filter(
+    ({ assessmentStatus, value }) =>
+      assessmentStatus === "ASSESSED" && value !== null,
+  );
+  const adjudicated = assessedDimensions[0];
+  const reviewed = assessedDimensions[1] ?? assessedDimensions[0];
+  assert.ok(adjudicated);
+  assert.ok(reviewed);
+  const service = createScoreAdjudicationService({ feishu: source });
+  await service.adjudicateDimension({
+    adjudicationEventId: "adj-lark-valid-001",
+    scorecardId: scorecard.scorecardId,
+    dimension: adjudicated.dimension,
+    humanFinalScore: adjudicated.value === 5 ? 4 : 5,
+    actorId: "pm-lark-reviewer",
+    occurredAt: "2026-07-31T01:00:00.000Z",
+    reason: "Lark projection identity acceptance.",
+    priorAdjudicationEventId: null,
+  });
+  await service.recordReview({
+    reviewEventId: "review-lark-valid-001",
+    scorecardId: scorecard.scorecardId,
+    reviewedDimensions: [reviewed.dimension],
+    actorId: "pm-lark-reviewer",
+    occurredAt: "2026-07-31T01:01:00.000Z",
+    reason: "Lark projection identity acceptance.",
+    priorReviewEventId: null,
+  });
+  const snapshot = source.snapshot();
+  const transport = fakeTransport();
+  const projection = createLarkBaseProjectionForTest({ transport });
+  const jobId = snapshot.runRecordTable.find(
+    ({ recordType }) => recordType === "bakeoff_job",
+  )!.jobId;
+
+  await projection.commitAuthorizedSnapshot(
+    snapshot,
+    await authorizationForSnapshot(projection, snapshot, jobId),
+  );
+
+  assert.ok(
+    transport.records.has(
+      "tblGaps:adjudication:adj-lark-valid-001",
+    ),
+  );
+  assert.ok(
+    transport.records.has(
+      "tblGaps:review:review-lark-valid-001",
+    ),
   );
 });
 
@@ -913,7 +1019,7 @@ test("Lark projection rejects an unrecognized mock-feishu URI before any remote 
 
   await assert.rejects(
     projection.commitAuthorizedSnapshot(poisoned, authorization),
-    /mock-feishu URI/i,
+    /mock-feishu URI|canonical derivation/i,
   );
   assert.deepEqual(transport.mutationOperations, []);
   assert.equal(transport.records.size, 0);

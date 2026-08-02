@@ -1,12 +1,12 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  link,
   mkdir,
   open,
   readFile,
   rm,
 } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 
 import type {
   ImmutableBlobStorePort,
@@ -22,6 +22,28 @@ function safeKeyFilename(key: string): string {
   return `${createHash("sha256").update(key).digest("hex")}.blob`;
 }
 
+function sha256(content: Uint8Array): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function errorCode(error: unknown): string | null {
+  return error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : null;
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, "r");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 export class FileSystemImmutableBlobStore
   implements ImmutableBlobStorePort
 {
@@ -30,7 +52,6 @@ export class FileSystemImmutableBlobStore
   readonly recoveryReferencePrefix: string;
   readonly egressDestination: EgressDestinationMetadata;
   readonly #rootPath: string;
-  readonly #createdByAttempt = new Map<string, string>();
 
   constructor(input: {
     readonly storeId: string;
@@ -69,31 +90,64 @@ export class FileSystemImmutableBlobStore
   ): Promise<void> {
     const write = async () => {
       context.assertWriteAuthorized();
+      const contentSnapshot = Uint8Array.from(content);
+      if (sha256(contentSnapshot) !== context.contentHash) {
+        throw new Error(
+          `Immutable blob write context hash mismatch: ${this.storeId}/${key}`,
+        );
+      }
       await mkdir(this.#rootPath, { recursive: true, mode: 0o700 });
       const path = this.#pathFor(key);
+      const temporaryPath = resolve(
+        this.#rootPath,
+        `.${safeKeyFilename(key)}.${process.pid}.${randomUUID()}.tmp`,
+      );
+      let handle: Awaited<ReturnType<typeof open>> | null = null;
+      let temporaryCreated = false;
       try {
-        const handle = await open(path, "wx", 0o600);
+        handle = await open(temporaryPath, "wx", 0o600);
+        temporaryCreated = true;
         try {
-          await handle.writeFile(content);
+          await handle.writeFile(contentSnapshot);
           await handle.sync();
-          this.#createdByAttempt.set(key, context.writeAttemptId);
         } finally {
           await handle.close();
+          handle = null;
         }
-      } catch (error) {
-        if (
-          !(error instanceof Error) ||
-          !("code" in error) ||
-          error.code !== "EEXIST"
-        ) {
-          throw error;
+        context.assertWriteAuthorized();
+        try {
+          // link(2) publishes one complete, fsynced inode without replacing a
+          // winner from another process. Both names are in the same directory.
+          await link(temporaryPath, path);
+          await syncDirectory(this.#rootPath);
+        } catch (error) {
+          if (errorCode(error) !== "EEXIST") {
+            throw error;
+          }
+          const existing = await readFile(path);
+          if (
+            existing.byteLength !== contentSnapshot.byteLength ||
+            !existing.equals(contentSnapshot)
+          ) {
+            throw new Error(
+              `Immutable blob conflict: ${this.storeId}/${key}`,
+            );
+          }
+          // The competing publisher may have linked the inode immediately
+          // before crashing. Syncing here makes the accepted directory entry
+          // durable for this writer too.
+          await syncDirectory(this.#rootPath);
         }
-        const existing = await readFile(path);
-        if (!isDeepStrictEqual(existing, content)) {
-          throw new Error(`Immutable blob conflict: ${this.storeId}/${key}`);
+        context.assertWriteAuthorized();
+      } finally {
+        if (handle !== null) {
+          await handle.close();
+        }
+        if (temporaryCreated) {
+          await rm(temporaryPath, { force: true });
+          await syncDirectory(this.#rootPath);
         }
       }
-      context.assertWriteAuthorized();
     };
     if (this.tombstones === undefined) {
       await write();
@@ -118,17 +172,16 @@ export class FileSystemImmutableBlobStore
   }
 
   async releaseWriteClaim(
-    key: string,
-    writeAttemptId: string,
+    _key: string,
+    _writeAttemptId: string,
   ): Promise<void> {
-    if (this.#createdByAttempt.get(key) === writeAttemptId) {
-      this.#createdByAttempt.delete(key);
-      await this.delete(key);
-    }
+    // A published content-addressed object may already have been adopted by a
+    // successful capture in another process. Per-attempt ownership cannot be
+    // proven from process-local state, so rollback only releases the logical
+    // claim; retention/GC is the sole authority allowed to delete final blobs.
   }
 
   async delete(key: string): Promise<void> {
-    this.#createdByAttempt.delete(key);
     await rm(this.#pathFor(key), { force: true });
   }
 }
