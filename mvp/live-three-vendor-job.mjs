@@ -5,7 +5,10 @@ import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { LIVE_VOLCANO_QUERY_V1 } from "./live-wps-capture-only.mjs";
+import {
+  LIVE_VOLCANO_QUERY_V1,
+  WPS_CAPTURE_ONLY_PROTOCOL,
+} from "./live-wps-capture-only.mjs";
 
 export const LIVE_VENDOR_SEQUENCE = Object.freeze(["wps", "qwen", "doubao"]);
 
@@ -68,6 +71,26 @@ function orchestrationErrorRecord(vendor, localRunId) {
   });
 }
 
+async function runWithDeadline(runner, input, timeoutMs) {
+  const controller = new AbortController();
+  let timeout;
+  const deadline = new Promise((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      const error = new Error("Vendor Runner exceeded its deadline");
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      runner({ ...input, signal: controller.signal }),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function jobStatus(records) {
   const liveCompleted = records.filter(
     (record) =>
@@ -106,11 +129,20 @@ export async function runThreeVendorLiveJob({
   localJobId,
   outputDir,
   runners,
+  runnerTimeoutMs = WPS_CAPTURE_ONLY_PROTOCOL.timeoutMs,
   now = () => new Date().toISOString(),
 }) {
   assertLocalJobId(localJobId);
+  if (
+    !Number.isInteger(runnerTimeoutMs) ||
+    runnerTimeoutMs < 1 ||
+    runnerTimeoutMs > WPS_CAPTURE_ONLY_PROTOCOL.timeoutMs
+  ) {
+    throw new Error("Invalid per-vendor Runner timeout");
+  }
   const absoluteOutputDir = resolve(outputDir);
   await assertEmptyDirectory(absoluteOutputDir);
+  const runnersAreInjected = runners !== undefined;
   const selectedRunners = runners ?? (await defaultRunners());
   for (const vendor of LIVE_VENDOR_SEQUENCE) {
     if (typeof selectedRunners?.[vendor] !== "function") {
@@ -126,11 +158,22 @@ export async function runThreeVendorLiveJob({
     const localRunId = runId(localJobId, vendor);
     let record;
     try {
-      record = await selectedRunners[vendor]({
-        localJobId,
-        localRunId,
-        outputDir: vendorOutputDir,
-      });
+      record = await runWithDeadline(
+        selectedRunners[vendor],
+        {
+          localJobId,
+          localRunId,
+          outputDir: vendorOutputDir,
+        },
+        runnerTimeoutMs,
+      );
+      if (
+        runnersAreInjected &&
+        (record?.executionProvenance === "LIVE_PRODUCTION" ||
+          record?.liveProductionCaptured === true)
+      ) {
+        throw new Error("Injected Runner cannot mint LIVE_PRODUCTION evidence");
+      }
     } catch {
       record = orchestrationErrorRecord(vendor, localRunId);
       await writeFile(

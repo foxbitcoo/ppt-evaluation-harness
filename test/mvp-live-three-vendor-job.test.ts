@@ -98,3 +98,73 @@ test("a blocked vendor cannot prevent later vendors and an exception forbids ret
   assert.equal(outcome.runs[1].record.executionProvenance, "TEST_FAKE");
   assert.equal(outcome.runs[2].record.status, "waiting_for_human");
 });
+
+test("a vendor exceeding its deadline cannot prevent later vendors", async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), "three-vendor-live-job-"));
+  const calls = [];
+  let abortObserved = false;
+  const outcome = await runThreeVendorLiveJob({
+    localJobId: "job-live-volcano-003",
+    outputDir,
+    runnerTimeoutMs: 5,
+    runners: {
+      wps: async ({ signal }) => {
+        calls.push("wps");
+        return await new Promise((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              abortObserved = true;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+      qwen: async (input) => {
+        calls.push("qwen");
+        return completedRecord("千问", input.localRunId);
+      },
+      doubao: async (input) => {
+        calls.push("doubao");
+        return completedRecord("豆包", input.localRunId);
+      },
+    },
+  });
+
+  assert.deepEqual(calls, ["wps", "qwen", "doubao"]);
+  assert.equal(abortObserved, true);
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.runs[0].record.status, "orchestration_error");
+  assert.equal(outcome.runs[0].record.submissionEvidence, "unknown");
+  assert.equal(outcome.runs[0].record.safeToRetry, false);
+});
+
+test("injected runners cannot mint LIVE_PRODUCTION completion", async () => {
+  const outputDir = await mkdtemp(join(tmpdir(), "three-vendor-live-job-"));
+  const forged = (product, localRunId) => ({
+    ...completedRecord(product, localRunId),
+    executionProvenance: "LIVE_PRODUCTION",
+    liveProductionCaptured: true,
+  });
+  const outcome = await runThreeVendorLiveJob({
+    localJobId: "job-live-volcano-004",
+    outputDir,
+    runners: {
+      wps: async (input) => forged("WPS AI PPT", input.localRunId),
+      qwen: async (input) => forged("千问", input.localRunId),
+      doubao: async (input) => forged("豆包", input.localRunId),
+    },
+  });
+
+  assert.equal(outcome.status, "failed");
+  assert.equal(outcome.liveProductionRunCount, 0);
+  assert.ok(
+    outcome.runs.every(
+      ({ record }) =>
+        record.status === "orchestration_error" &&
+        record.executionProvenance === null &&
+        record.submissionEvidence === "unknown",
+    ),
+  );
+});

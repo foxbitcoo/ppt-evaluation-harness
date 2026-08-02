@@ -41,7 +41,8 @@ test("WPS capture-only request freezes the 16-page live case and one-attempt pro
     pageCount: 16,
   });
   assert.deepEqual(request.protocol, {
-    maxAttempts: 1,
+    maxSubmittedAttempts: 1,
+    maxPreSubmissionRetries: 1,
     timeoutMs: 1_800_000,
     resultSelectionPolicy: "first_downloaded_pptx",
     retryPolicy: "never_after_submitted_or_unknown",

@@ -31,7 +31,7 @@ node mvp/historical-m0.mjs \
 
 ## WPS 实时 capture-only 预检
 
-第一道实时题固定为 `volcano-query-v1`：16 页（封面、目录、12 页正文、总结、封底），专业模式、允许联网，并选择当前账号零新增付费范围内的最佳档位。协议只允许提交一次，最长等待 30 分钟。
+第一道实时题固定为 `volcano-query-v1`：16 页（封面、目录、12 页正文、总结、封底），专业模式、允许联网，并选择当前账号零新增付费范围内的最佳档位。协议只允许一次真实提交，最长等待 30 分钟；只有持久记录明确证明尚未提交时，才允许一次前置重试。
 
 ```bash
 node mvp/live-wps-capture-only.mjs \
@@ -52,4 +52,4 @@ node mvp/live-three-vendor-job.mjs \
   --output-dir tmp/live-three-vendor-volcano-001
 ```
 
-该 Job 固定按 WPS AI PPT、千问、豆包各执行一次。某个 Runner 阻塞或异常时，后续厂商仍继续；没有权威提交状态的异常统一记录为 `unknown` 且禁止自动重试。只有三条 Run 都携带真实 `LIVE_PRODUCTION` 产物时，Job 才返回完成状态。
+该 Job 固定按 WPS AI PPT、千问、豆包各执行一次，并在编排层对每家强制 30 分钟截止。某个 Runner 阻塞或异常时，后续厂商仍继续；没有权威提交状态的异常统一记录为 `unknown` 且禁止自动重试。测试注入的 Runner 不能生成 `LIVE_PRODUCTION` 完成状态。只有默认真实 Runner 的三条 Run 都携带真实 `LIVE_PRODUCTION` 产物时，Job 才返回完成状态。

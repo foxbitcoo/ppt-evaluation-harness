@@ -29,7 +29,8 @@ export const WPS_LIVE_PRODUCT_CONFIGURATION = Object.freeze({
 });
 
 export const WPS_CAPTURE_ONLY_PROTOCOL = Object.freeze({
-  maxAttempts: 1,
+  maxSubmittedAttempts: 1,
+  maxPreSubmissionRetries: 1,
   timeoutMs: 30 * 60 * 1_000,
   resultSelectionPolicy: "first_downloaded_pptx",
   retryPolicy: "never_after_submitted_or_unknown",

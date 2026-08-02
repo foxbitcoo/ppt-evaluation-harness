@@ -42,7 +42,8 @@ test("Doubao capture-only request reuses the 16-page live case and freezes its o
   });
   assert.equal(request.productConfiguration, DOUBAO_LIVE_PRODUCT_CONFIGURATION);
   assert.deepEqual(request.protocol, {
-    maxAttempts: 1,
+    maxSubmittedAttempts: 1,
+    maxPreSubmissionRetries: 1,
     timeoutMs: 1_800_000,
     resultSelectionPolicy: "first_downloaded_pptx",
     retryPolicy: "never_after_submitted_or_unknown",
