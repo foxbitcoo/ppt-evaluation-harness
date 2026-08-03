@@ -1,0 +1,385 @@
+import { presentBenchThumbnails } from "./presentbench-thumbnails.js";
+
+const PRESENTBENCH_SITE_REVISION = "34718357045b63ddce246f5e4c2543f5d96e63ea";
+const SLIDE_AUDIT_REVISION = "642d490b7c1d2e78a50a631bfd359433397f3ecf";
+const PRESENTBENCH_DEMO = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/slides.pdf`;
+const PRESENTBENCH_RESULT = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/gemini-3-flash-preview.yaml`;
+const SLIDE_AUDIT_ROOT = `https://raw.githubusercontent.com/zhuohaouw/SlideAudit/${SLIDE_AUDIT_REVISION}/data/images`;
+
+const cases = [
+  {
+    id: "PB-DECK-LOGIC",
+    source: "PresentBench",
+    sourceType: "任务/内容判项",
+    axis: "内容结构",
+    level: "整套 PPT",
+    objectLabel: "17 页学术报告 Deck",
+    title: "逻辑推进是否自然？",
+    atomic: "从背景与问题，推进到方法、实验、分析和结论；没有打断理解的跳跃或倒序。",
+    original: "Logical Flow",
+    originalRule: "Does the slide deck follow a logical progression from one point to the next?",
+    sourceLabel: "GOOD",
+    sourceReason: "原评审认为 1–2 页开场、3–4 页背景与问题、5–9 页方法、10–14 页实验与分析、15–17 页结论，形成 Why → What → How well → So what 的连续推进。",
+    evidencePages: [1, 3, 5, 10, 15, 17],
+    media: { type: "pdf", url: PRESENTBENCH_DEMO, thumbnailPage: 1 },
+    sourceUrl: PRESENTBENCH_RESULT,
+    agreement: "official judge result",
+  },
+  {
+    id: "PB-DECK-CONSISTENCY",
+    source: "PresentBench",
+    sourceType: "视觉判项",
+    axis: "视觉一致性",
+    level: "整套 PPT",
+    objectLabel: "17 页学术报告 Deck",
+    title: "跨页设计是否一致？",
+    atomic: "字体角色、配色语义、内容页框架与图形风格在整套中保持一致；允许封面做有目的的变化。",
+    original: "Design Consistency",
+    originalRule: "Is the design consistent across all slides (e.g., font, colors, layout)?",
+    sourceLabel: "GOOD",
+    sourceReason: "原评审指出标题与正文的字体角色、蓝/橙/灰配色语义、页眉分隔线和右下角标识在 17 页中持续一致；封面的差异被视为有目的。",
+    evidencePages: [1, 3, 6, 11, 15, 17],
+    media: { type: "pdf", url: PRESENTBENCH_DEMO, thumbnailPage: 6 },
+    sourceUrl: PRESENTBENCH_RESULT,
+    agreement: "official judge result",
+  },
+  {
+    id: "PB-DECK-CHART-ANNOTATION",
+    source: "PresentBench",
+    sourceType: "视觉判项",
+    axis: "信息表达",
+    level: "整套 PPT → 单页 → 图表",
+    objectLabel: "结果图表页",
+    title: "图表标注是否足以独立读懂？",
+    atomic: "图表的轴、类别与数值含义有明确标签，读者不必只靠上下文猜测。",
+    original: "Chart Annotation",
+    originalRule: "Are all charts clearly annotated with axis labels and meaningful descriptions?",
+    sourceLabel: "BAD",
+    sourceReason: "原评审认为第 11、12 页条形图缺少纵轴含义标题，第 14 页底部图缺少横轴 Overlap Ratio 标签且类别轴无标题；第 9 页则是合格对照。",
+    evidencePages: [11, 12, 14, 9],
+    media: { type: "pdf", url: PRESENTBENCH_DEMO, thumbnailPage: 11 },
+    sourceUrl: PRESENTBENCH_RESULT,
+    agreement: "official judge result",
+  },
+  {
+    id: "PB-CONTENT-LOSSLESS-LOGIC",
+    source: "PresentBench",
+    sourceType: "材料依赖判项",
+    axis: "事实与论证",
+    level: "整套 PPT → 单页 → 论证单元",
+    objectLabel: "方法论证页",
+    title: "“无损”结论是否给出足够数学逻辑？",
+    atomic: "不仅声称算法无损，还展示公式与输出分布保持一致之间的推导或关键桥梁。",
+    original: "Mathematical Lossless Logic",
+    originalRule: "Does the deck present the mathematical logic ensuring the algorithms are lossless?",
+    sourceLabel: "BAD",
+    sourceReason: "原评审认为第 6–8 页引用定理并给出部分公式，却没有展示这些公式为何保证目标分布不变的关键推导；这是需要论文材料才能判断的判项。",
+    evidencePages: [6, 7, 8],
+    media: { type: "pdf", url: PRESENTBENCH_DEMO, thumbnailPage: 6 },
+    sourceUrl: PRESENTBENCH_RESULT,
+    agreement: "official judge result",
+  },
+  {
+    id: "SA-0002-IMAGE-QUALITY",
+    source: "SlideAudit",
+    sourceType: "视觉缺陷标注",
+    axis: "图片质量",
+    level: "单页 → 图片元素",
+    objectLabel: "slide_0002",
+    title: "图片质量与编辑是否合格？",
+    atomic: "图片清晰、裁切完整、没有明显低分辨率或粗糙编辑痕迹。",
+    original: "Poor Image Quality/Editing",
+    originalRule: "Is poor image quality or editing present?",
+    sourceLabel: "GOOD",
+    sourceReason: "原数据对“Poor Image Quality/Editing”的 response 为 false，且 has_strong_agreement 为 true；即标注者一致认为该缺陷不存在。",
+    evidencePages: [1],
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0002.png` },
+    sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
+    agreement: "strong agreement",
+  },
+  {
+    id: "SA-0003-FONT-SIZE",
+    source: "SlideAudit",
+    sourceType: "视觉缺陷标注",
+    axis: "字体可读性",
+    level: "单页 → 文本框",
+    objectLabel: "slide_0003",
+    title: "正文/标签字号是否合适？",
+    atomic: "在常规演示观看距离下，所有承担信息的文本都有足够字号，不出现局部过小。",
+    original: "Improper Font Sizing",
+    originalRule: "Is improper font sizing present?",
+    sourceLabel: "BAD",
+    sourceReason: "原数据 response 为 true 且 strong agreement；证据框位于右下方较小的列表项。",
+    evidencePages: [1],
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0003.png`, boxes: [{ x: 61.3, y: 60.8, w: 21.5, h: 19.0 }] },
+    sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
+    agreement: "strong agreement",
+  },
+  {
+    id: "SA-0011-OCCLUSION",
+    source: "SlideAudit",
+    sourceType: "视觉缺陷标注",
+    axis: "版式可读性",
+    level: "单页 → 图文元素",
+    objectLabel: "slide_0011",
+    title: "内容之间是否没有互相遮挡？",
+    atomic: "图表、文本和装饰元素不遮住其他信息，不需要读者猜测被覆盖内容。",
+    original: "Occluded Content",
+    originalRule: "Is occluded content present?",
+    sourceLabel: "BAD",
+    sourceReason: "原数据 response 为 true 且 strong agreement；中心气泡图遮挡左侧项目文字。",
+    evidencePages: [1],
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0011.png`, boxes: [{ x: 5.5, y: 42.4, w: 70.3, h: 54.7 }] },
+    sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
+    agreement: "strong agreement",
+  },
+  {
+    id: "SA-0016-CUTOFF",
+    source: "SlideAudit",
+    sourceType: "视觉缺陷标注",
+    axis: "版式可读性",
+    level: "单页 → 文本框",
+    objectLabel: "slide_0016",
+    title: "内容是否完整落在可见画布内？",
+    atomic: "正文、图片和图表不越出页面边界，也不被页脚或其他容器裁掉。",
+    original: "Content Overflow/Cut-off",
+    originalRule: "Is content overflow or cut-off present?",
+    sourceLabel: "BAD",
+    sourceReason: "原数据 response 为 true 且 strong agreement；左下方大号正文越出画布并被蓝色页脚带遮挡。",
+    evidencePages: [1],
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0016.png`, boxes: [{ x: 5.7, y: 52.2, w: 47.7, h: 46.6 }] },
+    sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
+    agreement: "strong agreement",
+  },
+  {
+    id: "SA-0021-CONTRAST",
+    source: "SlideAudit",
+    sourceType: "视觉缺陷标注",
+    axis: "色彩可读性",
+    level: "单页 → 标题文本",
+    objectLabel: "slide_0021",
+    title: "文字与背景对比度是否足够？",
+    atomic: "重要文字在其实际背景上清晰可辨，不依赖放大或高亮才能阅读。",
+    original: "Insufficient Color Contrast for Readability",
+    originalRule: "Is insufficient color contrast for readability present?",
+    sourceLabel: "BAD",
+    sourceReason: "原数据 response 为 true 且 strong agreement；橙色标题落在复杂深色渐变背景上，局部对比不足。",
+    evidencePages: [1],
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0021.png`, boxes: [{ x: 28.0, y: 9.5, w: 64.0, h: 16.2 }] },
+    sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
+    agreement: "strong agreement",
+  },
+  {
+    id: "SA-0061-TEXT-VOLUME",
+    source: "SlideAudit",
+    sourceType: "视觉缺陷标注",
+    axis: "信息密度",
+    level: "单页 → 文本内容区",
+    objectLabel: "slide_0061",
+    title: "单页文字量是否不过度？",
+    atomic: "页面文字量适合演示阅读，观众无需在讲者推进时阅读大段密集正文。",
+    original: "Excessive Text Volume",
+    originalRule: "Is excessive text volume present?",
+    sourceLabel: "BAD",
+    sourceReason: "原数据 response 为 true 且 strong agreement；页面由四段长句主导，单位时间阅读负担高。",
+    evidencePages: [1],
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0061.png` },
+    sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
+    agreement: "strong agreement",
+  },
+];
+
+const variants = [
+  { id: "A", name: "逐题盲标", note: "一题一屏，先判断再揭晓" },
+  { id: "B", name: "证据对照", note: "样例和判项并排查看" },
+  { id: "C", name: "题库审计", note: "一次检查层级、标签与分歧" },
+];
+
+const state = {
+  index: 0,
+  answers: new Map(),
+  revealed: new Set(),
+  filter: "ALL",
+};
+
+const escapeHtml = (value) => String(value).replace(/[&<>"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[character]);
+
+function currentVariant() {
+  const value = new URLSearchParams(location.search).get("variant")?.toUpperCase();
+  return variants.some((item) => item.id === value) ? value : "A";
+}
+
+function filteredCases() {
+  return state.filter === "ALL" ? cases : cases.filter((item) => item.source === state.filter);
+}
+
+function metrics() {
+  const answered = [...state.answers.entries()];
+  const determinate = answered.filter(([, label]) => label !== "UNCERTAIN");
+  const diff = determinate.filter(([id, label]) => cases.find((item) => item.id === id)?.sourceLabel !== label);
+  return {
+    answered: answered.length,
+    determinate: determinate.length,
+    matched: determinate.length - diff.length,
+    uncertain: answered.filter(([, label]) => label === "UNCERTAIN").length,
+    diffRate: determinate.length ? Math.round((diff.length / determinate.length) * 100) : 0,
+  };
+}
+
+function media(caseItem, compact = false) {
+  if (caseItem.media.type === "pdf") {
+    const page = caseItem.media.thumbnailPage;
+    return `<div class="pdf-frame ${compact ? "compact" : ""}">
+      <div class="pdf-preview"><img src="${presentBenchThumbnails[page]}" alt="PresentBench 公开 demo 第 ${page} 页" /><span>当前预览 · 第 ${page} 页</span></div>
+      <div class="page-strip">${caseItem.evidencePages.map((number) => `<a href="${caseItem.media.url}#page=${number}" target="_blank" rel="noreferrer">证据页 ${number} ↗</a>`).join("")}</div>
+      <a class="source-link" href="${caseItem.media.url}" target="_blank" rel="noreferrer">新窗口打开完整 17 页 Deck ↗</a>
+    </div>`;
+  }
+
+  const boxes = (caseItem.media.boxes ?? []).map((box) => `<span class="evidence-box" style="left:${box.x}%;top:${box.y}%;width:${box.w}%;height:${box.h}%"></span>`).join("");
+  return `<div class="image-frame ${compact ? "compact" : ""}"><img src="${caseItem.media.url}" alt="${escapeHtml(caseItem.objectLabel)}" loading="lazy" />${boxes}</div>`;
+}
+
+function hierarchy(caseItem) {
+  return `<div class="hierarchy" aria-label="判项层级">
+    <span>${escapeHtml(caseItem.source)}</span><i>›</i><span>${escapeHtml(caseItem.axis)}</span><i>›</i><strong>${escapeHtml(caseItem.level)}</strong>
+  </div>`;
+}
+
+function answerControls(caseItem) {
+  const answer = state.answers.get(caseItem.id);
+  return `<div class="answer-block">
+    <div class="answer-heading"><span>你的判断</span><small>只判断这一条原子判项</small></div>
+    <div class="answer-buttons" role="group" aria-label="你的判断">
+      ${[["GOOD", "好"], ["BAD", "不好"], ["UNCERTAIN", "不确定"]].map(([value, label]) => `<button type="button" data-answer="${value}" class="${answer === value ? "selected" : ""}"><b>${label}</b><span>${value}</span></button>`).join("")}
+    </div>
+  </div>`;
+}
+
+function sourceResult(caseItem, always = false) {
+  const revealed = always || state.revealed.has(caseItem.id);
+  if (!revealed) {
+    return `<div class="source-result locked"><div><b>原始标注已隐藏</b><span>先提交你的判断，减少锚定影响</span></div><button type="button" data-reveal="${caseItem.id}">揭晓原标注</button></div>`;
+  }
+  const answer = state.answers.get(caseItem.id);
+  const comparison = !answer ? "尚未作答" : answer === "UNCERTAIN" ? "不确定：不计入 Good/Bad 差异率" : answer === caseItem.sourceLabel ? "与原标注一致" : "与原标注不同";
+  return `<div class="source-result revealed ${caseItem.sourceLabel.toLowerCase()}">
+    <div class="source-label"><span>来源标注</span><b>${caseItem.sourceLabel}</b><em>${escapeHtml(comparison)}</em></div>
+    <p>${escapeHtml(caseItem.sourceReason)}</p>
+    <details><summary>查看英文原判项与来源</summary><p><b>${escapeHtml(caseItem.original)}</b><br />${escapeHtml(caseItem.originalRule)}</p><a href="${caseItem.sourceUrl}" target="_blank" rel="noreferrer">打开官方来源 ↗</a></details>
+  </div>`;
+}
+
+function caseMeta(caseItem) {
+  return `<div class="case-meta"><span>${escapeHtml(caseItem.id)}</span><span>${escapeHtml(caseItem.sourceType)}</span><span>${escapeHtml(caseItem.agreement)}</span></div>`;
+}
+
+function renderVariantA() {
+  const pool = filteredCases();
+  if (state.index >= pool.length) state.index = 0;
+  const caseItem = pool[state.index];
+  return `<main class="focus-layout">
+    <section class="focus-media">${media(caseItem)}</section>
+    <section class="judge-panel">
+      ${caseMeta(caseItem)}
+      ${hierarchy(caseItem)}
+      <div class="criterion"><span>原子判项</span><h2>${escapeHtml(caseItem.title)}</h2><p>${escapeHtml(caseItem.atomic)}</p></div>
+      ${answerControls(caseItem)}
+      ${sourceResult(caseItem)}
+      <nav class="case-nav"><button type="button" data-prev>← 上一题</button><span>${state.index + 1} / ${pool.length}</span><button type="button" data-next>下一题 →</button></nav>
+    </section>
+  </main>`;
+}
+
+function renderVariantB() {
+  const pool = filteredCases();
+  if (state.index >= pool.length) state.index = 0;
+  const caseItem = pool[state.index];
+  return `<main class="compare-layout">
+    <aside class="case-rail">${pool.map((item, index) => `<button type="button" data-case-index="${index}" class="${index === state.index ? "active" : ""}"><span>${escapeHtml(item.axis)}</span><b>${escapeHtml(item.title)}</b><em>${state.answers.get(item.id) ?? "未标"}</em></button>`).join("")}</aside>
+    <section class="compare-media">${media(caseItem)}</section>
+    <section class="compare-panel">${caseMeta(caseItem)}${hierarchy(caseItem)}<h2>${escapeHtml(caseItem.title)}</h2><p class="atomic">${escapeHtml(caseItem.atomic)}</p>${answerControls(caseItem)}${sourceResult(caseItem)}</section>
+  </main>`;
+}
+
+function renderVariantC() {
+  const pool = filteredCases();
+  return `<main class="audit-layout">
+    <section class="audit-intro"><div><span>层级审计视图</span><h2>先看测试集质量，再决定 Rubric</h2></div><p>每行只对应一个原子判项。对象层级、证据范围和来源标签分开显示，避免把“整套适用性”和“单个元素缺陷”混为一项。</p></section>
+    <section class="audit-table">
+      <div class="audit-row audit-head"><span>样例</span><span>层级 / 原子判项</span><span>你的判断</span><span>原始结果</span></div>
+      ${pool.map((item, index) => `<article class="audit-row">
+        <div class="audit-thumb" data-open-case="${index}">${media(item, true)}<small>${escapeHtml(item.id)}</small></div>
+        <div>${hierarchy(item)}<h3>${escapeHtml(item.title)}</h3><p>${escapeHtml(item.atomic)}</p></div>
+        <div class="mini-answers">${[["GOOD", "好"], ["BAD", "不好"], ["UNCERTAIN", "不确定"]].map(([value, label]) => `<button type="button" data-row-answer="${item.id}:${value}" class="${state.answers.get(item.id) === value ? "selected" : ""}">${label}</button>`).join("")}</div>
+        <div>${sourceResult(item, true)}</div>
+      </article>`).join("")}
+    </section>
+  </main>`;
+}
+
+function header() {
+  const value = metrics();
+  return `<header class="topbar">
+    <div class="brand"><span>PROTOTYPE · 一次性 Rubric 验证工具</span><h1>Golden Set 中文盲标</h1></div>
+    <div class="filters"><button type="button" data-filter="ALL" class="${state.filter === "ALL" ? "active" : ""}">全部 10</button><button type="button" data-filter="PresentBench" class="${state.filter === "PresentBench" ? "active" : ""}">PresentBench 4</button><button type="button" data-filter="SlideAudit" class="${state.filter === "SlideAudit" ? "active" : ""}">SlideAudit 6</button></div>
+    <div class="metrics"><div><b>${value.answered}</b><span>已标</span></div><div><b>${value.uncertain}</b><span>不确定</span></div><div><b>${value.diffRate}%</b><span>Good/Bad 差异率</span></div></div>
+  </header>`;
+}
+
+function switcher(variant) {
+  return `<div class="variant-switcher" aria-label="原型版本切换"><button type="button" data-variant-prev aria-label="上一种布局">←</button>${variants.map((item) => `<button type="button" data-variant="${item.id}" class="${variant === item.id ? "active" : ""}"><b>${item.id} · ${item.name}</b><span>${item.note}</span></button>`).join("")}<button type="button" data-variant-next aria-label="下一种布局">→</button></div>`;
+}
+
+function render() {
+  const variant = currentVariant();
+  document.body.dataset.variant = variant;
+  const content = variant === "A" ? renderVariantA() : variant === "B" ? renderVariantB() : renderVariantC();
+  document.querySelector("#app").innerHTML = `${header()}<div class="scope-notice"><b>适用性边界</b><span>PresentBench 是文档→PPT，只校准 Deck/内容判项方法；SlideAudit 只校准单页静态视觉缺陷。它们都不是 Query→PPT 的完整 Golden Set。</span></div>${content}${switcher(variant)}`;
+  bind();
+}
+
+function setVariant(id) {
+  const url = new URL(location.href);
+  url.searchParams.set("variant", id);
+  history.replaceState({}, "", url);
+  render();
+}
+
+function stepVariant(direction) {
+  const index = variants.findIndex((item) => item.id === currentVariant());
+  setVariant(variants[(index + direction + variants.length) % variants.length].id);
+}
+
+function bind() {
+  document.querySelectorAll("[data-answer]").forEach((button) => button.addEventListener("click", () => {
+    const item = filteredCases()[state.index];
+    state.answers.set(item.id, button.dataset.answer);
+    render();
+  }));
+  document.querySelectorAll("[data-row-answer]").forEach((button) => button.addEventListener("click", () => {
+    const [id, answer] = button.dataset.rowAnswer.split(":");
+    state.answers.set(id, answer);
+    render();
+  }));
+  document.querySelectorAll("[data-reveal]").forEach((button) => button.addEventListener("click", () => {
+    state.revealed.add(button.dataset.reveal);
+    render();
+  }));
+  document.querySelector("[data-prev]")?.addEventListener("click", () => { const count = filteredCases().length; state.index = (state.index - 1 + count) % count; render(); });
+  document.querySelector("[data-next]")?.addEventListener("click", () => { state.index = (state.index + 1) % filteredCases().length; render(); });
+  document.querySelectorAll("[data-case-index]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.caseIndex); render(); }));
+  document.querySelectorAll("[data-open-case]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.openCase); setVariant("A"); }));
+  document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.filter; state.index = 0; render(); }));
+  document.querySelectorAll("[data-variant]").forEach((button) => button.addEventListener("click", () => setVariant(button.dataset.variant)));
+  document.querySelector("[data-variant-prev]")?.addEventListener("click", () => stepVariant(-1));
+  document.querySelector("[data-variant-next]")?.addEventListener("click", () => stepVariant(1));
+}
+
+window.addEventListener("keydown", (event) => {
+  if (["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+  if (event.key === "ArrowLeft") stepVariant(-1);
+  if (event.key === "ArrowRight") stepVariant(1);
+});
+
+render();
