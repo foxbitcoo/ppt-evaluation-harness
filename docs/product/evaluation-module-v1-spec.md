@@ -303,14 +303,14 @@ v1 不输出未经校准的 family total 或 universal total。需要权重时�
 
 ### 6.3 与框架 v0.8 的冲突（必须决策）
 
-`docs/product/evaluation-framework.md` v0.8 的 Query Task Success 表实际列出 5 个维度：Intent and constraint compliance、Correctness and substance、Coverage and selection、Narrative organization、Audience and occasion fit；再加 3 个 Presentation Design 维度，共 8 个。Issue #1/T03 和当前代码则将前三类内容合并成 3 个 Task Success 维度，共 6 个。
+`docs/product/evaluation-framework.md` v0.8 的 Query Task Success 表实际列出 5 个维度：Intent and constraint compliance、Correctness and substance、Coverage and selection、Narrative organization、Audience and occasion fit；Presentation Design 还列出 4 个维度：Visual aesthetics and finish、Layout, hierarchy, and readability、Visual-expression choice and execution、Deck consistency and professional delivery，共 9 个 1–5 维度。Delivery Quality 另行报告，不计入这个维度数。Issue #1/T03 和当前代码则将前者合并成 3 个 Task Success 维度、后者合并成 3 个 Design 维度，共 6 个。
 
 这是一个产品语义选择，不是简单重命名：
 
 - 选择六维：与现有 Issue、Mock、OpenAI schema 和报告保持兼容；但“第 9 页事实写反”和“内容深度不足”仍共享一个事实/内容维度，行动指向较粗。
-- 选择八维：能分别指出火山 PPT “第 2 页目录漏掉压力机制”（coverage）和“第 12 页虽然覆盖机制但解释空泛”（correctness/substance），但会改变当前六维 schema、比较 fingerprint、报告列和测试契约。
+- 选择九维：能分别指出火山 PPT “第 2 页目录漏掉压力机制”（coverage）和“第 12 页虽然覆盖机制但解释空泛”（correctness/substance），也能单独识别“第 1、10、16 页风格不一致”（deck consistency）；但会改变当前六维 schema、比较 fingerprint、报告列和测试契约。
 
-本草案默认先按六维做 v1 compatibility adapter，不在本阶段修改现有六维代码；正式实现前需要产品经理确认是否将 v0.8 的 8 维作为目标 Rubric。该问题标记为 `NEEDS_USER_DECISION`。
+本草案默认先按六维做 v1 compatibility adapter，不在本阶段修改现有六维代码；正式实现前需要产品经理确认是否将 v0.8 的 9 维作为目标 Rubric。该问题标记为 `NEEDS_USER_DECISION`。
 
 ## 7. Mock / 真实 Judge 边界
 
@@ -355,7 +355,7 @@ v1 不输出未经校准的 family total 或 universal total。需要权重时�
 
 - 交付本文件、独立分支和 PR 到 `codex/bridge-v2-integration`。
 - 不改厂商 Runner、飞书发布和最终报告编排。
-- 记录六维/八维、置信度表示、底线映射的 `NEEDS_USER_DECISION`。
+- 记录六维/九维、置信度表示、底线映射的 `NEEDS_USER_DECISION`。
 
 ### Stage 2 — 建立评测 seam（小改动）
 
@@ -384,9 +384,9 @@ v1 不输出未经校准的 family total 或 universal total。需要权重时�
 
 ## 10. 待产品经理确认（NEEDS_USER_DECISION）
 
-### 决策 A：Query v1 使用六维还是八维？
+### 决策 A：Query v1 使用六维还是九维？
 
-真实例子：对《火山为什么会喷发》，第 2 页目录遗漏“气体与压力”，第 12 页虽然提到气体但解释空泛。六维会把这两类问题较粗地归入现有内容维度；八维可以分别落到 Coverage 和 Correctness/Substance。六维兼容现有 Issue/代码，八维更贴近框架 v0.8 的诊断粒度。请确认 v1 是否先保留六维兼容，还是直接以八维为目标。
+真实例子：对《火山为什么会喷发》，第 2 页目录遗漏“气体与压力”，第 12 页虽然提到气体但解释空泛，第 10 页又与其他页面风格不一致。六维会把这些问题较粗地归入现有内容/视觉维度；九维可以分别落到 Coverage、Correctness/Substance 和 Deck consistency。六维兼容现有 Issue/代码，九维更贴近框架 v0.8 的诊断粒度。请确认 v1 是否先保留六维兼容，还是直接以九维为目标。
 
 ### 决策 B：confidence 的产品展示形式
 
