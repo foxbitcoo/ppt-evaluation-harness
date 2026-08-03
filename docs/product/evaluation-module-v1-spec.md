@@ -4,6 +4,8 @@
 审计基线：`codex/bridge-v2-integration` / `c141b45`  预期交付分支：`codex/ppt-evaluation-v1-spec`  
 日期：2026-08-03
 
+修订说明：用户讨论后，当前方向转入 [v1.1 三态标注、分层评测与 Query 题库](evaluation-module-v1.1-tristate-hierarchy.md)。本文件保留原始六维/九维审计与兼容契约；三态、`Deck → Slide → Evidence` 层级和题库人设模型以 v1.1 Proposal 为准，待产品确认后再实现。
+
 本文件只覆盖静态 PPT 的 Evaluation Module：美学质量、内容/结构质量、底线问题、事实准确性、评分证据、Rubric 版本化、Mock/真实 Judge 边界和评测测试。厂商网页采集、PPT 生成、Trace/耗时、飞书发布、产品差距卡和最终报告编排仍由主任务负责。
 
 ## 1. 结论摘要
