@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import sharp from "sharp";
@@ -1029,7 +1030,7 @@ test("the production CLI rejects the offline fixture checkpoint before reading r
         "unused-attempt",
         OFFLINE_RECOVERY_FIXTURE_CHECKPOINT_ID,
       ],
-      { cwd: new URL("..", import.meta.url).pathname },
+      { cwd: fileURLToPath(new URL("..", import.meta.url)) },
     ),
     /requires the real-provider trusted checkpoint/i,
   );

@@ -6,6 +6,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -733,7 +734,7 @@ test("a runtime source-revision override cannot replace the embedded verified bu
         "await import('./src/build-identity.ts')",
       ],
       {
-        cwd: new URL("..", import.meta.url).pathname,
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
         env: {
           ...process.env,
           PPT_EVALUATION_BUILD_SPEC_COMMIT_SHA:

@@ -1,0 +1,789 @@
+import { createHash } from "node:crypto";
+
+export type Sha256Hash = `sha256:${string}`;
+
+export const MAX_QUERY_GENERATION_PAGE_COUNT = 20 as const;
+
+export const EVALUATION_FIELD_CATALOG = Object.freeze({
+  evaluationLabels: Object.freeze([
+    Object.freeze({ value: "GOOD", labelZh: "好" }),
+    Object.freeze({ value: "BAD", labelZh: "不好" }),
+    Object.freeze({ value: "UNCERTAIN", labelZh: "不确定" }),
+  ]),
+  confidenceLevels: Object.freeze([
+    Object.freeze({ value: "LOW", labelZh: "低" }),
+    Object.freeze({ value: "MEDIUM", labelZh: "中" }),
+    Object.freeze({ value: "HIGH", labelZh: "高" }),
+  ]),
+  uncertainReasons: Object.freeze([
+    Object.freeze({ value: "INSUFFICIENT_EVIDENCE", labelZh: "证据不足" }),
+    Object.freeze({ value: "RUBRIC_UNDEFINED", labelZh: "评分标准未定义" }),
+    Object.freeze({ value: "ANNOTATOR_DISAGREEMENT", labelZh: "标注结果分歧" }),
+    Object.freeze({ value: "REFERENCE_MISSING", labelZh: "缺少事实参考材料" }),
+  ]),
+  targetScopes: Object.freeze([
+    Object.freeze({ value: "DECK", labelZh: "整份 PPT" }),
+    Object.freeze({ value: "SLIDE", labelZh: "单页" }),
+    Object.freeze({ value: "ELEMENT", labelZh: "页面元素" }),
+  ]),
+  elementKinds: Object.freeze([
+    Object.freeze({ value: "IMAGE", labelZh: "图片" }),
+    Object.freeze({ value: "TEXT_BOX", labelZh: "文本框" }),
+  ]),
+  personaRoles: Object.freeze([
+    Object.freeze({ value: "student", labelZh: "学生" }),
+    Object.freeze({ value: "teacher", labelZh: "老师" }),
+    Object.freeze({ value: "employee", labelZh: "打工人" }),
+    Object.freeze({ value: "manager", labelZh: "管理者" }),
+    Object.freeze({ value: "boss", labelZh: "老板" }),
+    Object.freeze({ value: "other", labelZh: "其他" }),
+  ]),
+  experienceLevels: Object.freeze([
+    Object.freeze({ value: "beginner", labelZh: "初级" }),
+    Object.freeze({ value: "intermediate", labelZh: "中级" }),
+    Object.freeze({ value: "expert", labelZh: "专家" }),
+    Object.freeze({ value: "unknown", labelZh: "未知" }),
+  ]),
+  priorKnowledgeLevels: Object.freeze([
+    Object.freeze({ value: "low", labelZh: "低" }),
+    Object.freeze({ value: "medium", labelZh: "中" }),
+    Object.freeze({ value: "high", labelZh: "高" }),
+    Object.freeze({ value: "unknown", labelZh: "未知" }),
+  ]),
+  readingModes: Object.freeze([
+    Object.freeze({ value: "self_reading", labelZh: "自主阅读" }),
+    Object.freeze({ value: "presented_with_speaker", labelZh: "演讲者讲解" }),
+  ]),
+  occasions: Object.freeze([
+    Object.freeze({ value: "classroom", labelZh: "课堂" }),
+    Object.freeze({ value: "homework", labelZh: "作业" }),
+    Object.freeze({ value: "meeting", labelZh: "会议" }),
+    Object.freeze({ value: "sales", labelZh: "销售" }),
+    Object.freeze({ value: "self_learning", labelZh: "自学" }),
+    Object.freeze({ value: "other", labelZh: "其他" }),
+  ]),
+  intentConfirmationStatuses: Object.freeze([
+    Object.freeze({ value: "not_requested", labelZh: "未请求确认" }),
+    Object.freeze({ value: "pending", labelZh: "待确认" }),
+    Object.freeze({ value: "confirmed", labelZh: "已确认" }),
+  ]),
+  intentConfirmationSources: Object.freeze([
+    Object.freeze({ value: "case_author", labelZh: "题库作者" }),
+    Object.freeze({ value: "vendor_confirmation", labelZh: "厂商意图确认" }),
+  ]),
+  evaluationModes: Object.freeze([
+    Object.freeze({ value: "mock", labelZh: "测试" }),
+    Object.freeze({ value: "production", labelZh: "正式评测" }),
+  ]),
+  deliveryStatuses: Object.freeze([
+    Object.freeze({ value: "PASS", labelZh: "通过" }),
+    Object.freeze({ value: "FAIL", labelZh: "失败" }),
+    Object.freeze({ value: "UNKNOWN", labelZh: "未知" }),
+  ]),
+  batchKinds: Object.freeze([
+    Object.freeze({ value: "initial", labelZh: "初始批次" }),
+    Object.freeze({ value: "repeat", labelZh: "重复批次" }),
+    Object.freeze({ value: "calibration", labelZh: "校准批次" }),
+    Object.freeze({ value: "adjudication", labelZh: "裁决批次" }),
+  ]),
+  targetPageCount: Object.freeze({
+    labelZh: "目标页数",
+    minimum: 1,
+    maximum: MAX_QUERY_GENERATION_PAGE_COUNT,
+  }),
+} as const);
+
+export type EvaluationLabel =
+  (typeof EVALUATION_FIELD_CATALOG.evaluationLabels)[number]["value"];
+export type EvaluationTargetScope =
+  (typeof EVALUATION_FIELD_CATALOG.targetScopes)[number]["value"];
+export type EvaluationElementKind =
+  (typeof EVALUATION_FIELD_CATALOG.elementKinds)[number]["value"];
+export type PersonaRole =
+  (typeof EVALUATION_FIELD_CATALOG.personaRoles)[number]["value"];
+export type PersonaExperienceLevel =
+  (typeof EVALUATION_FIELD_CATALOG.experienceLevels)[number]["value"];
+export type AudiencePriorKnowledge =
+  (typeof EVALUATION_FIELD_CATALOG.priorKnowledgeLevels)[number]["value"];
+export type PresentationReadingMode =
+  (typeof EVALUATION_FIELD_CATALOG.readingModes)[number]["value"];
+export type QueryOccasion =
+  (typeof EVALUATION_FIELD_CATALOG.occasions)[number]["value"];
+export type IntentConfirmationStatus =
+  (typeof EVALUATION_FIELD_CATALOG.intentConfirmationStatuses)[number]["value"];
+export type IntentConfirmationSource =
+  (typeof EVALUATION_FIELD_CATALOG.intentConfirmationSources)[number]["value"];
+export type EvaluationMode =
+  (typeof EVALUATION_FIELD_CATALOG.evaluationModes)[number]["value"];
+export type EvaluationDeliveryStatus =
+  (typeof EVALUATION_FIELD_CATALOG.deliveryStatuses)[number]["value"];
+export type EvaluationBatchKind =
+  (typeof EVALUATION_FIELD_CATALOG.batchKinds)[number]["value"];
+export type EvaluationConfidence =
+  (typeof EVALUATION_FIELD_CATALOG.confidenceLevels)[number]["value"];
+export type UncertainReason =
+  (typeof EVALUATION_FIELD_CATALOG.uncertainReasons)[number]["value"];
+
+export interface PersonaProfile {
+  readonly personaId: string;
+  readonly role: PersonaRole;
+  readonly roleDescription: string;
+  readonly experienceLevel: PersonaExperienceLevel;
+  readonly domain: string;
+  readonly subject?: string;
+  readonly grade?: string;
+  readonly organizationContext?: string;
+  readonly locale?: string;
+}
+
+export interface PresentationAudience {
+  readonly audienceId: string;
+  readonly description: string;
+  readonly ageOrGrade?: string;
+  readonly priorKnowledge: AudiencePriorKnowledge;
+  readonly readingMode: PresentationReadingMode;
+}
+
+export interface QueryUseContext {
+  readonly occasion: QueryOccasion;
+  readonly objective: string;
+  readonly expectedDurationMinutes?: number;
+  readonly targetPageCount: number;
+}
+
+export interface IntentConfirmationSnapshot {
+  readonly status: IntentConfirmationStatus;
+  readonly source: IntentConfirmationSource;
+  readonly confirmedAt: string | null;
+}
+
+export interface QuestionBankEvaluatorContext {
+  readonly explicitRequirements: readonly string[];
+  readonly requiredFacts: readonly string[];
+  readonly expectedCoverage: readonly string[];
+  readonly referencePackMode: "automatic" | "force" | "off";
+  readonly rubricRef: {
+    readonly rubricId: string;
+    readonly rubricVersion: string;
+    readonly rubricHash: Sha256Hash;
+  };
+}
+
+export interface QuestionBankCase {
+  readonly schemaVersion: "question-bank-case-v1";
+  readonly caseId: string;
+  readonly caseVersion: number;
+  readonly track: "query_generation";
+  readonly requesterPersona: PersonaProfile;
+  readonly presentationAudience: PresentationAudience;
+  readonly useContext: QueryUseContext;
+  readonly query: string;
+  readonly intentConfirmation: IntentConfirmationSnapshot;
+  readonly vendorPrompt: {
+    readonly templateVersion: string;
+    readonly text: string;
+    readonly contentHash: Sha256Hash;
+  };
+  readonly evaluatorContext: QuestionBankEvaluatorContext;
+  readonly caseHash: Sha256Hash;
+  readonly author: string;
+  readonly reviewState: "draft" | "reviewed" | "retired";
+}
+
+export interface CreateQuestionBankCaseInput {
+  readonly caseId: string;
+  readonly caseVersion: number;
+  readonly requesterPersona: PersonaProfile;
+  readonly presentationAudience: PresentationAudience;
+  readonly useContext: QueryUseContext;
+  readonly query: string;
+  readonly intentConfirmation: IntentConfirmationSnapshot;
+  readonly evaluatorContext: QuestionBankEvaluatorContext;
+  readonly vendorPromptTemplateVersion: string;
+  readonly author: string;
+  readonly reviewState: "draft" | "reviewed" | "retired";
+}
+
+export interface ElementBounds {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+interface EvaluationElementBase {
+  readonly elementId: string;
+  readonly bounds: ElementBounds;
+}
+
+export interface ImageEvaluationElement extends EvaluationElementBase {
+  readonly kind: "IMAGE";
+  readonly renderedCropHash: Sha256Hash;
+  readonly renderedCrop: Uint8Array;
+  readonly altText?: string;
+  readonly sourceAssetHash?: Sha256Hash;
+}
+
+export interface TextBoxEvaluationElement extends EvaluationElementBase {
+  readonly kind: "TEXT_BOX";
+  readonly text: string;
+  readonly textHash: Sha256Hash;
+  readonly styleSnapshot: {
+    readonly fontFamilies: readonly string[];
+    readonly minimumFontSizePt: number | null;
+    readonly maximumFontSizePt: number | null;
+    readonly overflowDetected: boolean | null;
+  };
+}
+
+export type EvaluationElement =
+  | ImageEvaluationElement
+  | TextBoxEvaluationElement;
+
+export interface EvaluationStaticPage {
+  readonly pageNumber: number;
+  readonly pageRole?: string;
+  readonly imageHash: Sha256Hash;
+  readonly image: Uint8Array;
+  readonly extractedText: string;
+  readonly extractedTextHash: Sha256Hash;
+  readonly elements: readonly EvaluationElement[];
+}
+
+export interface EvaluationJudgeConfiguration {
+  readonly kind: "mock" | "real";
+  readonly provider: string;
+  readonly model: string;
+}
+
+export interface EvaluationInput {
+  readonly schemaVersion: "evaluation-input-v1";
+  readonly evaluationId: string;
+  readonly mode: EvaluationMode;
+  readonly questionBankCase: QuestionBankCase;
+  readonly artifact: {
+    readonly artifactId: string;
+    readonly runId: string;
+    readonly jobId: string;
+    readonly provenance:
+      | "MOCK"
+      | "PRODUCTION"
+      | "LIVE_PRODUCTION"
+      | "PRODUCTION_REPLAY";
+    readonly contentHash: Sha256Hash;
+    readonly pageCount: number;
+  };
+  readonly staticSurface: {
+    readonly surfaceClass: "canonical" | "native_frozen";
+    readonly renderManifestHash: Sha256Hash;
+    readonly fidelity: "verified" | "degraded" | "unknown";
+    readonly pages: readonly EvaluationStaticPage[];
+  };
+  readonly referencePack: {
+    readonly contentHash: Sha256Hash | null;
+    readonly facts: readonly {
+      readonly factId: string;
+      readonly statement: string;
+      readonly sourceIds: readonly string[];
+    }[];
+  };
+  readonly evaluationProtocol: {
+    readonly rubricHash: Sha256Hash;
+    readonly aggregationSpecHash: Sha256Hash;
+    readonly batchProtocolHash: Sha256Hash;
+    readonly promptVersion: string;
+    readonly judge: EvaluationJudgeConfiguration;
+  };
+}
+
+export type CreateEvaluationInputInput = Omit<
+  EvaluationInput,
+  "schemaVersion"
+>;
+
+export interface EvaluationTargetNode {
+  readonly targetId: string;
+  readonly parentTargetId: string | null;
+  readonly scope: EvaluationTargetScope;
+  readonly pageNumber: number | null;
+  readonly elementId: string | null;
+  readonly elementKind: EvaluationElementKind | null;
+}
+
+export interface EvaluationJudgment {
+  readonly judgmentId: string;
+  readonly batchId: string;
+  readonly batchKind: EvaluationBatchKind;
+  readonly annotator: {
+    readonly kind: "mock" | "real";
+    readonly provider: string;
+    readonly model: string;
+  };
+  readonly assessmentStatus: "ASSESSED" | "NOT_ASSESSABLE";
+  readonly label: EvaluationLabel;
+  readonly uncertainReason: UncertainReason | null;
+  readonly confidence: EvaluationConfidence;
+  readonly evidenceIds: readonly string[];
+  readonly rationale: string;
+  readonly rubricHash: Sha256Hash;
+  readonly createdAt: string;
+}
+
+export interface ConsensusSummary {
+  readonly goodCount: number;
+  readonly badCount: number;
+  readonly uncertainCount: number;
+  readonly totalCount: number;
+  readonly resolvedLabel: EvaluationLabel;
+  readonly rule: "unanimous" | "unresolved";
+  readonly agreementStatus: "consistent" | "mixed";
+  readonly uncertainReasons: readonly UncertainReason[];
+}
+
+export interface EvaluationAssessmentInput {
+  readonly assessmentId: string;
+  readonly targetId: string;
+  readonly dimensionId: string;
+  readonly judgments: readonly EvaluationJudgment[];
+}
+
+export interface EvaluationAssessment extends EvaluationAssessmentInput {
+  readonly consensus: ConsensusSummary;
+}
+
+export interface EvaluationEvidence {
+  readonly evidenceId: string;
+  readonly targetId: string;
+  readonly pageNumber: number | null;
+  readonly elementId: string | null;
+  readonly kind:
+    | "VISUAL_OBSERVATION"
+    | "EXTRACTED_TEXT"
+    | "REFERENCE_FACT"
+    | "ELEMENT_CROP"
+    | "GATE";
+  readonly observation: string;
+  readonly sourceFactId?: string;
+  readonly sourceIds?: readonly string[];
+}
+
+export interface EvaluationDimensionProfile {
+  readonly dimensionId: string;
+  readonly scope: EvaluationTargetScope;
+  readonly goodCount: number;
+  readonly badCount: number;
+  readonly uncertainCount: number;
+  readonly assessableCount: number;
+}
+
+export interface EvaluationComparisonVector {
+  readonly mappingVersion: string;
+  readonly axes: readonly {
+    readonly axisId: string;
+    readonly sourceDimensionIds: readonly string[];
+    readonly goodRate: number | null;
+    readonly badRate: number | null;
+    readonly uncertainRate: number | null;
+    readonly denominator: number;
+    readonly comparable: boolean;
+  }[];
+  readonly rankStatus:
+    | "NOT_CALIBRATED"
+    | "NOT_COMPARABLE"
+    | "EXPLORATORY_ONLY"
+    | "ELIGIBLE";
+}
+
+export interface EvaluationResultLineage {
+  readonly caseHash: Sha256Hash;
+  readonly artifactHash: Sha256Hash;
+  readonly renderManifestHash: Sha256Hash;
+  readonly rubricHash: Sha256Hash;
+  readonly aggregationSpecHash: Sha256Hash;
+  readonly batchProtocolHash: Sha256Hash;
+  readonly promptVersion: string;
+  readonly judge: {
+    readonly kind: "mock" | "real";
+    readonly provider: string;
+    readonly model: string;
+    readonly responseIds: readonly string[];
+  };
+}
+
+export interface CreateEvaluationResultInput {
+  readonly evaluationId: string;
+  readonly caseId: string;
+  readonly artifactId: string;
+  readonly mode: EvaluationMode;
+  readonly deliveryStatus: EvaluationDeliveryStatus;
+  readonly tree: {
+    readonly rootTargetId: string;
+    readonly targets: readonly EvaluationTargetNode[];
+    readonly assessments: readonly EvaluationAssessmentInput[];
+    readonly evidence: readonly EvaluationEvidence[];
+  };
+  readonly comparisonVector: EvaluationComparisonVector;
+  readonly lineage: EvaluationResultLineage;
+}
+
+export interface EvaluationResult {
+  readonly schemaVersion: "evaluation-result-v1";
+  readonly evaluationId: string;
+  readonly caseId: string;
+  readonly artifactId: string;
+  readonly mode: EvaluationMode;
+  readonly deliveryStatus: EvaluationDeliveryStatus;
+  readonly tree: {
+    readonly rootTargetId: string;
+    readonly targets: readonly EvaluationTargetNode[];
+    readonly assessments: readonly EvaluationAssessment[];
+    readonly evidence: readonly EvaluationEvidence[];
+  };
+  readonly dimensionProfile: readonly EvaluationDimensionProfile[];
+  readonly comparisonVector: EvaluationComparisonVector;
+  readonly lineage: EvaluationResultLineage;
+}
+
+function sha256(value: string): Sha256Hash {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function assertNonEmpty(value: string, fieldName: string): void {
+  if (value.trim().length === 0) {
+    throw new Error(`${fieldName} 不能为空`);
+  }
+}
+
+function assertTargetPageCount(targetPageCount: number): void {
+  if (
+    !Number.isInteger(targetPageCount) ||
+    targetPageCount < 1 ||
+    targetPageCount > MAX_QUERY_GENERATION_PAGE_COUNT
+  ) {
+    throw new Error("目标页数必须是 1到20 之间的整数");
+  }
+}
+
+export function buildQueryGenerationVendorPrompt(input: {
+  readonly requesterPersona: PersonaProfile;
+  readonly presentationAudience: PresentationAudience;
+  readonly useContext: QueryUseContext;
+  readonly query: string;
+}): string {
+  return [
+    `请求者人设：${input.requesterPersona.roleDescription}`,
+    `PPT 受众：${input.presentationAudience.description}`,
+    `使用场景：${input.useContext.occasion}`,
+    `制作目标：${input.useContext.objective}`,
+    `页数要求：${input.useContext.targetPageCount} 页以内`,
+    `用户 Query：${input.query}`,
+  ].join("\n");
+}
+
+export function createQuestionBankCase(
+  input: CreateQuestionBankCaseInput,
+): QuestionBankCase {
+  assertNonEmpty(input.caseId, "caseId");
+  assertNonEmpty(input.requesterPersona.roleDescription, "requesterPersona.roleDescription");
+  assertNonEmpty(input.presentationAudience.description, "presentationAudience.description");
+  assertNonEmpty(input.query, "query");
+  assertTargetPageCount(input.useContext.targetPageCount);
+
+  if (!Number.isInteger(input.caseVersion) || input.caseVersion < 1) {
+    throw new Error("caseVersion 必须是正整数");
+  }
+  if (
+    input.intentConfirmation.status === "confirmed" &&
+    input.intentConfirmation.confirmedAt === null
+  ) {
+    throw new Error("已确认的意图必须记录 confirmedAt");
+  }
+
+  const promptText = buildQueryGenerationVendorPrompt(input);
+  const withoutCaseHash = {
+    schemaVersion: "question-bank-case-v1" as const,
+    caseId: input.caseId,
+    caseVersion: input.caseVersion,
+    track: "query_generation" as const,
+    requesterPersona: input.requesterPersona,
+    presentationAudience: input.presentationAudience,
+    useContext: input.useContext,
+    query: input.query,
+    intentConfirmation: input.intentConfirmation,
+    vendorPrompt: {
+      templateVersion: input.vendorPromptTemplateVersion,
+      text: promptText,
+      contentHash: sha256(promptText),
+    },
+    evaluatorContext: input.evaluatorContext,
+    author: input.author,
+    reviewState: input.reviewState,
+  };
+
+  return Object.freeze({
+    ...withoutCaseHash,
+    caseHash: sha256(JSON.stringify(withoutCaseHash)),
+  });
+}
+
+function assertElementBounds(bounds: ElementBounds, elementId: string): void {
+  if (
+    ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite) ||
+    bounds.width <= 0 ||
+    bounds.height <= 0
+  ) {
+    throw new Error(`元素 ${elementId} 的 bounds 无效`);
+  }
+}
+
+export function createEvaluationInput(
+  input: CreateEvaluationInputInput,
+): EvaluationInput {
+  assertNonEmpty(input.evaluationId, "evaluationId");
+  if (input.mode === "production" && input.evaluationProtocol.judge.kind !== "real") {
+    throw new Error("生产评测必须使用真实 Judge");
+  }
+  assertNonEmpty(input.evaluationProtocol.promptVersion, "promptVersion");
+  assertNonEmpty(input.evaluationProtocol.judge.provider, "judge.provider");
+  assertNonEmpty(input.evaluationProtocol.judge.model, "judge.model");
+
+  const pages = input.staticSurface.pages;
+  if (input.artifact.pageCount !== pages.length) {
+    throw new Error("产物页数与静态渲染页数不一致");
+  }
+  if (!Number.isInteger(input.artifact.pageCount) || input.artifact.pageCount < 1) {
+    throw new Error("产物页数必须是正整数");
+  }
+
+  const elementIds = new Set<string>();
+  pages.forEach((page, pageIndex) => {
+    const expectedPageNumber = pageIndex + 1;
+    if (page.pageNumber !== expectedPageNumber) {
+      throw new Error(`静态渲染页码必须连续，期望 ${expectedPageNumber}`);
+    }
+    page.elements.forEach((element) => {
+      assertNonEmpty(element.elementId, "elementId");
+      if (elementIds.has(element.elementId)) {
+        throw new Error(`元素 ID 重复：${element.elementId}`);
+      }
+      elementIds.add(element.elementId);
+      assertElementBounds(element.bounds, element.elementId);
+      if (element.kind === "TEXT_BOX") {
+        assertNonEmpty(element.text, `文本框 ${element.elementId}.text`);
+      }
+    });
+  });
+
+  return Object.freeze({
+    schemaVersion: "evaluation-input-v1",
+    ...input,
+  });
+}
+
+export function toFeishuEvaluationLabel(
+  label: EvaluationLabel,
+): "好" | "不好" | "不确定" {
+  const option = EVALUATION_FIELD_CATALOG.evaluationLabels.find(
+    (candidate) => candidate.value === label,
+  );
+  if (option === undefined) {
+    throw new Error(`未知评测标签：${String(label)}`);
+  }
+  return option.labelZh;
+}
+
+function buildConsensus(
+  judgments: readonly EvaluationJudgment[],
+): ConsensusSummary {
+  const goodCount = judgments.filter(({ label }) => label === "GOOD").length;
+  const badCount = judgments.filter(({ label }) => label === "BAD").length;
+  const uncertainCount = judgments.filter(({ label }) => label === "UNCERTAIN").length;
+  const labels = [goodCount > 0, badCount > 0, uncertainCount > 0].filter(Boolean).length;
+  const consistent = labels === 1;
+  const resolvedLabel: EvaluationLabel = consistent
+    ? judgments[0]!.label
+    : "UNCERTAIN";
+  const uncertainReasons = new Set<UncertainReason>();
+  judgments.forEach(({ uncertainReason }) => {
+    if (uncertainReason !== null) uncertainReasons.add(uncertainReason);
+  });
+  if (!consistent) uncertainReasons.add("ANNOTATOR_DISAGREEMENT");
+
+  return Object.freeze({
+    goodCount,
+    badCount,
+    uncertainCount,
+    totalCount: judgments.length,
+    resolvedLabel,
+    rule: consistent ? "unanimous" : "unresolved",
+    agreementStatus: consistent ? "consistent" : "mixed",
+    uncertainReasons: Object.freeze([...uncertainReasons]),
+  });
+}
+
+function validateTargetTree(
+  rootTargetId: string,
+  targets: readonly EvaluationTargetNode[],
+): Map<string, EvaluationTargetNode> {
+  const byId = new Map<string, EvaluationTargetNode>();
+  targets.forEach((target) => {
+    assertNonEmpty(target.targetId, "targetId");
+    if (byId.has(target.targetId)) throw new Error(`评测对象 ID 重复：${target.targetId}`);
+    byId.set(target.targetId, target);
+  });
+  const root = byId.get(rootTargetId);
+  if (root === undefined || root.scope !== "DECK" || root.parentTargetId !== null) {
+    throw new Error("评测树必须有且只有一个 Deck 根对象");
+  }
+
+  targets.forEach((target) => {
+    if (target.scope === "DECK") {
+      if (target.targetId !== rootTargetId || target.pageNumber !== null || target.elementId !== null) {
+        throw new Error("Deck 对象只能作为根节点");
+      }
+      return;
+    }
+    const parent = target.parentTargetId === null
+      ? undefined
+      : byId.get(target.parentTargetId);
+    if (target.scope === "SLIDE") {
+      if (
+        parent?.scope !== "DECK" ||
+        !Number.isInteger(target.pageNumber) ||
+        target.pageNumber === null ||
+        target.pageNumber < 1 ||
+        target.elementId !== null ||
+        target.elementKind !== null
+      ) {
+        throw new Error(`Slide 对象 ${target.targetId} 必须挂在 Deck 下并带有有效页码`);
+      }
+      return;
+    }
+    if (
+      parent?.scope !== "SLIDE" ||
+      target.pageNumber !== parent.pageNumber ||
+      target.elementId === null ||
+      target.elementKind === null
+    ) {
+      throw new Error(`Element 对象 ${target.targetId} 必须挂在同页 Slide 下`);
+    }
+  });
+  return byId;
+}
+
+function buildDimensionProfiles(
+  assessments: readonly EvaluationAssessment[],
+  targets: ReadonlyMap<string, EvaluationTargetNode>,
+): readonly EvaluationDimensionProfile[] {
+  const groups = new Map<string, {
+    dimensionId: string;
+    scope: EvaluationTargetScope;
+    labels: EvaluationLabel[];
+  }>();
+  assessments.forEach((assessment) => {
+    const scope = targets.get(assessment.targetId)!.scope;
+    const key = `${scope}:${assessment.dimensionId}`;
+    const group = groups.get(key) ?? {
+      dimensionId: assessment.dimensionId,
+      scope,
+      labels: [],
+    };
+    group.labels.push(assessment.consensus.resolvedLabel);
+    groups.set(key, group);
+  });
+
+  return Object.freeze([...groups.values()].map((group) => {
+    const goodCount = group.labels.filter((label) => label === "GOOD").length;
+    const badCount = group.labels.filter((label) => label === "BAD").length;
+    const uncertainCount = group.labels.filter((label) => label === "UNCERTAIN").length;
+    return Object.freeze({
+      dimensionId: group.dimensionId,
+      scope: group.scope,
+      goodCount,
+      badCount,
+      uncertainCount,
+      assessableCount: goodCount + badCount,
+    });
+  }));
+}
+
+export function createEvaluationResult(
+  input: CreateEvaluationResultInput,
+): EvaluationResult {
+  if (input.mode === "production" && input.lineage.judge.kind !== "real") {
+    throw new Error("生产评测结果必须记录真实 Judge");
+  }
+  assertNonEmpty(input.lineage.promptVersion, "lineage.promptVersion");
+  assertNonEmpty(input.lineage.judge.provider, "lineage.judge.provider");
+  assertNonEmpty(input.lineage.judge.model, "lineage.judge.model");
+  if (input.mode === "production" && input.lineage.judge.responseIds.length === 0) {
+    throw new Error("生产评测结果必须记录真实 Judge responseId");
+  }
+  const targets = validateTargetTree(input.tree.rootTargetId, input.tree.targets);
+
+  const evidenceById = new Map<string, EvaluationEvidence>();
+  input.tree.evidence.forEach((evidence) => {
+    if (evidenceById.has(evidence.evidenceId)) throw new Error(`Evidence ID 重复：${evidence.evidenceId}`);
+    if (!targets.has(evidence.targetId)) throw new Error(`Evidence 指向未知评测对象：${evidence.targetId}`);
+    assertNonEmpty(evidence.observation, `Evidence ${evidence.evidenceId}.observation`);
+    evidenceById.set(evidence.evidenceId, evidence);
+  });
+
+  const assessmentIds = new Set<string>();
+  const judgmentIds = new Set<string>();
+  const assessments = input.tree.assessments.map((assessment): EvaluationAssessment => {
+    if (assessmentIds.has(assessment.assessmentId)) throw new Error(`Assessment ID 重复：${assessment.assessmentId}`);
+    assessmentIds.add(assessment.assessmentId);
+    if (!targets.has(assessment.targetId)) throw new Error(`Assessment 指向未知评测对象：${assessment.targetId}`);
+    assertNonEmpty(assessment.dimensionId, "dimensionId");
+    if (assessment.judgments.length === 0) throw new Error(`Assessment ${assessment.assessmentId} 至少需要一条判断`);
+
+    assessment.judgments.forEach((judgment) => {
+      if (judgmentIds.has(judgment.judgmentId)) throw new Error(`Judgment ID 重复：${judgment.judgmentId}`);
+      judgmentIds.add(judgment.judgmentId);
+      if (input.mode === "production" && judgment.annotator.kind !== "real") {
+        throw new Error("生产评测判断不能由 Mock Judge 生成");
+      }
+      if (judgment.label === "UNCERTAIN" && judgment.uncertainReason === null) {
+        throw new Error("UNCERTAIN 判断必须记录 uncertainReason");
+      }
+      if (judgment.label !== "UNCERTAIN" && judgment.uncertainReason !== null) {
+        throw new Error("只有 UNCERTAIN 判断可以记录 uncertainReason");
+      }
+      if (judgment.assessmentStatus === "NOT_ASSESSABLE" && judgment.label !== "UNCERTAIN") {
+        throw new Error("NOT_ASSESSABLE 只能输出 UNCERTAIN");
+      }
+      if (judgment.evidenceIds.length === 0) throw new Error(`Judgment ${judgment.judgmentId} 必须引用 Evidence`);
+      judgment.evidenceIds.forEach((evidenceId) => {
+        const evidence = evidenceById.get(evidenceId);
+        if (evidence === undefined) throw new Error(`Judgment 引用未知 Evidence：${evidenceId}`);
+        if (evidence.targetId !== assessment.targetId) {
+          throw new Error(`Evidence ${evidenceId} 与 Assessment 评测对象不一致`);
+        }
+      });
+    });
+
+    return Object.freeze({
+      ...assessment,
+      consensus: buildConsensus(assessment.judgments),
+    });
+  });
+
+  return Object.freeze({
+    schemaVersion: "evaluation-result-v1",
+    evaluationId: input.evaluationId,
+    caseId: input.caseId,
+    artifactId: input.artifactId,
+    mode: input.mode,
+    deliveryStatus: input.deliveryStatus,
+    tree: Object.freeze({
+      rootTargetId: input.tree.rootTargetId,
+      targets: input.tree.targets,
+      assessments: Object.freeze(assessments),
+      evidence: input.tree.evidence,
+    }),
+    dimensionProfile: buildDimensionProfiles(assessments, targets),
+    comparisonVector: input.comparisonVector,
+    lineage: input.lineage,
+  });
+}
