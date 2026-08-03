@@ -466,12 +466,20 @@ export function normalizeScorecard(raw, pageCount) {
   });
 }
 
-function judgePrompt(pageCount) {
+function judgePrompt(
+  pageCount,
+  {
+    caseDefinition = M0_CASE,
+    comparisonMode = M0_COMPARISON_MODE,
+  } = {},
+) {
   return `你正在评估一份教育场景 PPT 的静态页面。只根据随附的 ${pageCount} 张页面图片判断，不推断隐藏流程或厂商内部原因。
 
-历史原始 Query：${M0_CASE.query}
+评测模式：${comparisonMode}
 
-请按严格 JSON Schema 给出六维评分。除事实维度外，每个维度必须给 1–5 整数、至少一个真实页码证据和不超过 240 字的简短理由。事实准确性维度没有可辩护的专业知识包，因此必须是 NOT_ASSESSABLE、value=null、evidencePages=[]，不得凭模型常识评分。页数不是历史要求的 8 页时保留真实产物，并在需求理解维度据实反映。只评估静态阅读效果，不评估动画。`;
+评测 Query：${caseDefinition.query}
+
+请按严格 JSON Schema 给出六维评分。除事实维度外，每个维度必须给 1–5 整数、至少一个真实页码证据和不超过 240 字的简短理由。事实准确性维度没有可辩护的专业知识包，因此必须是 NOT_ASSESSABLE、value=null、evidencePages=[]，不得凭模型常识评分。实际页数不是目标 ${caseDefinition.targetPageCount} 页时保留真实产物，并在需求理解维度据实反映。只评估静态阅读效果，不评估动画。`;
 }
 
 export async function loadScoreFixture(path) {
@@ -487,6 +495,9 @@ export async function scoreDeck({
   judgeDir,
   scoreFixture = null,
   codexExecutable = process.env.CODEX_M0_EXECUTABLE ?? DEFAULT_CODEX_EXECUTABLE,
+  classification = M0_CLASSIFICATION,
+  comparisonMode = M0_COMPARISON_MODE,
+  caseDefinition = M0_CASE,
 }) {
   await mkdir(judgeDir, { recursive: true });
   const schemaPath = join(judgeDir, "schema.json");
@@ -496,7 +507,10 @@ export async function scoreDeck({
   const rawEventsPath = join(judgeDir, "events.raw.jsonl");
   const stderrPath = join(judgeDir, "stderr.log");
   await writeFile(schemaPath, `${JSON.stringify(M0_JUDGE_SCHEMA, null, 2)}\n`);
-  await writeFile(promptPath, `${judgePrompt(pageCount)}\n`);
+  await writeFile(
+    promptPath,
+    `${judgePrompt(pageCount, { caseDefinition, comparisonMode })}\n`,
+  );
 
   let raw;
   let scoreSource;
@@ -547,7 +561,7 @@ export async function scoreDeck({
       ];
       const processResult = await runProcess(codexExecutable, args, {
         cwd: isolatedCwd,
-        stdin: judgePrompt(pageCount),
+        stdin: judgePrompt(pageCount, { caseDefinition, comparisonMode }),
         timeoutMs: CODEX_TIMEOUT_MS,
       });
       await writeFile(rawEventsPath, processResult.stdout);
@@ -567,8 +581,8 @@ export async function scoreDeck({
   const scorecard = Object.freeze({
     productId: product.id,
     productName: product.name,
-    classification: M0_CLASSIFICATION,
-    comparisonMode: M0_COMPARISON_MODE,
+    classification,
+    comparisonMode,
     scoreSource,
     model:
       scoreSource === "CODEX_CLI"

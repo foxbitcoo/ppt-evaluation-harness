@@ -53,3 +53,27 @@ node mvp/live-three-vendor-job.mjs \
 ```
 
 该 Job 固定按 WPS AI PPT、千问、豆包各执行一次，并在编排层对每家强制 30 分钟截止。某个 Runner 阻塞或异常时，后续厂商仍继续；没有权威提交状态的异常统一记录为 `unknown` 且禁止自动重试。测试注入的 Runner 不能生成 `LIVE_PRODUCTION` 完成状态。只有默认真实 Runner 的三条 Run 都携带真实 `LIVE_PRODUCTION` 产物时，Job 才返回完成状态。
+
+## 已核验实时产物接入评测
+
+浏览器或受信任桥接层已经形成三份完整 capture 目录后，使用下面的入口接入现有静态渲染、自动评分、任意两两比较和短报告：
+
+```bash
+node mvp/live-artifact-evaluation.mjs \
+  --wps-capture /path/to/wps-capture \
+  --qwen-capture /path/to/qwen-capture \
+  --doubao-capture /path/to/doubao-capture \
+  --output-dir /path/to/an-empty-output-directory
+```
+
+每个 capture 目录必须包含 `capture-request.json`、`trace.jsonl`、`run-record.json` 和记录所指向的真实 PPTX。入口拒绝非 `LIVE_PRODUCTION`、非单次提交、缺失提交/下载 Trace、Query 不一致、哈希不一致或页数不一致的输入，避免把历史回放或 Mock 混入实时赛马。
+
+评测完成后，可把题目、运行、评分、三组动态两两对比、短报告及附件幂等写入已配置的飞书 Base：
+
+```bash
+node mvp/publish-live-evaluation-to-lark.mjs \
+  --base-token <base-token> \
+  --evaluation-dir /path/to/evaluation-output
+```
+
+发布器按稳定 ID 更新字段，并仅补传同名附件中缺失的文件。运行记录会同时保留原始 PPTX、全套静态单页与总览图；评分记录保留总览图；总报告记录保留 Markdown 报告和结构化 JSON。
