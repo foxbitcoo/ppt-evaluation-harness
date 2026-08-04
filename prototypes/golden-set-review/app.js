@@ -474,11 +474,16 @@ function render() {
   bind();
 }
 
+function renderAtTop() {
+  render();
+  window.scrollTo(0, 0);
+}
+
 function setVariant(id) {
   const url = new URL(location.href);
   url.searchParams.set("variant", id);
   history.replaceState({}, "", url);
-  render();
+  renderAtTop();
 }
 
 function stepVariant(direction) {
@@ -501,11 +506,11 @@ function bind() {
     state.revealed.add(button.dataset.reveal);
     render();
   }));
-  document.querySelector("[data-prev]")?.addEventListener("click", () => { const count = filteredCases().length; state.index = (state.index - 1 + count) % count; render(); });
-  document.querySelector("[data-next]")?.addEventListener("click", () => { state.index = (state.index + 1) % filteredCases().length; render(); });
-  document.querySelectorAll("[data-case-index]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.caseIndex); render(); }));
+  document.querySelector("[data-prev]")?.addEventListener("click", () => { const count = filteredCases().length; state.index = (state.index - 1 + count) % count; renderAtTop(); });
+  document.querySelector("[data-next]")?.addEventListener("click", () => { state.index = (state.index + 1) % filteredCases().length; renderAtTop(); });
+  document.querySelectorAll("[data-case-index]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.caseIndex); renderAtTop(); }));
   document.querySelectorAll("[data-open-case]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.openCase); setVariant("A"); }));
-  document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.filter; state.index = 0; render(); }));
+  document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.filter; state.index = 0; renderAtTop(); }));
   document.querySelectorAll("[data-variant]").forEach((button) => button.addEventListener("click", () => setVariant(button.dataset.variant)));
   document.querySelector("[data-variant-prev]")?.addEventListener("click", () => stepVariant(-1));
   document.querySelector("[data-variant-next]")?.addEventListener("click", () => stepVariant(1));
