@@ -5,6 +5,53 @@ const SLIDE_AUDIT_REVISION = "642d490b7c1d2e78a50a631bfd359433397f3ecf";
 const PRESENTBENCH_DEMO = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/slides.pdf`;
 const PRESENTBENCH_RESULT = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/gemini-3-flash-preview.yaml`;
 const SLIDE_AUDIT_ROOT = `https://raw.githubusercontent.com/zhuohaouw/SlideAudit/${SLIDE_AUDIT_REVISION}/data/images`;
+const SLIDE_AUDIT_ANNOTATIONS = `https://github.com/zhuohaouw/SlideAudit/blob/${SLIDE_AUDIT_REVISION}/data/annotations`;
+
+const slideAuditTaxonomy = [
+  {
+    category: "构图与版式",
+    original: "Composition & Layout",
+    criteria: [
+      ["视觉层级不清", "Poor Visual Hierarchy"],
+      ["布局拥挤", "Cluttered Layout"],
+      ["空间分布失衡", "Unbalanced Space Distribution"],
+      ["内容对齐问题", "Content Alignment Issues"],
+      ["内容溢出或裁切", "Content Overflow/Cut-off"],
+      ["内容被遮挡", "Occluded Content"],
+    ],
+  },
+  {
+    category: "文字排版",
+    original: "Typography",
+    criteria: [
+      ["字形选择或使用难以辨认", "Illegible Typeface Selection or Usage"],
+      ["字号使用不当", "Improper Font Sizing"],
+      ["文字量过多", "Excessive Text Volume"],
+      ["文本样式使用不当", "Improper Text Styling"],
+      ["行距或字距不当", "Improper Line/Character Spacing"],
+      ["文本层级不清", "Poor Text Hierarchy"],
+    ],
+  },
+  {
+    category: "色彩",
+    original: "Color",
+    criteria: [
+      ["可读性对比不足", "Insufficient Color Contrast for Readability"],
+      ["颜色过多或使用不一致", "Excessive or Inconsistent Color Usage"],
+      ["配色不当或不匹配", "Inappropriate or Mismatched Color Combinations"],
+    ],
+  },
+  {
+    category: "图片与可视化",
+    original: "Imagery & Visualizations",
+    criteria: [
+      ["视觉内容与表达无关", "Irrelevant Visual Content"],
+      ["图片质量或编辑不佳", "Poor Image Quality/Editing"],
+      ["图片尺寸不当", "Improper Image Sizing"],
+      ["视觉风格使用不一致", "Inconsistent Visual Style Usage"],
+    ],
+  },
+];
 
 const cases = [
   {
@@ -96,6 +143,13 @@ const cases = [
     media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0002.png` },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
+    anchors: {
+      good: "图片主体清晰，比例与关键内容完整，没有明显像素化、拉伸、粗糙抠图或破坏理解的裁切。",
+      bad: "出现明显模糊、像素化、变形、关键区域被裁掉，或拼贴/编辑痕迹妨碍理解。",
+      uncertain: "原图未完整加载、展示端二次压缩明显，或关键图片区域不可见。",
+      excludes: "不评价图片是否切题、图片大小、页面配色或整体版式；这些属于其他判项。",
+    },
+    raw: { sourceType: "Gemini", alteration: "texture", imageSize: "1600 × 900", response: false, strong: true, bboxCount: 0, annotationUrl: `${SLIDE_AUDIT_ANNOTATIONS}/slide_0002.json` },
   },
   {
     id: "SA-0003-FONT-SIZE",
@@ -114,6 +168,13 @@ const cases = [
     media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0003.png`, boxes: [{ x: 61.3, y: 60.8, w: 21.5, h: 19.0 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
+    anchors: {
+      good: "标题、正文和标签在演示画面中均可直接辨认，较小文字仍承担得起其信息角色。",
+      bad: "一个或多个承担信息的文本明显小于同层文字，必须放大或靠猜测才能阅读。",
+      uncertain: "截图分辨率不足、页面缩放异常，或无法确认原始画布尺寸。",
+      excludes: "不评价字形风格、粗体/斜体使用、文字量或文本层级。",
+    },
+    raw: { sourceType: "Gemini", alteration: "texture", imageSize: "1600 × 900", response: true, strong: true, bboxCount: 1, annotationUrl: `${SLIDE_AUDIT_ANNOTATIONS}/slide_0003.json` },
   },
   {
     id: "SA-0011-OCCLUSION",
@@ -129,9 +190,16 @@ const cases = [
     sourceLabel: "BAD",
     sourceReason: "原数据 response 为 true 且 strong agreement；中心气泡图遮挡左侧项目文字。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0011.png`, boxes: [{ x: 5.5, y: 42.4, w: 70.3, h: 54.7 }] },
+    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0011.png`, boxes: [{ x: 5.7, y: 42.4, w: 45.2, h: 23.3 }, { x: 25.8, y: 39.4, w: 47.5, h: 57.5 }, { x: 30.2, y: 41.5, w: 20.1, h: 8.0 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
+    anchors: {
+      good: "文字、图表、图片和装饰元素之间没有覆盖有意义的信息，所有内容可完整识别。",
+      bad: "任一元素覆盖文字、数据或图形关键部分，使信息不可读或需要猜测。",
+      uncertain: "无法判断重叠是否是有意遮罩，或截图缺少判断所需的完整元素边界。",
+      excludes: "不评价元素仅仅靠得太近、对齐不齐或空间分布失衡。",
+    },
+    raw: { sourceType: "gdcdataset", alteration: "alignment", imageSize: "960 × 720", response: true, strong: true, bboxCount: 3, annotationUrl: `${SLIDE_AUDIT_ANNOTATIONS}/slide_0011.json` },
   },
   {
     id: "SA-0016-CUTOFF",
@@ -150,6 +218,13 @@ const cases = [
     media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0016.png`, boxes: [{ x: 5.7, y: 52.2, w: 47.7, h: 46.6 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
+    anchors: {
+      good: "所有承担信息的文字和图形都完整落在画布及所属容器内，页脚不截断正文。",
+      bad: "文字或图形越出画布/容器，或被页脚、边界直接裁掉。",
+      uncertain: "输入截图本身可能被外部裁切，无法区分原 PPT 缺陷与采集缺陷。",
+      excludes: "允许不损失语义的背景出血；元素互相覆盖属于“内容被遮挡”判项。",
+    },
+    raw: { sourceType: "Google", alteration: "texture", imageSize: "1600 × 900", response: true, strong: true, bboxCount: 1, annotationUrl: `${SLIDE_AUDIT_ANNOTATIONS}/slide_0016.json` },
   },
   {
     id: "SA-0021-CONTRAST",
@@ -168,6 +243,13 @@ const cases = [
     media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0021.png`, boxes: [{ x: 28.0, y: 9.5, w: 64.0, h: 16.2 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
+    anchors: {
+      good: "重要文字与其实际背景能清楚分离，不依赖放大、高亮或猜测即可阅读。",
+      bad: "前景与背景亮度或颜色过近，导致标题、正文或数据标签难以辨认。",
+      uncertain: "显示设备、色彩配置或透明遮罩疑似改变了原始对比度。",
+      excludes: "不评价配色审美、颜色数量或跨页色彩一致性。",
+    },
+    raw: { sourceType: "gdcdataset", alteration: "texture", imageSize: "1600 × 1200", response: true, strong: true, bboxCount: 1, annotationUrl: `${SLIDE_AUDIT_ANNOTATIONS}/slide_0021.json` },
   },
   {
     id: "SA-0061-TEXT-VOLUME",
@@ -186,6 +268,13 @@ const cases = [
     media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0061.png` },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
+    anchors: {
+      good: "在演示节奏下可快速扫描，文字承担提炼后的要点，而不是要求观众同步阅读大段正文。",
+      bad: "长句或段落主导页面，观众必须持续阅读才能获取主要信息。",
+      uncertain: "不知道页面是现场演示还是专供自读，且两种模式会改变合理密度。",
+      excludes: "不评价字号、行距、字形或视觉层级；它们应由相邻判项分别判断。",
+    },
+    raw: { sourceType: "gdcdataset", alteration: "nojitter", imageSize: "1600 × 1200", response: true, strong: true, bboxCount: 0, annotationUrl: `${SLIDE_AUDIT_ANNOTATIONS}/slide_0061.json` },
   },
 ];
 
@@ -256,6 +345,50 @@ function answerControls(caseItem) {
   </div>`;
 }
 
+function rubricCard(caseItem) {
+  if (!caseItem.anchors) return "";
+  return `<section class="rubric-card">
+    <div class="rubric-title"><div><span>从 SlideAudit 蒸馏的三态标准</span><b>${escapeHtml(caseItem.original)}</b></div><em>只判断一个缺陷，不给整页总评</em></div>
+    <div class="anchor-grid">
+      <article class="anchor-good"><span>GOOD 锚点</span><p>${escapeHtml(caseItem.anchors.good)}</p></article>
+      <article class="anchor-bad"><span>BAD 锚点</span><p>${escapeHtml(caseItem.anchors.bad)}</p></article>
+      <article class="anchor-uncertain"><span>UNCERTAIN 条件</span><p>${escapeHtml(caseItem.anchors.uncertain)}</p></article>
+      <article class="anchor-excludes"><span>本项不评价</span><p>${escapeHtml(caseItem.anchors.excludes)}</p></article>
+    </div>
+  </section>`;
+}
+
+function reconstructedScene(caseItem) {
+  if (!caseItem.raw) return "";
+  const detected = caseItem.raw.response;
+  const voteLabel = detected ? "检出缺陷" : "未检出缺陷";
+  const voteClass = detected ? "vote-bad" : "vote-good";
+  return `<section class="annotation-scene">
+    <div class="scene-title"><div><span>原始打分现场 · 按公开数据还原</span><b>${escapeHtml(caseItem.objectLabel)} / ${escapeHtml(caseItem.original)}</b></div><em>不是作者原标注工具截图</em></div>
+    <div class="scene-flow">
+      <article><span>① 输入样本</span><b>${escapeHtml(caseItem.raw.sourceType)}</b><small>${escapeHtml(caseItem.raw.alteration)} · ${escapeHtml(caseItem.raw.imageSize)}</small></article>
+      <i>→</i>
+      <article><span>② 单缺陷提问</span><b>${escapeHtml(caseItem.original)}</b><small>${caseItem.raw.bboxCount} 个公开证据框</small></article>
+      <i>→</i>
+      <article><span>③ 三人投票</span><div class="votes ${voteClass}"><b>A</b><b>B</b><b>C</b></div><small>三人均${voteLabel}</small></article>
+      <i>→</i>
+      <article><span>④ 多数聚合</span><b>response: ${caseItem.raw.response}</b><small>strong agreement: ${caseItem.raw.strong}</small></article>
+      <i>→</i>
+      <article><span>⑤ 本项目映射</span><b class="mapped-${caseItem.sourceLabel.toLowerCase()}">${caseItem.sourceLabel}</b><small>${detected ? "缺陷存在 → BAD" : "缺陷未检出 → GOOD"}</small></article>
+    </div>
+    <p class="scene-caveat">三人同票可由 <code>response</code> 与 <code>has_strong_agreement=true</code> 唯一反推；原数据未公开标注者身份和当时界面。该票只针对当前缺陷，不能推导整页整体质量。</p>
+    <a href="${caseItem.raw.annotationUrl}" target="_blank" rel="noreferrer">查看固定版本 annotation JSON ↗</a>
+  </section>`;
+}
+
+function taxonomyMap() {
+  const sampled = new Set(cases.filter((item) => item.source === "SlideAudit").map((item) => item.original));
+  return `<section class="taxonomy-map">
+    <div class="taxonomy-heading"><div><span>SlideAudit 标准蒸馏</span><h3>4 类 · 19 个静态视觉缺陷</h3></div><p>绿色圆点表示首批盲标已抽样。这里保留缺陷级语义，暂不把 19 项直接压成一个美学总分。</p></div>
+    <div class="taxonomy-grid">${slideAuditTaxonomy.map((group) => `<article><header><b>${group.category}</b><span>${group.original}</span></header><ul>${group.criteria.map(([label, original]) => `<li class="${sampled.has(original) ? "sampled" : ""}"><i></i><span>${label}<small>${original}</small></span></li>`).join("")}</ul></article>`).join("")}</div>
+  </section>`;
+}
+
 function sourceResult(caseItem, always = false) {
   const revealed = always || state.revealed.has(caseItem.id);
   if (!revealed) {
@@ -267,7 +400,7 @@ function sourceResult(caseItem, always = false) {
     <div class="source-label"><span>来源标注</span><b>${caseItem.sourceLabel}</b><em>${escapeHtml(comparison)}</em></div>
     <p>${escapeHtml(caseItem.sourceReason)}</p>
     <details><summary>查看英文原判项与来源</summary><p><b>${escapeHtml(caseItem.original)}</b><br />${escapeHtml(caseItem.originalRule)}</p><a href="${caseItem.sourceUrl}" target="_blank" rel="noreferrer">打开官方来源 ↗</a></details>
-  </div>`;
+  </div>${always ? "" : reconstructedScene(caseItem)}`;
 }
 
 function caseMeta(caseItem) {
@@ -284,6 +417,7 @@ function renderVariantA() {
       ${caseMeta(caseItem)}
       ${hierarchy(caseItem)}
       <div class="criterion"><span>原子判项</span><h2>${escapeHtml(caseItem.title)}</h2><p>${escapeHtml(caseItem.atomic)}</p></div>
+      ${rubricCard(caseItem)}
       ${answerControls(caseItem)}
       ${sourceResult(caseItem)}
       <nav class="case-nav"><button type="button" data-prev>← 上一题</button><span>${state.index + 1} / ${pool.length}</span><button type="button" data-next>下一题 →</button></nav>
@@ -298,7 +432,7 @@ function renderVariantB() {
   return `<main class="compare-layout">
     <aside class="case-rail">${pool.map((item, index) => `<button type="button" data-case-index="${index}" class="${index === state.index ? "active" : ""}"><span>${escapeHtml(item.axis)}</span><b>${escapeHtml(item.title)}</b><em>${state.answers.get(item.id) ?? "未标"}</em></button>`).join("")}</aside>
     <section class="compare-media">${media(caseItem)}</section>
-    <section class="compare-panel">${caseMeta(caseItem)}${hierarchy(caseItem)}<h2>${escapeHtml(caseItem.title)}</h2><p class="atomic">${escapeHtml(caseItem.atomic)}</p>${answerControls(caseItem)}${sourceResult(caseItem)}</section>
+    <section class="compare-panel">${caseMeta(caseItem)}${hierarchy(caseItem)}<h2>${escapeHtml(caseItem.title)}</h2><p class="atomic">${escapeHtml(caseItem.atomic)}</p>${rubricCard(caseItem)}${answerControls(caseItem)}${sourceResult(caseItem)}</section>
   </main>`;
 }
 
@@ -306,6 +440,7 @@ function renderVariantC() {
   const pool = filteredCases();
   return `<main class="audit-layout">
     <section class="audit-intro"><div><span>层级审计视图</span><h2>先看测试集质量，再决定 Rubric</h2></div><p>每行只对应一个原子判项。对象层级、证据范围和来源标签分开显示，避免把“整套适用性”和“单个元素缺陷”混为一项。</p></section>
+    ${state.filter !== "PresentBench" ? taxonomyMap() : ""}
     <section class="audit-table">
       <div class="audit-row audit-head"><span>样例</span><span>层级 / 原子判项</span><span>你的判断</span><span>原始结果</span></div>
       ${pool.map((item, index) => `<article class="audit-row">

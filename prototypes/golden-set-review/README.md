@@ -15,6 +15,13 @@ node prototypes/golden-set-review/serve.mjs
 
 然后打开 `http://127.0.0.1:4317/?variant=A`。A/B/C 是三种信息架构，数据和临时标注状态共用，但刷新后会清空。
 
+## SlideAudit 标准与现场还原
+
+- C 版“题库审计”展示公开 annotation schema 中实际出现的 4 类、19 个静态视觉缺陷；绿色圆点表示首批 6 个案例已覆盖的判项。
+- 每个 SlideAudit 案例在作答前展示蒸馏后的 GOOD 锚点、BAD 锚点、UNCERTAIN 条件和排除边界。
+- 揭晓后展示按公开字段还原的标注现场：样本来源、受控改动类型、单缺陷问题、三人投票、`response`、`has_strong_agreement`、证据框数量和三态映射。
+- 该现场不是作者原标注工具的截图。原数据未公开标注者身份；只有在 `has_strong_agreement=true` 时，三人同票才能由聚合字段唯一反推。
+
 ## 标签映射
 
 - PresentBench 原始 `yes` 映射为 `GOOD`，`no` 映射为 `BAD`。
