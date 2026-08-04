@@ -2,7 +2,7 @@ import { presentBenchThumbnails } from "./presentbench-thumbnails.js";
 
 const PRESENTBENCH_SITE_REVISION = "34718357045b63ddce246f5e4c2543f5d96e63ea";
 const SLIDE_AUDIT_REVISION = "642d490b7c1d2e78a50a631bfd359433397f3ecf";
-const PRESENTBENCH_DEMO = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/slides.pdf`;
+const PRESENTBENCH_DEMO = `https://github.com/PresentBench/PresentBench.github.io/blob/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/slides.pdf`;
 const PRESENTBENCH_RESULT = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/gemini-3-flash-preview.yaml`;
 const SLIDE_AUDIT_ASSET_ROOT = "./assets/slide-audit";
 const SLIDE_AUDIT_ANNOTATIONS = `https://github.com/zhuohaouw/SlideAudit/blob/${SLIDE_AUDIT_REVISION}/data/annotations`;
@@ -472,7 +472,7 @@ function switcher(variant) {
 
 function render() {
   const variant = currentVariant();
-  document.body.dataset.variant = variant;
+  document.body.dataset.layoutVariant = variant;
   const content = variant === "A" ? renderVariantA() : variant === "B" ? renderVariantB() : renderVariantC();
   document.querySelector("#app").innerHTML = `${header()}<div class="scope-notice"><b>适用性边界</b><span>PresentBench 是文档→PPT，只校准 Deck/内容判项方法；SlideAudit 只校准单页静态视觉缺陷。它们都不是 Query→PPT 的完整 Golden Set。</span></div>${content}${switcher(variant)}`;
   bind();
@@ -522,7 +522,7 @@ function bind() {
   document.querySelectorAll("[data-case-index]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.caseIndex); renderAtTop(); }));
   document.querySelectorAll("[data-open-case]").forEach((button) => button.addEventListener("click", () => { state.index = Number(button.dataset.openCase); setVariant("A"); }));
   document.querySelectorAll("[data-filter]").forEach((button) => button.addEventListener("click", () => { state.filter = button.dataset.filter; state.index = 0; renderAtTop(); }));
-  document.querySelectorAll("[data-variant]").forEach((button) => button.addEventListener("click", () => setVariant(button.dataset.variant)));
+  document.querySelectorAll(".variant-switcher button[data-variant]").forEach((button) => button.addEventListener("click", () => setVariant(button.dataset.variant)));
   document.querySelector("[data-variant-prev]")?.addEventListener("click", () => stepVariant(-1));
   document.querySelector("[data-variant-next]")?.addEventListener("click", () => stepVariant(1));
 }
