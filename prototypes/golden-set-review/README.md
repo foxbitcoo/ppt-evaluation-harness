@@ -32,6 +32,6 @@ node prototypes/golden-set-review/serve.mjs
 
 - [PresentBench repository](https://github.com/PresentBench/PresentBench)（代码 Apache-2.0；数据集页面标注为 `other`，本原型缓存官方公开 demo 的 4 张低清内部审阅缩略图，不包含完整 Deck 或材料，不应直接公开发布或商业再分发）
 - [PresentBench public demo](https://presentbench.github.io/)
-- [SlideAudit repository](https://github.com/zhuohaouw/SlideAudit)（数据集 CC BY 4.0；本原型直接链接官方原图并署名）
+- [SlideAudit repository](https://github.com/zhuohaouw/SlideAudit)（数据集 CC BY 4.0；为保证盲标原型可复现，本原型缓存固定 revision 的 6 张样本并保留来源、许可与文件校验信息）
 
 页面内容为中文工作翻译，英文原判项和官方来源链接保留在每个样例中。

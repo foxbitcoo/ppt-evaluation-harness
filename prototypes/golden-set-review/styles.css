@@ -119,7 +119,11 @@ a { color: var(--blue); }
 .case-nav span { color: var(--muted); font-size: 12px; }
 
 .image-frame { width: 100%; position: relative; overflow: hidden; border-radius: 14px; background: #e6e6e1; }
-.image-frame img { width: 100%; display: block; }
+.image-frame img { width: 100%; height: auto; display: block; }
+.image-fallback { display: none; position: absolute; inset: 0; place-content: center; gap: 6px; padding: 24px; color: var(--muted); background: #ecece7; text-align: center; }
+.image-fallback b, .image-fallback span { display: block; }
+.image-fallback span { font-size: 11px; }
+.image-frame[data-image-state="error"] .image-fallback { display: grid; }
 .evidence-box { position: absolute; border: 3px solid #ff3b30; background: rgba(255, 59, 48, .08); box-shadow: 0 0 0 2px rgba(255,255,255,.85); border-radius: 5px; pointer-events: none; }
 .pdf-frame { width: 100%; min-height: 640px; display: grid; grid-template-rows: minmax(560px, 1fr) auto auto; gap: 10px; }
 .pdf-preview { position: relative; display: flex; align-items: center; min-height: 560px; overflow: hidden; border-radius: 13px; background: #e6e6e1; }

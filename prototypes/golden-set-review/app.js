@@ -4,7 +4,7 @@ const PRESENTBENCH_SITE_REVISION = "34718357045b63ddce246f5e4c2543f5d96e63ea";
 const SLIDE_AUDIT_REVISION = "642d490b7c1d2e78a50a631bfd359433397f3ecf";
 const PRESENTBENCH_DEMO = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/slides.pdf`;
 const PRESENTBENCH_RESULT = `https://raw.githubusercontent.com/PresentBench/PresentBench.github.io/${PRESENTBENCH_SITE_REVISION}/demo/ICML_2025_Accelerating_LLM_Inference_with_Lossless_Speculative_Decoding_Algorithms_for_Heterogeneous_Vocabularies_Oral_6bfb95/generation_task/results/gemini-3-flash-preview.yaml`;
-const SLIDE_AUDIT_ROOT = `https://raw.githubusercontent.com/zhuohaouw/SlideAudit/${SLIDE_AUDIT_REVISION}/data/images`;
+const SLIDE_AUDIT_ASSET_ROOT = "./assets/slide-audit";
 const SLIDE_AUDIT_ANNOTATIONS = `https://github.com/zhuohaouw/SlideAudit/blob/${SLIDE_AUDIT_REVISION}/data/annotations`;
 
 const slideAuditTaxonomy = [
@@ -140,7 +140,7 @@ const cases = [
     sourceLabel: "GOOD",
     sourceReason: "原数据对“Poor Image Quality/Editing”的 response 为 false，且 has_strong_agreement 为 true；即标注者一致认为该缺陷不存在。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0002.png` },
+    media: { type: "image", url: `${SLIDE_AUDIT_ASSET_ROOT}/slide_0002.png`, width: 1600, height: 900 },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
     anchors: {
@@ -165,7 +165,7 @@ const cases = [
     sourceLabel: "BAD",
     sourceReason: "原数据 response 为 true 且 strong agreement；证据框位于右下方较小的列表项。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0003.png`, boxes: [{ x: 61.3, y: 60.8, w: 21.5, h: 19.0 }] },
+    media: { type: "image", url: `${SLIDE_AUDIT_ASSET_ROOT}/slide_0003.png`, width: 1600, height: 900, boxes: [{ x: 61.3, y: 60.8, w: 21.5, h: 19.0 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
     anchors: {
@@ -190,7 +190,7 @@ const cases = [
     sourceLabel: "BAD",
     sourceReason: "原数据 response 为 true 且 strong agreement；中心气泡图遮挡左侧项目文字。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0011.png`, boxes: [{ x: 5.7, y: 42.4, w: 45.2, h: 23.3 }, { x: 25.8, y: 39.4, w: 47.5, h: 57.5 }, { x: 30.2, y: 41.5, w: 20.1, h: 8.0 }] },
+    media: { type: "image", url: `${SLIDE_AUDIT_ASSET_ROOT}/slide_0011.png`, width: 960, height: 720, boxes: [{ x: 5.7, y: 42.4, w: 45.2, h: 23.3 }, { x: 25.8, y: 39.4, w: 47.5, h: 57.5 }, { x: 30.2, y: 41.5, w: 20.1, h: 8.0 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
     anchors: {
@@ -215,7 +215,7 @@ const cases = [
     sourceLabel: "BAD",
     sourceReason: "原数据 response 为 true 且 strong agreement；左下方大号正文越出画布并被蓝色页脚带遮挡。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0016.png`, boxes: [{ x: 5.7, y: 52.2, w: 47.7, h: 46.6 }] },
+    media: { type: "image", url: `${SLIDE_AUDIT_ASSET_ROOT}/slide_0016.png`, width: 1600, height: 900, boxes: [{ x: 5.7, y: 52.2, w: 47.7, h: 46.6 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
     anchors: {
@@ -240,7 +240,7 @@ const cases = [
     sourceLabel: "BAD",
     sourceReason: "原数据 response 为 true 且 strong agreement；橙色标题落在复杂深色渐变背景上，局部对比不足。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0021.png`, boxes: [{ x: 28.0, y: 9.5, w: 64.0, h: 16.2 }] },
+    media: { type: "image", url: `${SLIDE_AUDIT_ASSET_ROOT}/slide_0021.png`, width: 1600, height: 1200, boxes: [{ x: 28.0, y: 9.5, w: 64.0, h: 16.2 }] },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
     anchors: {
@@ -265,7 +265,7 @@ const cases = [
     sourceLabel: "BAD",
     sourceReason: "原数据 response 为 true 且 strong agreement；页面由四段长句主导，单位时间阅读负担高。",
     evidencePages: [1],
-    media: { type: "image", url: `${SLIDE_AUDIT_ROOT}/slide_0061.png` },
+    media: { type: "image", url: `${SLIDE_AUDIT_ASSET_ROOT}/slide_0061.png`, width: 1600, height: 1200 },
     sourceUrl: "https://github.com/zhuohaouw/SlideAudit",
     agreement: "strong agreement",
     anchors: {
@@ -326,7 +326,11 @@ function media(caseItem, compact = false) {
   }
 
   const boxes = (caseItem.media.boxes ?? []).map((box) => `<span class="evidence-box" style="left:${box.x}%;top:${box.y}%;width:${box.w}%;height:${box.h}%"></span>`).join("");
-  return `<div class="image-frame ${compact ? "compact" : ""}"><img src="${caseItem.media.url}" alt="${escapeHtml(caseItem.objectLabel)}" loading="lazy" />${boxes}</div>`;
+  return `<div class="image-frame ${compact ? "compact" : ""}" data-image-state="loading">
+    <img src="${caseItem.media.url}" alt="${escapeHtml(caseItem.objectLabel)}" width="${caseItem.media.width}" height="${caseItem.media.height}" decoding="async" data-case-image />
+    <div class="image-fallback" role="status"><b>样例图片加载失败</b><span>请刷新页面；仍失败时可打开官方来源核对。</span></div>
+    ${boxes}
+  </div>`;
 }
 
 function hierarchy(caseItem) {
@@ -492,6 +496,13 @@ function stepVariant(direction) {
 }
 
 function bind() {
+  document.querySelectorAll("[data-case-image]").forEach((image) => {
+    const frame = image.closest(".image-frame");
+    const updateState = () => { frame.dataset.imageState = image.naturalWidth > 0 ? "loaded" : "error"; };
+    if (image.complete) updateState();
+    image.addEventListener("load", updateState, { once: true });
+    image.addEventListener("error", updateState, { once: true });
+  });
   document.querySelectorAll("[data-answer]").forEach((button) => button.addEventListener("click", () => {
     const item = filteredCases()[state.index];
     state.answers.set(item.id, button.dataset.answer);
