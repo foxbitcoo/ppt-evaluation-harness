@@ -1,10 +1,10 @@
 # Query + Profile Case Candidates v1
 
-Status: Draft for product confirmation; no vendor generation or Judge call is authorized by this document.
+Status: Approved by the product owner on 2026-08-10; six immutable `v1.0.0` Case payloads are frozen in the Feishu question-bank table. Vendor generation and Judge calls remain pending pipeline readiness.
 
 Tracking: [GitHub Issue #26](https://github.com/foxbitcoo/ppt-evaluation-harness/issues/26)
 
-Planned real Judge after product approval: Volcano Ark `doubao-seed-2-0-pro-260215` (ByteDance Seed 2.0 Pro). The model is recorded here as a frozen proposal only; no model call is authorized before all six Case payloads are confirmed.
+Planned real Judge: Volcano Ark `doubao-seed-2-0-pro-260215` (ByteDance Seed 2.0 Pro). The six Case payloads are approved; no model call has yet been made.
 
 ## Purpose
 
@@ -209,9 +209,18 @@ The treatment effect is evaluated within the same case and product package. It i
   - separation of trigger, contributing condition, detection gap, and impact
   - actionable prevention items with ownership
 
-## Approval gate
+## Approval record
 
-Before any vendor or Judge call, the product owner must approve or edit all of the following for every case:
+The product owner approved the six Case definitions and the controlled experiment on 2026-08-10. The frozen records use these stable IDs:
+
+- `case:qprofile-v1-edu-01-digital-rumor-class-meeting:v1.0.0`
+- `case:qprofile-v1-edu-02-newton-first-law:v1.0.0`
+- `case:qprofile-v1-edu-03-transition-parent-meeting:v1.0.0`
+- `case:qprofile-v1-office-01-project-status-decision:v1.0.0`
+- `case:qprofile-v1-office-02-growth-mbr:v1.0.0`
+- `case:qprofile-v1-office-03-launch-retrospective:v1.0.0`
+
+The approval covered:
 
 - Query wording;
 - requester profile and which fields are treated as memory;
@@ -221,4 +230,4 @@ Before any vendor or Judge call, the product owner must approve or edit all of t
 - reference-pack requirements;
 - whether the case is accepted, revised, or rejected.
 
-After approval, the frozen payload is assigned a new `case_version` and hash. Editing a confirmed Case creates a new version rather than overwriting the approved payload.
+Each frozen payload has `case_version = 1.0.0` and a verified SHA-256 hash. Editing a confirmed Case creates a new version rather than overwriting the approved payload.
