@@ -49,3 +49,18 @@ export {
   type TextBoxEvaluationElement,
   type UncertainReason,
 } from "./module.ts";
+
+export {
+  createBakeoffBatchManifest,
+  createQueryProfileCaseVariants,
+  toFeishuRunRecord,
+  type ApprovedQueryProfileCase,
+  type BakeoffBatchManifest,
+  type CreateBakeoffBatchManifestInput,
+  type EvaluationDataEnvironment,
+  type EvaluationRunPlan,
+  type FeishuRunRecord,
+  type MemoryExposureTreatment,
+  type ProductSurface,
+  type QueryProfileCaseVariant,
+} from "./batch.ts";
