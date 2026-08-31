@@ -1,0 +1,277 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  createBakeoffBatchManifest,
+  createQueryProfileCaseVariants,
+  toFeishuRunRecord,
+  type ApprovedQueryProfileCase,
+  type ProductSurface,
+} from "../evaluation/index.ts";
+
+const approvedCase: ApprovedQueryProfileCase = {
+  caseId: "qprofile-v1-office-01-project-status-decision",
+  caseVersion: "1.0.0",
+  query: "制作一份8页中文高层项目状态PPT。",
+  presentationAudience: {
+    description: "CEO、研发负责人、销售负责人、财务负责人",
+    priorKnowledge: "了解产品，但不了解日常实现细节",
+    readingMode: "10分钟会议投影",
+  },
+  useContext: {
+    occasion: "经营层项目例会",
+    objective: "获得资源或范围取舍决策",
+    expectedDurationMinutes: 10,
+    targetPageCount: 8,
+  },
+  requesterProfileVersion: "requester-profile-office-01@1.0.0",
+  requesterProfile: [
+    { label: "角色", value: "B2B SaaS产品经理" },
+    { label: "经验", value: "5年产品经验，第一年定期向经营层汇报" },
+    { label: "工作方式", value: "重细节，习惯先讲过程再讲结论" },
+  ],
+};
+
+const surfaces: readonly ProductSurface[] = [
+  {
+    surfaceId: "wps-aippt-web",
+    vendor: "WPS AI PPT",
+    surface: "WEB",
+    entryLocator: "https://aippt.wps.cn/aippt/",
+    version: "web@batch-time",
+    productPackageId: "wps-aippt-professional-web",
+    configurationHash: `sha256:${"1".repeat(64)}`,
+    nativeMemoryPolicy: "ISOLATED",
+  },
+  {
+    surfaceId: "qianwen-desktop",
+    vendor: "千问",
+    surface: "DESKTOP",
+    entryLocator: "com.alibaba.tongyi",
+    version: "4.0.0.158",
+    productPackageId: "qianwen-expert-desktop",
+    configurationHash: `sha256:${"2".repeat(64)}`,
+    nativeMemoryPolicy: "DISABLED",
+  },
+];
+
+test("Profile A/B variants keep Query, audience, use context, and page count identical", () => {
+  const variants = createQueryProfileCaseVariants(approvedCase);
+  const [control, treatment] = variants;
+
+  assert.equal(control.treatment, "NO_REQUESTER_PROFILE");
+  assert.equal(treatment.treatment, "REQUESTER_PROFILE_INJECTED");
+  assert.equal(control.commonInputHash, treatment.commonInputHash);
+  assert.equal(control.requesterProfileHash, treatment.requesterProfileHash);
+  assert.equal(control.query, treatment.query);
+  assert.deepEqual(control.presentationAudience, treatment.presentationAudience);
+  assert.deepEqual(control.useContext, treatment.useContext);
+  assert.doesNotMatch(control.vendorPrompt.text, /B2B SaaS产品经理/);
+  assert.match(treatment.vendorPrompt.text, /请求者 Profile/);
+  assert.match(treatment.vendorPrompt.text, /B2B SaaS产品经理/);
+  assert.notEqual(control.vendorPrompt.contentHash, treatment.vendorPrompt.contentHash);
+});
+
+test("Batch manifest expands one approved case into deterministic per-surface A/B run plans", () => {
+  const manifest = createBakeoffBatchManifest({
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "LIVE_PRODUCTION",
+    cases: [approvedCase],
+    surfaces,
+    judge: {
+      provider: "volcengine-ark",
+      model: "doubao-seed-2-0-pro-260215",
+    },
+    rubric: {
+      rubricId: "query-ppt-rubric",
+      rubricVersion: "1.1.0",
+    },
+  });
+
+  assert.equal(manifest.status, "PREPARED");
+  assert.equal(manifest.batchDate, "2026-08-10");
+  assert.equal(manifest.startedAt, null);
+  assert.equal(manifest.runs.length, 4);
+  assert.equal(new Set(manifest.runs.map(({ runId }) => runId)).size, 4);
+  assert.match(manifest.contentHash, /^sha256:[a-f0-9]{64}$/);
+
+  const webControl = manifest.runs.find(
+    ({ surfaceId, treatment }) =>
+      surfaceId === "wps-aippt-web" && treatment === "NO_REQUESTER_PROFILE",
+  );
+  assert.ok(webControl);
+  const feishu = toFeishuRunRecord(webControl);
+  assert.equal(feishu["批次ID"], "BATCH-0001");
+  assert.equal(feishu["实验分组"], "对照组｜不注入请求者人设");
+  assert.equal(feishu["请求者人设版本"], "requester-profile-office-01@1.0.0");
+  assert.equal(feishu["批次日期"], "2026-08-10");
+  assert.equal(feishu["运行面"], "WEB");
+  assert.equal(feishu["网页入口"], "https://aippt.wps.cn/aippt/");
+  assert.equal(feishu["产品套餐ID"], "wps-aippt-professional-web");
+  assert.equal(feishu["原生记忆策略"], "ISOLATED");
+  assert.equal(feishu["运行状态"], undefined);
+  assert.match(String(feishu["载荷哈希"]), /^[a-f0-9]{64}$/);
+});
+
+test("Run identity changes when the product package, configuration, or requester profile changes", () => {
+  const create = (surface: ProductSurface, queryCase: ApprovedQueryProfileCase = approvedCase) =>
+    createBakeoffBatchManifest({
+      batchId: "BATCH-0001",
+      batchSeq: 1,
+      batchDate: "2026-08-10",
+      environment: "LIVE_PRODUCTION",
+      cases: [queryCase],
+      surfaces: [surface],
+      judge: { provider: "volcengine-ark", model: "doubao-seed-2-0-pro-260215" },
+      rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+    });
+  const baseline = create(surfaces[0]!);
+  const pro = create({
+    ...surfaces[0]!,
+    productPackageId: "wps-aippt-advanced-web",
+    configurationHash: `sha256:${"9".repeat(64)}`,
+  });
+  const changedProfile = create(surfaces[0]!, {
+    ...approvedCase,
+    requesterProfile: [...approvedCase.requesterProfile, { label: "偏好", value: "结论先行" }],
+  });
+  const mockEnvironment = createBakeoffBatchManifest({
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "MOCK",
+    cases: [approvedCase],
+    surfaces: [surfaces[0]!],
+    judge: { provider: "deterministic-test-double", model: "mock-v1" },
+    rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+  });
+  const desktopEntry = create({
+    ...surfaces[0]!,
+    surface: "DESKTOP",
+    entryLocator: "com.kingsoft.wpsoffice.mac",
+  });
+  assert.notEqual(baseline.runs[0]!.runId, pro.runs[0]!.runId);
+  assert.notEqual(baseline.runs[1]!.runId, pro.runs[1]!.runId);
+  assert.notEqual(baseline.runs[0]!.runId, changedProfile.runs[0]!.runId);
+  assert.notEqual(baseline.runs[1]!.runId, changedProfile.runs[1]!.runId);
+  assert.notEqual(baseline.runs[0]!.runId, mockEnvironment.runs[0]!.runId);
+  assert.notEqual(baseline.runs[0]!.runId, desktopEntry.runs[0]!.runId);
+  const changedVendor = create({ ...surfaces[0]!, vendor: "另一个厂商" });
+  assert.notEqual(baseline.runs[0]!.runId, changedVendor.runs[0]!.runId);
+});
+
+test("Batch manifest fails closed on invalid environment, surface, or memory policy", () => {
+  const base = {
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "LIVE_PRODUCTION" as const,
+    cases: [approvedCase],
+    surfaces,
+    judge: { provider: "volcengine-ark", model: "doubao-seed-2-0-pro-260215" },
+    rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+  };
+  assert.throws(
+    () => createBakeoffBatchManifest({ ...base, environment: "BROKEN" as never }),
+    /environment 枚举值无效/,
+  );
+  assert.throws(
+    () => createBakeoffBatchManifest({
+      ...base,
+      surfaces: [{ ...surfaces[0]!, surface: "MOBILE" as never }],
+    }),
+    /surface\.surface 枚举值无效/,
+  );
+  assert.throws(
+    () => createBakeoffBatchManifest({
+      ...base,
+      surfaces: [{ ...surfaces[0]!, nativeMemoryPolicy: "ENABLED" as never }],
+    }),
+    /nativeMemoryPolicy 枚举值无效/,
+  );
+});
+
+test("Batch manifest rejects ambiguous or duplicate product surfaces", () => {
+  assert.throws(
+    () =>
+      createBakeoffBatchManifest({
+        batchId: "BATCH-0001",
+        batchSeq: 1,
+        batchDate: "2026-08-10",
+        environment: "LIVE_PRODUCTION",
+        cases: [approvedCase],
+        surfaces: [surfaces[0]!, surfaces[0]!],
+        judge: {
+          provider: "volcengine-ark",
+          model: "doubao-seed-2-0-pro-260215",
+        },
+        rubric: {
+          rubricId: "query-ppt-rubric",
+          rubricVersion: "1.1.0",
+        },
+      }),
+    /运行面 ID 重复/,
+  );
+});
+
+test("Batch manifest rejects multiple versions of one Case because Run IDs must stay unambiguous", () => {
+  assert.throws(
+    () =>
+      createBakeoffBatchManifest({
+        batchId: "BATCH-0001",
+        batchSeq: 1,
+        batchDate: "2026-08-10",
+        environment: "LIVE_PRODUCTION",
+        cases: [
+          approvedCase,
+          { ...approvedCase, caseVersion: "1.0.1" },
+        ],
+        surfaces,
+        judge: {
+          provider: "volcengine-ark",
+          model: "doubao-seed-2-0-pro-260215",
+        },
+        rubric: {
+          rubricId: "query-ppt-rubric",
+          rubricVersion: "1.1.0",
+        },
+      }),
+    /同一批次不能包含同一 Case 的多个版本/,
+  );
+});
+
+test("Batch contracts are immutable and bind natural batch identity to date and sequence", () => {
+  const mutableCase = structuredClone(approvedCase);
+  const mutableJudge = { provider: "volcengine-ark", model: "doubao-seed-2-0-pro-260215" };
+  const manifest = createBakeoffBatchManifest({
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "LIVE_PRODUCTION",
+    cases: [mutableCase],
+    surfaces,
+    judge: mutableJudge,
+    rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+  });
+  const originalHash = manifest.contentHash;
+  (mutableCase.presentationAudience as { description: string }).description = "被调用方修改";
+  mutableJudge.model = "被调用方修改";
+  assert.equal(manifest.runs[0]?.vendorPrompt.text.includes("被调用方修改"), false);
+  assert.equal(manifest.judge.model, "doubao-seed-2-0-pro-260215");
+  assert.equal(manifest.contentHash, originalHash);
+  assert.throws(
+    () => createBakeoffBatchManifest({
+      batchId: "BATCH-0002",
+      batchSeq: 1,
+      batchDate: "2026-08-10",
+      environment: "LIVE_PRODUCTION",
+      cases: [approvedCase],
+      surfaces,
+      judge: mutableJudge,
+      rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+    }),
+    /batchId 必须与 batchSeq 对应/,
+  );
+});

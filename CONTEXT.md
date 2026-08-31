@@ -40,6 +40,46 @@ _Avoid_: Vendor name alone, assumed default
 A versioned test input and evaluation definition. It separates the vendor-visible input contract from evaluator-only reference material and belongs to exactly one Input Track.
 _Avoid_: Prompt string, scoring result
 
+**Question Bank Case**:
+A Query Generation Evaluation Case that freezes requester persona, presentation audience, intended use, target page count, Query, vendor-prompt template, and evaluator-only context. Vendor intent confirmation produces a new Case version instead of mutating the frozen Case.
+_Avoid_: Query string, mutable vendor confirmation state
+
+**Requester Persona**:
+The simulated person asking a product to create the PPT, including role and relevant background. It is distinct from the people who will consume the presentation.
+_Avoid_: Audience, viewer
+
+**Presentation Audience**:
+The intended readers or viewers of the generated PPT, including their prior knowledge and reading mode. It is distinct from the Requester Persona.
+_Avoid_: Requester, prompt author
+
+**Evaluation Target**:
+A scoreable node in the static presentation hierarchy: one Deck, one of its Slides, or an Image/Text Box Element on a Slide. Evidence is not an Evaluation Target.
+_Avoid_: Evidence, rubric dimension
+
+**Deck**:
+The complete logical PPT Artifact evaluated as a whole; it is not a source document. Audience fit, task fit, coverage, narrative, and cross-slide consistency are Deck-level concerns.
+_Avoid_: Document, slide, file URL
+
+**Slide**:
+One static rendered page of a Deck. Page layout, hierarchy, readability, and local expression are commonly assessed at this scope.
+_Avoid_: Deck, screenshot collection
+
+**Element**:
+An individually addressable Image or Text Box on a Slide that can receive its own assessment. Image clarity/cropping/fit and text sizing/crowding/overflow are Element-level concerns.
+_Avoid_: Evidence, arbitrary pixel region
+
+**Evidence**:
+Versioned supporting material cited by a judgment, such as a page observation, element crop, extracted text, gate result, or reference fact. Evidence supports a label but is never itself scored.
+_Avoid_: Evaluation Target, score
+
+**Evaluation Label**:
+The atomic judgment `GOOD`, `BAD`, or `UNCERTAIN`, displayed in Chinese as “好”, “不好”, or “不确定”. `UNCERTAIN` records why a responsible decision cannot yet be made.
+_Avoid_: 1–5 score, probability, delivery gate
+
+**Judgment Confidence**:
+The Judge's stated certainty about one judgment under the available Rubric and Evidence. It is not measured Judge accuracy; accuracy requires calibration against independently established reference labels.
+_Avoid_: Accuracy, factual correctness, probability of vendor quality
+
 **Query Generation Track**:
 Evaluation Cases where the product must plan and generate a presentation from a short user request without a source document.
 _Avoid_: Document summarization, source fidelity test
@@ -57,7 +97,7 @@ A rubric-versioned, independently produced profile of Task Success, Presentation
 _Avoid_: Pairwise result, operational telemetry, uncalibrated vendor rank
 
 **Pairwise Judgment**:
-A blind, relative preference judgment between two compatible Artifacts, used as supplementary evidence for subjective visual dimensions.
+A relative preference judgment between two compatible Artifacts, used as supplementary evidence for subjective visual dimensions. The current MVP is non-blind. Blinding may only be enabled later by an explicit, versioned Batch protocol.
 _Avoid_: Primary score, permanent ranking
 
 **Operational Metrics**:
