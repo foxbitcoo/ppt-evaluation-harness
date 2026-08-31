@@ -329,7 +329,7 @@ Deck: audience_fit = GOOD
 
 ### 7.2 `EvaluationInput`
 
-只接收冻结的 `QuestionBankCase`、Artifact 身份、静态渲染页、页内 `IMAGE | TEXT_BOX` 元素、Reference Pack 和版本化评测协议。`createEvaluationInput` 验证页码/元素唯一性、产物与渲染页数一致性，并在 `production` 模式拒绝 Mock Judge。
+只接收冻结的 `QuestionBankCase`、Artifact 身份、静态渲染页、页内 `IMAGE | TEXT_BOX` 元素、Reference Pack 和版本化评测协议。`createEvaluationInput` 验证题库枚举与 Rubric hash、页码/元素唯一性、产物与渲染页数一致性，并在 `production` 模式拒绝 Mock Judge。输出增加 canonical `evaluationInputHash`；图片字节按 copy-on-read 暴露，调用方无法通过索引、`subarray()` 或 `.buffer` 改写已验证快照，同时仍可直接传给标准哈希接口。
 
 ### 7.3 `EvaluationResult`
 
@@ -340,7 +340,7 @@ Deck: audience_fit = GOOD
 3. `tree.evidence`：支持判断的页面/元素/事实证据；
 4. `dimensionProfile + comparisonVector`：三态分布与版本化维度映射，不含序数总分。
 
-`createEvaluationResult` 强制 `UNCERTAIN` 原因、Evidence 引用、对象树关系和 Mock/Real 边界。事实材料不足时用 `assessmentStatus=NOT_ASSESSABLE + label=UNCERTAIN + uncertainReason=REFERENCE_MISSING`表达。
+`createEvaluationResult` 强制 `UNCERTAIN` 原因、Evidence 引用、对象树关系和 Mock/Real 边界。结果必须携带并重新验证原始 `EvaluationInput`，其身份、Reference Pack、Artifact/Render/Rubric/Prompt/Judge lineage 及非空 response ID 必须逐项一致；Target 树必须完整覆盖输入页面和元素，`REFERENCE_FACT` Evidence 必须绑定输入中已验证的 fact/source。比较轴只接受内置、哈希化的 Mapping Registry，不能由调用方选择性漏掉不利维度。事实材料不足时用 `assessmentStatus=NOT_ASSESSABLE + label=UNCERTAIN + uncertainReason=REFERENCE_MISSING`表达。
 
 ### 7.4 前端和飞书字段契约
 
