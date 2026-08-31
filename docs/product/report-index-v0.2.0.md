@@ -1,7 +1,7 @@
 # report-index@0.2.0：静态 80 分报告映射
 
-状态：Ready for implementation  
-对应 Issue：#30  
+状态：Ready for implementation
+对应 Issue：#30
 底层 Rubric：`query-ppt-rubric@1.1.0`
 
 ## 1. 目标

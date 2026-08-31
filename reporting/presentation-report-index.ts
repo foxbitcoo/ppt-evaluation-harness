@@ -4,6 +4,9 @@ export const PRESENTATION_REPORT_INDEX_VERSION =
 export const PRESENTATION_REPORT_CALIBRATION_STATUS =
   "PROVISIONAL_SCORE_NOT_CALIBRATED" as const;
 
+export const PRESENTATION_REPORT_RUBRIC_VERSION =
+  "query-ppt-rubric@1.1.0" as const;
+
 export const PRESENTATION_REPORT_DIMENSIONS = [
   { dimension: "content_accuracy_coverage", maxScore: 25 },
   { dimension: "narrative_plain_language", maxScore: 20 },
@@ -46,6 +49,7 @@ export type PresentationFindingKind =
 
 export interface PresentationReportFinding {
   readonly findingId: string;
+  readonly deductionKey: string;
   readonly kind: PresentationFindingKind;
   readonly deductionOwner: PresentationReportDimension;
   readonly evidenceIds: readonly string[];
@@ -67,13 +71,14 @@ export interface OperationalCapabilityAssessment {
 
 export interface PresentationReportInput {
   readonly reportIndexVersion: typeof PRESENTATION_REPORT_INDEX_VERSION;
-  readonly rubricVersion: string;
+  readonly rubricVersion: typeof PRESENTATION_REPORT_RUBRIC_VERSION;
   readonly artifactId: string;
   readonly dimensions: readonly PresentationDimensionAssessment[];
   readonly presentationEffectiveness: PresentationEffectivenessAssessment;
   readonly strongestPage: PresentationPageSelection;
   readonly weakestPage: PresentationPageSelection;
   readonly findings: readonly PresentationReportFinding[];
+  readonly summaryParagraphs: readonly string[];
   readonly operationalCapabilities: readonly OperationalCapabilityAssessment[];
   readonly scenarioRecommendations: readonly string[];
 }
@@ -98,6 +103,31 @@ const DIMENSION_MAX = new Map<PresentationReportDimension, number>(
   ]),
 );
 
+const ASSESSMENT_STATUSES = new Set<PresentationReportAssessmentStatus>([
+  "SCORED",
+  "UNKNOWN",
+]);
+const FINDING_KINDS = new Set<PresentationFindingKind>([
+  "CONTENT_ERROR",
+  "CONTENT_OMISSION",
+  "LAYOUT_READABILITY",
+  "OTHER",
+]);
+const OPERATIONAL_CAPABILITY_STATUSES =
+  new Set<OperationalCapabilityStatus>([
+    "VERIFIED",
+    "FAILED",
+    "UNVERIFIED",
+  ]);
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
 function assertNonEmpty(value: string, label: string): void {
   if (value.trim().length === 0) throw new Error(`${label} must not be empty`);
 }
@@ -118,6 +148,9 @@ function assertScore(
   evidenceIds: readonly string[],
   label: string,
 ): void {
+  if (!ASSESSMENT_STATUSES.has(status)) {
+    throw new Error(`${label} has an unknown assessment status`);
+  }
   if (status === "UNKNOWN") {
     if (score !== null) throw new Error(`${label} UNKNOWN assessment must have a null score`);
     return;
@@ -142,14 +175,17 @@ function assertPageSelection(
 export function aggregatePresentationReport(
   input: PresentationReportInput,
 ): AggregatedPresentationReport {
-  if (input.reportIndexVersion !== PRESENTATION_REPORT_INDEX_VERSION) {
+  const snapshot = structuredClone(input) as PresentationReportInput;
+  if (snapshot.reportIndexVersion !== PRESENTATION_REPORT_INDEX_VERSION) {
     throw new Error("Unsupported Presentation report index version");
   }
-  assertNonEmpty(input.rubricVersion, "rubricVersion");
-  assertNonEmpty(input.artifactId, "artifactId");
+  if (snapshot.rubricVersion !== PRESENTATION_REPORT_RUBRIC_VERSION) {
+    throw new Error("Unsupported Rubric version for Presentation report index");
+  }
+  assertNonEmpty(snapshot.artifactId, "artifactId");
 
   const assessments = new Map<PresentationReportDimension, PresentationDimensionAssessment>();
-  for (const assessment of input.dimensions) {
+  for (const assessment of snapshot.dimensions) {
     const maxScore = DIMENSION_MAX.get(assessment.dimension);
     if (maxScore === undefined) {
       throw new Error(`Unknown Presentation report dimension: ${assessment.dimension}`);
@@ -166,23 +202,45 @@ export function aggregatePresentationReport(
   }
 
   assertScore(
-    input.presentationEffectiveness.status,
-    input.presentationEffectiveness.score,
+    snapshot.presentationEffectiveness.status,
+    snapshot.presentationEffectiveness.score,
     10,
-    input.presentationEffectiveness.evidenceIds,
+    snapshot.presentationEffectiveness.evidenceIds,
     "Presentation effectiveness",
   );
-  assertNonEmpty(input.presentationEffectiveness.rationale, "Presentation effectiveness rationale");
-  assertPageSelection(input.strongestPage, "strongestPage");
-  assertPageSelection(input.weakestPage, "weakestPage");
+  assertNonEmpty(snapshot.presentationEffectiveness.rationale, "Presentation effectiveness rationale");
+  assertPageSelection(snapshot.strongestPage, "strongestPage");
+  assertPageSelection(snapshot.weakestPage, "weakestPage");
+
+  if (snapshot.summaryParagraphs.length < 1 || snapshot.summaryParagraphs.length > 3) {
+    throw new Error("Presentation report requires one to three summary paragraphs");
+  }
+  snapshot.summaryParagraphs.forEach((paragraph) =>
+    assertNonEmpty(paragraph, "summary paragraph"),
+  );
+  if (snapshot.scenarioRecommendations.length === 0) {
+    throw new Error("Presentation report requires at least one scenario recommendation");
+  }
+  snapshot.scenarioRecommendations.forEach((recommendation) =>
+    assertNonEmpty(recommendation, "scenario recommendation"),
+  );
 
   const findingIds = new Set<string>();
-  for (const finding of input.findings) {
+  const deductionKeys = new Set<string>();
+  for (const finding of snapshot.findings) {
     assertNonEmpty(finding.findingId, "findingId");
+    assertNonEmpty(finding.deductionKey, "deductionKey");
     if (findingIds.has(finding.findingId)) {
       throw new Error(`Duplicate findingId: ${finding.findingId}`);
     }
     findingIds.add(finding.findingId);
+    if (deductionKeys.has(finding.deductionKey)) {
+      throw new Error(`Duplicate deductionKey: ${finding.deductionKey}`);
+    }
+    deductionKeys.add(finding.deductionKey);
+    if (!FINDING_KINDS.has(finding.kind)) {
+      throw new Error(`Unknown finding kind: ${finding.kind}`);
+    }
     if (!DIMENSION_MAX.has(finding.deductionOwner)) {
       throw new Error(`Unknown deductionOwner: ${finding.deductionOwner}`);
     }
@@ -193,9 +251,12 @@ export function aggregatePresentationReport(
     }
   }
 
-  for (const capability of input.operationalCapabilities) {
+  for (const capability of snapshot.operationalCapabilities) {
     assertNonEmpty(capability.capability, "Operational capability");
     assertNonEmpty(capability.note, `${capability.capability} note`);
+    if (!OPERATIONAL_CAPABILITY_STATUSES.has(capability.status)) {
+      throw new Error(`Unknown operational capability status: ${capability.status}`);
+    }
     if (capability.status !== "UNVERIFIED") {
       assertEvidenceIds(capability.evidenceIds, `Operational capability evidence: ${capability.capability}`);
     }
@@ -208,8 +269,8 @@ export function aggregatePresentationReport(
     (assessment) => assessment.status === "SCORED" && assessment.score !== null,
   );
 
-  return {
-    ...input,
+  return deepFreeze({
+    ...snapshot,
     dimensions: orderedDimensions,
     calibrationStatus: PRESENTATION_REPORT_CALIBRATION_STATUS,
     staticAssessmentStatus: scored ? "SCORED" : "NOT_ASSESSABLE",
@@ -217,12 +278,12 @@ export function aggregatePresentationReport(
       ? orderedDimensions.reduce((sum, assessment) => sum + (assessment.score ?? 0), 0)
       : null,
     staticMaxScore: 80,
-    presentationEffectivenessIncludedInStaticTotal: false,
-    contentErrors: input.findings.filter(({ kind }) => kind === "CONTENT_ERROR"),
-    contentOmissions: input.findings.filter(({ kind }) => kind === "CONTENT_OMISSION"),
-    layoutAndReadabilityIssues: input.findings.filter(({ kind }) => kind === "LAYOUT_READABILITY"),
-    unverifiedCapabilities: input.operationalCapabilities
+    presentationEffectivenessIncludedInStaticTotal: false as const,
+    contentErrors: snapshot.findings.filter(({ kind }) => kind === "CONTENT_ERROR"),
+    contentOmissions: snapshot.findings.filter(({ kind }) => kind === "CONTENT_OMISSION"),
+    layoutAndReadabilityIssues: snapshot.findings.filter(({ kind }) => kind === "LAYOUT_READABILITY"),
+    unverifiedCapabilities: snapshot.operationalCapabilities
       .filter(({ status }) => status === "UNVERIFIED")
       .map(({ capability }) => capability),
-  };
+  });
 }

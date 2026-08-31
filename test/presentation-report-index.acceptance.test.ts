@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   PRESENTATION_REPORT_DIMENSIONS,
   PRESENTATION_REPORT_INDEX_VERSION,
+  PRESENTATION_REPORT_RUBRIC_VERSION,
   aggregatePresentationReport,
   type PresentationReportInput,
 } from "../reporting/presentation-report-index.ts";
@@ -11,7 +12,7 @@ import {
 function validInput(): PresentationReportInput {
   return {
     reportIndexVersion: PRESENTATION_REPORT_INDEX_VERSION,
-    rubricVersion: "query-ppt-rubric@1.1.0",
+    rubricVersion: PRESENTATION_REPORT_RUBRIC_VERSION,
     artifactId: "artifact-a",
     dimensions: [
       {
@@ -69,6 +70,7 @@ function validInput(): PresentationReportInput {
     findings: [
       {
         findingId: "finding-1",
+        deductionKey: "omission-boundary",
         kind: "CONTENT_OMISSION",
         deductionOwner: "content_accuracy_coverage",
         evidenceIds: ["e-content"],
@@ -77,12 +79,17 @@ function validInput(): PresentationReportInput {
       },
       {
         findingId: "finding-2",
+        deductionKey: "small-body-copy",
         kind: "LAYOUT_READABILITY",
         deductionOwner: "readability_static_finish",
         evidenceIds: ["e-page-7"],
         pageNumbers: [7],
         description: "正文在投影距离下偏小。",
       },
+    ],
+    summaryParagraphs: [
+      "内容准确、故事线完整，图文解释也比较有效。",
+      "部分适用边界缺失，第 7 页正文偏小。",
     ],
     operationalCapabilities: [
       {
@@ -183,6 +190,25 @@ test("each finding owns exactly one deduction dimension and duplicate finding id
   );
 });
 
+test("one defect cannot be deducted again under another owner", () => {
+  const base = validInput();
+  assert.throws(
+    () =>
+      aggregatePresentationReport({
+        ...base,
+        findings: [
+          ...base.findings,
+          {
+            ...base.findings[0]!,
+            findingId: "finding-duplicate-owner",
+            deductionOwner: "narrative_plain_language",
+          },
+        ],
+      }),
+    /duplicate deductionKey/i,
+  );
+});
+
 test("operational delivery evidence stays outside static scoring and verified claims require evidence", () => {
   const base = validInput();
   assert.throws(
@@ -200,4 +226,64 @@ test("operational delivery evidence stays outside static scoring and verified cl
       }),
     /operational capability evidence/i,
   );
+});
+
+test("runtime enums, frozen Rubric version, summaries, and recommendations fail closed", () => {
+  const base = validInput();
+  const invalidInputs: PresentationReportInput[] = [
+    { ...base, rubricVersion: "wrong-rubric" as typeof base.rubricVersion },
+    { ...base, summaryParagraphs: [] },
+    { ...base, summaryParagraphs: ["1", "2", "3", "4"] },
+    { ...base, scenarioRecommendations: [] },
+    { ...base, scenarioRecommendations: [""] },
+    {
+      ...base,
+      dimensions: base.dimensions.map((item) =>
+        item.dimension === "visual_use"
+          ? { ...item, status: "BROKEN" as typeof item.status }
+          : item,
+      ),
+    },
+    {
+      ...base,
+      findings: [
+        {
+          ...base.findings[0]!,
+          kind: "BROKEN" as typeof base.findings[number]["kind"],
+        },
+      ],
+    },
+    {
+      ...base,
+      operationalCapabilities: [
+        {
+          ...base.operationalCapabilities[0]!,
+          status:
+            "BROKEN" as typeof base.operationalCapabilities[number]["status"],
+        },
+      ],
+    },
+  ];
+
+  for (const input of invalidInputs) {
+    assert.throws(() => aggregatePresentationReport(input));
+  }
+});
+
+test("the aggregated report is an immutable validated snapshot", () => {
+  const input = validInput();
+  const report = aggregatePresentationReport(input);
+  const first = input.dimensions[0] as unknown as {
+    score: number | null;
+    evidenceIds: string[];
+  };
+
+  first.score = 0;
+  first.evidenceIds.push("late-evidence");
+
+  assert.equal(report.staticTotal, 66);
+  assert.equal(report.dimensions[0]?.score, 22);
+  assert.deepEqual(report.dimensions[0]?.evidenceIds, ["e-content"]);
+  assert.ok(Object.isFrozen(report));
+  assert.ok(Object.isFrozen(report.dimensions));
 });
