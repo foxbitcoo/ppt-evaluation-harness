@@ -1,7 +1,7 @@
 # PPT Evaluation Module v1：现状审计与规格草案
 
-状态：Draft，供主任务和产品经理评审  
-审计基线：`codex/bridge-v2-integration` / `c141b45`  预期交付分支：`codex/ppt-evaluation-v1-spec`  
+状态：Draft，供主任务和产品经理评审
+审计基线：`codex/bridge-v2-integration` / `c141b45`；预期交付分支：`codex/ppt-evaluation-v1-spec`
 日期：2026-08-03
 
 修订说明：用户讨论后，当前方向已转入 [v1.1 三态标注、分层评测与 Query 题库](evaluation-module-v1.1-tristate-hierarchy.md)。本文件仅保留原始六维/九维审计作为历史背景；权威公共契约使用三态、`Deck → Slide → Element` 对象层级和独立 Evidence。

@@ -64,6 +64,7 @@ export interface EvaluationRunPlan {
   readonly runId: string;
   readonly batchId: string;
   readonly batchSeq: number;
+  readonly batchDate: string;
   readonly environment: EvaluationDataEnvironment;
   readonly status: "PREPARED";
   readonly caseId: string;
@@ -86,7 +87,7 @@ export interface BakeoffBatchManifest {
   readonly stableId: string;
   readonly batchId: string;
   readonly batchSeq: number;
-  readonly batchDate: string | null;
+  readonly batchDate: string;
   readonly startedAt: string | null;
   readonly environment: EvaluationDataEnvironment;
   readonly status: "PREPARED";
@@ -105,6 +106,7 @@ export interface BakeoffBatchManifest {
 export interface CreateBakeoffBatchManifestInput {
   readonly batchId: string;
   readonly batchSeq: number;
+  readonly batchDate: string;
   readonly environment: EvaluationDataEnvironment;
   readonly cases: readonly ApprovedQueryProfileCase[];
   readonly surfaces: readonly ProductSurface[];
@@ -128,6 +130,18 @@ function canonicalize(value: unknown): unknown {
     );
   }
   return value;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.values(value as Record<string, unknown>).forEach(deepFreeze);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function immutableSnapshot<T>(value: T): T {
+  return deepFreeze(structuredClone(value));
 }
 
 function sha256(value: unknown): Sha256Hash {
@@ -178,13 +192,13 @@ export function createQueryProfileCaseVariants(
   });
 
   const commonPrompt = buildCommonPrompt(input);
-  const commonInput = {
+  const commonInput = immutableSnapshot({
     caseId: input.caseId,
     caseVersion: input.caseVersion,
     query: input.query,
     presentationAudience: input.presentationAudience,
     useContext: input.useContext,
-  };
+  });
   const commonInputHash = sha256(commonInput);
 
   const createVariant = (
@@ -212,7 +226,7 @@ export function createQueryProfileCaseVariants(
         contentHash: sha256(promptText),
       },
     };
-    return Object.freeze({
+    return immutableSnapshot({
       ...withoutContentHash,
       contentHash: sha256(withoutContentHash),
     });
@@ -227,22 +241,28 @@ export function createQueryProfileCaseVariants(
 function createRunPlan(input: {
   readonly batchId: string;
   readonly batchSeq: number;
+  readonly batchDate: string;
   readonly environment: EvaluationDataEnvironment;
   readonly variant: QueryProfileCaseVariant;
   readonly surface: ProductSurface;
 }): EvaluationRunPlan {
-  const runId = [
-    input.batchId,
-    input.variant.caseId,
-    input.variant.treatment,
-    input.surface.surfaceId,
-  ].join(":");
+  const identityHash = withoutSha256Prefix(sha256({
+    schemaVersion: "evaluation-run-identity-v1",
+    batchId: input.batchId,
+    batchSeq: input.batchSeq,
+    caseId: input.variant.caseId,
+    caseVersion: input.variant.caseVersion,
+    treatment: input.variant.treatment,
+    surfaceId: input.surface.surfaceId,
+  }));
+  const runId = `RUN-${identityHash.slice(0, 24)}`;
   const withoutContentHash = {
     schemaVersion: "evaluation-run-plan-v1" as const,
-    stableId: `run:${runId}`,
+    stableId: `run:${identityHash}`,
     runId,
     batchId: input.batchId,
     batchSeq: input.batchSeq,
+    batchDate: input.batchDate,
     environment: input.environment,
     status: "PREPARED" as const,
     caseId: input.variant.caseId,
@@ -254,11 +274,11 @@ function createRunPlan(input: {
     surfaceVersion: input.surface.version,
     entryLocator: input.surface.entryLocator,
     query: input.variant.query,
-    vendorPrompt: input.variant.vendorPrompt,
+    vendorPrompt: immutableSnapshot(input.variant.vendorPrompt),
     targetPageCount: input.variant.useContext.targetPageCount,
     commonInputHash: input.variant.commonInputHash,
   };
-  return Object.freeze({
+  return immutableSnapshot({
     ...withoutContentHash,
     contentHash: sha256(withoutContentHash),
   });
@@ -274,6 +294,20 @@ export function createBakeoffBatchManifest(
   assertNonEmpty(input.rubric.rubricVersion, "rubric.rubricVersion");
   if (!Number.isInteger(input.batchSeq) || input.batchSeq < 1) {
     throw new Error("batchSeq 必须是正整数");
+  }
+  const expectedBatchId = `BATCH-${String(input.batchSeq).padStart(4, "0")}`;
+  if (input.batchId !== expectedBatchId) {
+    throw new Error(`batchId 必须与 batchSeq 对应：${expectedBatchId}`);
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.batchDate)) {
+    throw new Error("batchDate 必须是 YYYY-MM-DD");
+  }
+  const parsedBatchDate = new Date(`${input.batchDate}T00:00:00.000Z`);
+  if (
+    Number.isNaN(parsedBatchDate.getTime()) ||
+    parsedBatchDate.toISOString().slice(0, 10) !== input.batchDate
+  ) {
+    throw new Error("batchDate 必须是有效日期");
   }
   if (input.cases.length === 0) throw new Error("批次至少需要一个 Case");
   if (input.surfaces.length === 0) throw new Error("批次至少需要一个运行面");
@@ -305,6 +339,7 @@ export function createBakeoffBatchManifest(
         runs.push(createRunPlan({
           batchId: input.batchId,
           batchSeq: input.batchSeq,
+          batchDate: input.batchDate,
           environment: input.environment,
           variant,
           surface,
@@ -313,34 +348,43 @@ export function createBakeoffBatchManifest(
     });
   });
 
+  if (new Set(runs.map(({ stableId }) => stableId)).size !== runs.length) {
+    throw new Error("运行计划 stableId 冲突");
+  }
+
   const withoutContentHash = {
     schemaVersion: "bakeoff-batch-manifest-v1" as const,
-    stableId: `batch:${input.batchId}`,
+    stableId: `batch:${input.batchSeq}:${input.batchId}`,
     batchId: input.batchId,
     batchSeq: input.batchSeq,
-    batchDate: null,
+    batchDate: input.batchDate,
     startedAt: null,
     environment: input.environment,
     status: "PREPARED" as const,
-    judge: input.judge,
-    rubric: input.rubric,
-    runs: Object.freeze(runs),
+    judge: immutableSnapshot(input.judge),
+    rubric: immutableSnapshot(input.rubric),
+    runs: immutableSnapshot(runs),
   };
-  return Object.freeze({
+  return immutableSnapshot({
     ...withoutContentHash,
     contentHash: sha256(withoutContentHash),
   });
 }
 
 export function toFeishuRunRecord(run: EvaluationRunPlan): FeishuRunRecord {
+  const treatmentLabel: Record<MemoryExposureTreatment, string> = {
+    NO_REQUESTER_PROFILE: "对照组｜不注入请求者人设",
+    REQUESTER_PROFILE_INJECTED: "实验组｜注入请求者人设",
+  };
   const record: Record<string, string | number | undefined> = {
     "稳定ID": run.stableId,
     "运行ID": run.runId,
     "批次ID": run.batchId,
     "批次序号": run.batchSeq,
+    "批次日期": run.batchDate,
     "题目ID": run.caseId,
     "Case版本": run.caseVersion,
-    "实验分组": run.treatment,
+    "实验分组": treatmentLabel[run.treatment],
     "厂商": run.vendor,
     "运行面": run.surface,
     "运行面版本": run.surfaceVersion,

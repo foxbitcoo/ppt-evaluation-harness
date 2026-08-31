@@ -444,8 +444,56 @@ export interface EvaluationResult {
   readonly lineage: EvaluationResultLineage;
 }
 
-function sha256(value: string): Sha256Hash {
-  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, child]) => [key, canonicalize(child)]),
+    );
+  }
+  return value;
+}
+
+function sha256(value: unknown): Sha256Hash {
+  const content = typeof value === "string" || value instanceof Uint8Array
+    ? value
+    : JSON.stringify(canonicalize(value));
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+function deepFreeze<T>(value: T): T {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    !ArrayBuffer.isView(value) &&
+    !Object.isFrozen(value)
+  ) {
+    Object.values(value as Record<string, unknown>).forEach(deepFreeze);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function immutableSnapshot<T>(value: T): T {
+  return deepFreeze(structuredClone(value));
+}
+
+function assertSha256Hash(value: string, fieldName: string): asserts value is Sha256Hash {
+  if (!/^sha256:[a-f0-9]{64}$/.test(value)) {
+    throw new Error(`${fieldName} 必须是 sha256 哈希`);
+  }
+}
+
+function assertOneOf<T extends string>(
+  value: string,
+  allowed: readonly T[],
+  fieldName: string,
+): asserts value is T {
+  if (!allowed.includes(value as T)) {
+    throw new Error(`${fieldName} 枚举值无效：${value}`);
+  }
 }
 
 function assertNonEmpty(value: string, fieldName: string): void {
@@ -500,7 +548,7 @@ export function createQuestionBankCase(
   }
 
   const promptText = buildQueryGenerationVendorPrompt(input);
-  const withoutCaseHash = {
+  const withoutCaseHash = immutableSnapshot({
     schemaVersion: "question-bank-case-v1" as const,
     caseId: input.caseId,
     caseVersion: input.caseVersion,
@@ -518,11 +566,11 @@ export function createQuestionBankCase(
     evaluatorContext: input.evaluatorContext,
     author: input.author,
     reviewState: input.reviewState,
-  };
+  });
 
-  return Object.freeze({
+  return immutableSnapshot({
     ...withoutCaseHash,
-    caseHash: sha256(JSON.stringify(withoutCaseHash)),
+    caseHash: sha256(withoutCaseHash),
   });
 }
 
@@ -540,12 +588,55 @@ export function createEvaluationInput(
   input: CreateEvaluationInputInput,
 ): EvaluationInput {
   assertNonEmpty(input.evaluationId, "evaluationId");
+  assertOneOf(input.mode, ["mock", "production"], "mode");
+  assertOneOf(input.evaluationProtocol.judge.kind, ["mock", "real"], "judge.kind");
   if (input.mode === "production" && input.evaluationProtocol.judge.kind !== "real") {
     throw new Error("生产评测必须使用真实 Judge");
+  }
+  if (input.mode === "production" && input.artifact.provenance === "MOCK") {
+    throw new Error("生产评测不能使用 Mock Artifact");
+  }
+  if (input.mode === "mock" && input.evaluationProtocol.judge.kind !== "mock") {
+    throw new Error("Mock 评测必须使用 Mock Judge");
+  }
+  if (input.mode === "mock" && input.artifact.provenance !== "MOCK") {
+    throw new Error("Mock 评测只能使用 Mock Artifact");
   }
   assertNonEmpty(input.evaluationProtocol.promptVersion, "promptVersion");
   assertNonEmpty(input.evaluationProtocol.judge.provider, "judge.provider");
   assertNonEmpty(input.evaluationProtocol.judge.model, "judge.model");
+  assertNonEmpty(input.artifact.artifactId, "artifactId");
+  assertNonEmpty(input.artifact.runId, "runId");
+  assertNonEmpty(input.artifact.jobId, "jobId");
+  assertOneOf(
+    input.artifact.provenance,
+    ["MOCK", "PRODUCTION", "LIVE_PRODUCTION", "PRODUCTION_REPLAY"],
+    "artifact.provenance",
+  );
+  assertOneOf(input.staticSurface.surfaceClass, ["canonical", "native_frozen"], "surfaceClass");
+  assertOneOf(input.staticSurface.fidelity, ["verified", "degraded", "unknown"], "fidelity");
+
+  assertSha256Hash(input.artifact.contentHash, "artifact.contentHash");
+  assertSha256Hash(input.staticSurface.renderManifestHash, "renderManifestHash");
+  assertSha256Hash(input.evaluationProtocol.rubricHash, "rubricHash");
+  assertSha256Hash(input.evaluationProtocol.aggregationSpecHash, "aggregationSpecHash");
+  assertSha256Hash(input.evaluationProtocol.batchProtocolHash, "batchProtocolHash");
+  if (input.referencePack.contentHash !== null) {
+    assertSha256Hash(input.referencePack.contentHash, "referencePack.contentHash");
+  }
+
+  assertSha256Hash(input.questionBankCase.caseHash, "questionBankCase.caseHash");
+  assertSha256Hash(
+    input.questionBankCase.vendorPrompt.contentHash,
+    "questionBankCase.vendorPrompt.contentHash",
+  );
+  if (sha256(input.questionBankCase.vendorPrompt.text) !== input.questionBankCase.vendorPrompt.contentHash) {
+    throw new Error("QuestionBankCase vendorPrompt 哈希不匹配");
+  }
+  const { caseHash, ...questionBankCaseWithoutHash } = input.questionBankCase;
+  if (sha256(questionBankCaseWithoutHash) !== caseHash) {
+    throw new Error("QuestionBankCase caseHash 不匹配");
+  }
 
   const pages = input.staticSurface.pages;
   if (input.artifact.pageCount !== pages.length) {
@@ -561,6 +652,14 @@ export function createEvaluationInput(
     if (page.pageNumber !== expectedPageNumber) {
       throw new Error(`静态渲染页码必须连续，期望 ${expectedPageNumber}`);
     }
+    assertSha256Hash(page.imageHash, `page ${page.pageNumber}.imageHash`);
+    assertSha256Hash(page.extractedTextHash, `page ${page.pageNumber}.extractedTextHash`);
+    if (sha256(page.image) !== page.imageHash) {
+      throw new Error(`第 ${page.pageNumber} 页图片哈希不匹配`);
+    }
+    if (sha256(page.extractedText) !== page.extractedTextHash) {
+      throw new Error(`第 ${page.pageNumber} 页文本哈希不匹配`);
+    }
     page.elements.forEach((element) => {
       assertNonEmpty(element.elementId, "elementId");
       if (elementIds.has(element.elementId)) {
@@ -568,13 +667,27 @@ export function createEvaluationInput(
       }
       elementIds.add(element.elementId);
       assertElementBounds(element.bounds, element.elementId);
+      assertOneOf(element.kind, ["IMAGE", "TEXT_BOX"], `元素 ${element.elementId}.kind`);
+      if (element.kind === "IMAGE") {
+        assertSha256Hash(element.renderedCropHash, `图片 ${element.elementId}.renderedCropHash`);
+        if (sha256(element.renderedCrop) !== element.renderedCropHash) {
+          throw new Error(`图片 ${element.elementId} 裁剪哈希不匹配`);
+        }
+        if (element.sourceAssetHash !== undefined) {
+          assertSha256Hash(element.sourceAssetHash, `图片 ${element.elementId}.sourceAssetHash`);
+        }
+      }
       if (element.kind === "TEXT_BOX") {
         assertNonEmpty(element.text, `文本框 ${element.elementId}.text`);
+        assertSha256Hash(element.textHash, `文本框 ${element.elementId}.textHash`);
+        if (sha256(element.text) !== element.textHash) {
+          throw new Error(`文本框 ${element.elementId} 文本哈希不匹配`);
+        }
       }
     });
   });
 
-  return Object.freeze({
+  return immutableSnapshot({
     schemaVersion: "evaluation-input-v1",
     ...input,
   });
@@ -628,6 +741,7 @@ function validateTargetTree(
   const byId = new Map<string, EvaluationTargetNode>();
   targets.forEach((target) => {
     assertNonEmpty(target.targetId, "targetId");
+    assertOneOf(target.scope, ["DECK", "SLIDE", "ELEMENT"], `Target ${target.targetId}.scope`);
     if (byId.has(target.targetId)) throw new Error(`评测对象 ID 重复：${target.targetId}`);
     byId.set(target.targetId, target);
   });
@@ -671,6 +785,72 @@ function validateTargetTree(
   return byId;
 }
 
+function validateComparisonVector(
+  vector: EvaluationComparisonVector,
+  assessments: readonly EvaluationAssessment[],
+): EvaluationComparisonVector {
+  assertNonEmpty(vector.mappingVersion, "comparisonVector.mappingVersion");
+  assertOneOf(
+    vector.rankStatus,
+    ["NOT_CALIBRATED", "NOT_COMPARABLE", "EXPLORATORY_ONLY", "ELIGIBLE"],
+    "comparisonVector.rankStatus",
+  );
+  if (vector.rankStatus === "ELIGIBLE") {
+    throw new Error("evaluation-result-v1 尚未冻结可排名校准，不能使用 ELIGIBLE");
+  }
+  const axisIds = new Set<string>();
+  const dimensionIds = new Set(assessments.map(({ dimensionId }) => dimensionId));
+  vector.axes.forEach((axis) => {
+    assertNonEmpty(axis.axisId, "comparisonVector.axisId");
+    if (axisIds.has(axis.axisId)) throw new Error(`比较轴 ID 重复：${axis.axisId}`);
+    axisIds.add(axis.axisId);
+    if (axis.sourceDimensionIds.length === 0) {
+      throw new Error(`比较轴 ${axis.axisId} 必须引用至少一个维度`);
+    }
+    if (new Set(axis.sourceDimensionIds).size !== axis.sourceDimensionIds.length) {
+      throw new Error(`比较轴 ${axis.axisId} 存在重复维度`);
+    }
+    axis.sourceDimensionIds.forEach((dimensionId) => {
+      if (!dimensionIds.has(dimensionId)) {
+        throw new Error(`比较轴 ${axis.axisId} 引用未知维度：${dimensionId}`);
+      }
+    });
+    const matching = assessments.filter(({ dimensionId }) =>
+      axis.sourceDimensionIds.includes(dimensionId)
+    );
+    const counts = {
+      GOOD: matching.filter(({ consensus }) => consensus.resolvedLabel === "GOOD").length,
+      BAD: matching.filter(({ consensus }) => consensus.resolvedLabel === "BAD").length,
+      UNCERTAIN: matching.filter(({ consensus }) => consensus.resolvedLabel === "UNCERTAIN").length,
+    };
+    const expectedDenominator = matching.length;
+    const expectedComparable = expectedDenominator > 0 && counts.UNCERTAIN < expectedDenominator;
+    const expectedRate = (count: number): number | null =>
+      expectedDenominator === 0 ? null : count / expectedDenominator;
+    const closeEnough = (actual: number | null, expected: number | null): boolean =>
+      actual === expected || (
+        actual !== null && expected !== null &&
+        Number.isFinite(actual) && Math.abs(actual - expected) < 1e-12
+      );
+    if (
+      axis.denominator !== expectedDenominator ||
+      axis.comparable !== expectedComparable ||
+      !closeEnough(axis.goodRate, expectedRate(counts.GOOD)) ||
+      !closeEnough(axis.badRate, expectedRate(counts.BAD)) ||
+      !closeEnough(axis.uncertainRate, expectedRate(counts.UNCERTAIN))
+    ) {
+      throw new Error(`比较轴 ${axis.axisId} 与原子判断聚合结果不一致`);
+    }
+  });
+  if (
+    vector.rankStatus === "NOT_COMPARABLE" &&
+    vector.axes.some(({ comparable }) => comparable)
+  ) {
+    throw new Error("存在可比较轴时不能标记为 NOT_COMPARABLE");
+  }
+  return immutableSnapshot(vector);
+}
+
 function buildDimensionProfiles(
   assessments: readonly EvaluationAssessment[],
   targets: ReadonlyMap<string, EvaluationTargetNode>,
@@ -710,8 +890,14 @@ function buildDimensionProfiles(
 export function createEvaluationResult(
   input: CreateEvaluationResultInput,
 ): EvaluationResult {
+  assertOneOf(input.mode, ["mock", "production"], "mode");
+  assertOneOf(input.deliveryStatus, ["PASS", "FAIL", "UNKNOWN"], "deliveryStatus");
+  assertOneOf(input.lineage.judge.kind, ["mock", "real"], "lineage.judge.kind");
   if (input.mode === "production" && input.lineage.judge.kind !== "real") {
     throw new Error("生产评测结果必须记录真实 Judge");
+  }
+  if (input.mode === "mock" && input.lineage.judge.kind !== "mock") {
+    throw new Error("Mock 评测结果必须记录 Mock Judge");
   }
   assertNonEmpty(input.lineage.promptVersion, "lineage.promptVersion");
   assertNonEmpty(input.lineage.judge.provider, "lineage.judge.provider");
@@ -719,13 +905,43 @@ export function createEvaluationResult(
   if (input.mode === "production" && input.lineage.judge.responseIds.length === 0) {
     throw new Error("生产评测结果必须记录真实 Judge responseId");
   }
+  [
+    [input.lineage.caseHash, "lineage.caseHash"],
+    [input.lineage.artifactHash, "lineage.artifactHash"],
+    [input.lineage.renderManifestHash, "lineage.renderManifestHash"],
+    [input.lineage.rubricHash, "lineage.rubricHash"],
+    [input.lineage.aggregationSpecHash, "lineage.aggregationSpecHash"],
+    [input.lineage.batchProtocolHash, "lineage.batchProtocolHash"],
+  ].forEach(([hash, fieldName]) => assertSha256Hash(hash!, fieldName!));
   const targets = validateTargetTree(input.tree.rootTargetId, input.tree.targets);
 
   const evidenceById = new Map<string, EvaluationEvidence>();
   input.tree.evidence.forEach((evidence) => {
+    assertNonEmpty(evidence.evidenceId, "evidenceId");
     if (evidenceById.has(evidence.evidenceId)) throw new Error(`Evidence ID 重复：${evidence.evidenceId}`);
     if (!targets.has(evidence.targetId)) throw new Error(`Evidence 指向未知评测对象：${evidence.targetId}`);
     assertNonEmpty(evidence.observation, `Evidence ${evidence.evidenceId}.observation`);
+    assertOneOf(
+      evidence.kind,
+      ["VISUAL_OBSERVATION", "EXTRACTED_TEXT", "REFERENCE_FACT", "ELEMENT_CROP", "GATE"],
+      `Evidence ${evidence.evidenceId}.kind`,
+    );
+    const target = targets.get(evidence.targetId)!;
+    if (target.scope === "DECK" && evidence.elementId !== null) {
+      throw new Error(`Deck Evidence ${evidence.evidenceId} 不能定位元素`);
+    }
+    if (
+      target.scope === "SLIDE" &&
+      (evidence.pageNumber !== target.pageNumber || evidence.elementId !== null)
+    ) {
+      throw new Error(`Slide Evidence ${evidence.evidenceId} 定位与 Target 不一致`);
+    }
+    if (
+      target.scope === "ELEMENT" &&
+      (evidence.pageNumber !== target.pageNumber || evidence.elementId !== target.elementId)
+    ) {
+      throw new Error(`Element Evidence ${evidence.evidenceId} 定位与 Target 不一致`);
+    }
     evidenceById.set(evidence.evidenceId, evidence);
   });
 
@@ -741,6 +957,32 @@ export function createEvaluationResult(
     assessment.judgments.forEach((judgment) => {
       if (judgmentIds.has(judgment.judgmentId)) throw new Error(`Judgment ID 重复：${judgment.judgmentId}`);
       judgmentIds.add(judgment.judgmentId);
+      assertOneOf(judgment.batchKind, ["initial", "repeat", "calibration", "adjudication"], "batchKind");
+      assertOneOf(judgment.annotator.kind, ["mock", "real"], "annotator.kind");
+      assertOneOf(judgment.assessmentStatus, ["ASSESSED", "NOT_ASSESSABLE"], "assessmentStatus");
+      assertOneOf(judgment.label, ["GOOD", "BAD", "UNCERTAIN"], "label");
+      assertOneOf(judgment.confidence, ["LOW", "MEDIUM", "HIGH"], "confidence");
+      if (judgment.uncertainReason !== null) {
+        assertOneOf(
+          judgment.uncertainReason,
+          ["INSUFFICIENT_EVIDENCE", "RUBRIC_UNDEFINED", "ANNOTATOR_DISAGREEMENT", "REFERENCE_MISSING"],
+          "uncertainReason",
+        );
+      }
+      assertNonEmpty(judgment.batchId, "judgment.batchId");
+      assertNonEmpty(judgment.rationale, "judgment.rationale");
+      assertNonEmpty(judgment.createdAt, "judgment.createdAt");
+      assertSha256Hash(judgment.rubricHash, "judgment.rubricHash");
+      if (judgment.rubricHash !== input.lineage.rubricHash) {
+        throw new Error(`Judgment ${judgment.judgmentId} 的 Rubric lineage 不一致`);
+      }
+      if (
+        judgment.annotator.kind !== input.lineage.judge.kind ||
+        judgment.annotator.provider !== input.lineage.judge.provider ||
+        judgment.annotator.model !== input.lineage.judge.model
+      ) {
+        throw new Error(`Judgment ${judgment.judgmentId} 的 Judge lineage 不一致`);
+      }
       if (input.mode === "production" && judgment.annotator.kind !== "real") {
         throw new Error("生产评测判断不能由 Mock Judge 生成");
       }
@@ -763,13 +1005,15 @@ export function createEvaluationResult(
       });
     });
 
-    return Object.freeze({
+    return immutableSnapshot({
       ...assessment,
       consensus: buildConsensus(assessment.judgments),
     });
   });
 
-  return Object.freeze({
+  const comparisonVector = validateComparisonVector(input.comparisonVector, assessments);
+
+  return immutableSnapshot({
     schemaVersion: "evaluation-result-v1",
     evaluationId: input.evaluationId,
     caseId: input.caseId,
@@ -778,12 +1022,12 @@ export function createEvaluationResult(
     deliveryStatus: input.deliveryStatus,
     tree: Object.freeze({
       rootTargetId: input.tree.rootTargetId,
-      targets: input.tree.targets,
-      assessments: Object.freeze(assessments),
-      evidence: input.tree.evidence,
+      targets: immutableSnapshot(input.tree.targets),
+      assessments: immutableSnapshot(assessments),
+      evidence: immutableSnapshot(input.tree.evidence),
     }),
     dimensionProfile: buildDimensionProfiles(assessments, targets),
-    comparisonVector: input.comparisonVector,
-    lineage: input.lineage,
+    comparisonVector,
+    lineage: immutableSnapshot(input.lineage),
   });
 }

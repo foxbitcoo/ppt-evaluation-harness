@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -10,6 +11,9 @@ import {
   toFeishuEvaluationLabel,
   type CreateEvaluationResultInput,
 } from "../evaluation/index.ts";
+
+const hash = (value: string | Uint8Array) =>
+  `sha256:${createHash("sha256").update(value).digest("hex")}` as const;
 
 function createVolcanoQuestionBankCase() {
   return createQuestionBankCase({
@@ -91,6 +95,25 @@ test("QuestionBankCase keeps requester and audience separate, injects both into 
   );
 });
 
+test("QuestionBankCase hash is canonical across nested property insertion order", () => {
+  const baseline = createVolcanoQuestionBankCase();
+  const { caseHash: _caseHash, vendorPrompt: _vendorPrompt, schemaVersion: _schemaVersion, track: _track, ...input } = baseline;
+  const reordered = createQuestionBankCase({
+    ...input,
+    requesterPersona: {
+      domain: baseline.requesterPersona.domain,
+      grade: baseline.requesterPersona.grade!,
+      subject: baseline.requesterPersona.subject!,
+      experienceLevel: baseline.requesterPersona.experienceLevel,
+      roleDescription: baseline.requesterPersona.roleDescription,
+      role: baseline.requesterPersona.role,
+      personaId: baseline.requesterPersona.personaId,
+    },
+    vendorPromptTemplateVersion: baseline.vendorPrompt.templateVersion,
+  });
+  assert.equal(reordered.caseHash, baseline.caseHash);
+});
+
 test("EvaluationInput exposes deck, slide, image, and text-box targets and enforces the real-judge production boundary", () => {
   const questionBankCase = createVolcanoQuestionBankCase();
   const evaluationInput = createEvaluationInput({
@@ -113,16 +136,16 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
         {
           pageNumber: 1,
           pageRole: "cover",
-          imageHash: `sha256:${"d".repeat(64)}`,
+          imageHash: hash(new Uint8Array([1, 2, 3])),
           image: new Uint8Array([1, 2, 3]),
           extractedText: "火山为什么会喷发",
-          extractedTextHash: `sha256:${"e".repeat(64)}`,
+          extractedTextHash: hash("火山为什么会喷发"),
           elements: [
             {
               elementId: "slide-1-image-1",
               kind: "IMAGE",
               bounds: { x: 40, y: 80, width: 500, height: 260 },
-              renderedCropHash: `sha256:${"f".repeat(64)}`,
+              renderedCropHash: hash(new Uint8Array([4, 5, 6])),
               renderedCrop: new Uint8Array([4, 5, 6]),
               altText: "喷发中的火山",
             },
@@ -131,7 +154,7 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
               kind: "TEXT_BOX",
               bounds: { x: 40, y: 360, width: 500, height: 120 },
               text: "火山为什么会喷发",
-              textHash: `sha256:${"1".repeat(64)}`,
+              textHash: hash("火山为什么会喷发"),
               styleSnapshot: {
                 fontFamilies: ["方正兰亭黑"],
                 minimumFontSizePt: 28,
@@ -193,6 +216,28 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
         artifact: { ...evaluationInput.artifact, pageCount: 2 },
       }),
     /产物页数与静态渲染页数不一致/,
+  );
+
+  assert.throws(
+    () => createEvaluationInput({
+      ...evaluationInput,
+      artifact: { ...evaluationInput.artifact, provenance: "MOCK" },
+    }),
+    /生产评测不能使用 Mock Artifact/,
+  );
+
+  assert.throws(
+    () => createEvaluationInput({
+      ...evaluationInput,
+      staticSurface: {
+        ...evaluationInput.staticSurface,
+        pages: evaluationInput.staticSurface.pages.map((page) => ({
+          ...page,
+          imageHash: `sha256:${"0".repeat(64)}`,
+        })),
+      },
+    }),
+    /图片哈希不匹配/,
   );
 });
 
@@ -281,8 +326,8 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
         axisId: "visual_system",
         sourceDimensionIds: ["layout_hierarchy", "image_quality_and_fit", "text_readability"],
         goodRate: 0,
-        badRate: 2 / 3,
-        uncertainRate: 1 / 3,
+        badRate: 1 / 3,
+        uncertainRate: 2 / 3,
         denominator: 3,
         comparable: true,
       }],
@@ -346,4 +391,29 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
     },
   };
   assert.throws(() => createEvaluationResult(invalidUncertain), /UNCERTAIN 判断必须记录 uncertainReason/);
+
+  const invalidLabel = structuredClone(resultInput) as CreateEvaluationResultInput;
+  (invalidLabel.tree.assessments[0]!.judgments[0] as { label: string }).label = "BROKEN";
+  assert.throws(() => createEvaluationResult(invalidLabel), /label 枚举值无效/);
+
+  const forgedVector: CreateEvaluationResultInput = {
+    ...resultInput,
+    comparisonVector: {
+      ...resultInput.comparisonVector,
+      axes: resultInput.comparisonVector.axes.map((axis) => ({
+        ...axis,
+        goodRate: 999,
+      })),
+    },
+  };
+  assert.throws(() => createEvaluationResult(forgedVector), /与原子判断聚合结果不一致/);
+
+  const brokenLineage: CreateEvaluationResultInput = {
+    ...resultInput,
+    lineage: {
+      ...resultInput.lineage,
+      rubricHash: `sha256:${"9".repeat(64)}`,
+    },
+  };
+  assert.throws(() => createEvaluationResult(brokenLineage), /Rubric lineage 不一致/);
 });

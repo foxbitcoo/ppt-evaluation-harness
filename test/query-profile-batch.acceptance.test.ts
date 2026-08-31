@@ -68,6 +68,7 @@ test("Batch manifest expands one approved case into deterministic per-surface A/
   const manifest = createBakeoffBatchManifest({
     batchId: "BATCH-0001",
     batchSeq: 1,
+    batchDate: "2026-08-10",
     environment: "LIVE_PRODUCTION",
     cases: [approvedCase],
     surfaces,
@@ -82,7 +83,7 @@ test("Batch manifest expands one approved case into deterministic per-surface A/
   });
 
   assert.equal(manifest.status, "PREPARED");
-  assert.equal(manifest.batchDate, null);
+  assert.equal(manifest.batchDate, "2026-08-10");
   assert.equal(manifest.startedAt, null);
   assert.equal(manifest.runs.length, 4);
   assert.equal(new Set(manifest.runs.map(({ runId }) => runId)).size, 4);
@@ -95,7 +96,8 @@ test("Batch manifest expands one approved case into deterministic per-surface A/
   assert.ok(webControl);
   const feishu = toFeishuRunRecord(webControl);
   assert.equal(feishu["批次ID"], "BATCH-0001");
-  assert.equal(feishu["实验分组"], "NO_REQUESTER_PROFILE");
+  assert.equal(feishu["实验分组"], "对照组｜不注入请求者人设");
+  assert.equal(feishu["批次日期"], "2026-08-10");
   assert.equal(feishu["运行面"], "WEB");
   assert.equal(feishu["网页入口"], "https://aippt.wps.cn/aippt/");
   assert.equal(feishu["运行状态"], undefined);
@@ -108,6 +110,7 @@ test("Batch manifest rejects ambiguous or duplicate product surfaces", () => {
       createBakeoffBatchManifest({
         batchId: "BATCH-0001",
         batchSeq: 1,
+        batchDate: "2026-08-10",
         environment: "LIVE_PRODUCTION",
         cases: [approvedCase],
         surfaces: [surfaces[0]!, surfaces[0]!],
@@ -130,6 +133,7 @@ test("Batch manifest rejects multiple versions of one Case because Run IDs must 
       createBakeoffBatchManifest({
         batchId: "BATCH-0001",
         batchSeq: 1,
+        batchDate: "2026-08-10",
         environment: "LIVE_PRODUCTION",
         cases: [
           approvedCase,
@@ -146,5 +150,39 @@ test("Batch manifest rejects multiple versions of one Case because Run IDs must 
         },
       }),
     /同一批次不能包含同一 Case 的多个版本/,
+  );
+});
+
+test("Batch contracts are immutable and bind natural batch identity to date and sequence", () => {
+  const mutableCase = structuredClone(approvedCase);
+  const mutableJudge = { provider: "volcengine-ark", model: "doubao-seed-2-0-pro-260215" };
+  const manifest = createBakeoffBatchManifest({
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "LIVE_PRODUCTION",
+    cases: [mutableCase],
+    surfaces,
+    judge: mutableJudge,
+    rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+  });
+  const originalHash = manifest.contentHash;
+  (mutableCase.presentationAudience as { description: string }).description = "被调用方修改";
+  mutableJudge.model = "被调用方修改";
+  assert.equal(manifest.runs[0]?.vendorPrompt.text.includes("被调用方修改"), false);
+  assert.equal(manifest.judge.model, "doubao-seed-2-0-pro-260215");
+  assert.equal(manifest.contentHash, originalHash);
+  assert.throws(
+    () => createBakeoffBatchManifest({
+      batchId: "BATCH-0002",
+      batchSeq: 1,
+      batchDate: "2026-08-10",
+      environment: "LIVE_PRODUCTION",
+      cases: [approvedCase],
+      surfaces,
+      judge: mutableJudge,
+      rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+    }),
+    /batchId 必须与 batchSeq 对应/,
   );
 });
