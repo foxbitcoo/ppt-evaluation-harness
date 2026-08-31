@@ -521,6 +521,13 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
   };
   assert.throws(() => createEvaluationResult(emptyResponseId), /真实 Judge responseId/);
 
+  const emptyEvaluation: CreateEvaluationResultInput = {
+    ...resultInput,
+    tree: { ...resultInput.tree, assessments: [], evidence: [] },
+    comparisonVector: { ...resultInput.comparisonVector, axes: [] },
+  };
+  assert.throws(() => createEvaluationResult(emptyEvaluation), /至少需要一条 Assessment/);
+
   const brokenLineage: CreateEvaluationResultInput = {
     ...resultInput,
     lineage: {

@@ -1112,6 +1112,9 @@ export function createEvaluationResult(
   }
   const targets = validateTargetTree(input.tree.rootTargetId, input.tree.targets);
   validateTargetsAgainstEvaluationInput(targets, evaluationInput);
+  if (input.tree.assessments.length === 0) {
+    throw new Error("EvaluationResult 至少需要一条 Assessment");
+  }
 
   const evidenceById = new Map<string, EvaluationEvidence>();
   input.tree.evidence.forEach((evidence) => {
