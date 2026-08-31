@@ -112,6 +112,34 @@ test("Batch manifest expands one approved case into deterministic per-surface A/
   assert.match(String(feishu["载荷哈希"]), /^[a-f0-9]{64}$/);
 });
 
+test("Run identity changes when the product package, configuration, or requester profile changes", () => {
+  const create = (surface: ProductSurface, queryCase: ApprovedQueryProfileCase = approvedCase) =>
+    createBakeoffBatchManifest({
+      batchId: "BATCH-0001",
+      batchSeq: 1,
+      batchDate: "2026-08-10",
+      environment: "LIVE_PRODUCTION",
+      cases: [queryCase],
+      surfaces: [surface],
+      judge: { provider: "volcengine-ark", model: "doubao-seed-2-0-pro-260215" },
+      rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+    });
+  const baseline = create(surfaces[0]!);
+  const pro = create({
+    ...surfaces[0]!,
+    productPackageId: "wps-aippt-advanced-web",
+    configurationHash: `sha256:${"9".repeat(64)}`,
+  });
+  const changedProfile = create(surfaces[0]!, {
+    ...approvedCase,
+    requesterProfile: [...approvedCase.requesterProfile, { label: "偏好", value: "结论先行" }],
+  });
+  assert.notEqual(baseline.runs[0]!.runId, pro.runs[0]!.runId);
+  assert.notEqual(baseline.runs[1]!.runId, pro.runs[1]!.runId);
+  assert.equal(baseline.runs[0]!.runId, changedProfile.runs[0]!.runId);
+  assert.notEqual(baseline.runs[1]!.runId, changedProfile.runs[1]!.runId);
+});
+
 test("Batch manifest fails closed on invalid environment, surface, or memory policy", () => {
   const base = {
     batchId: "BATCH-0001",

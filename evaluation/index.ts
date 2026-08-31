@@ -1,5 +1,6 @@
 export {
   EVALUATION_FIELD_CATALOG,
+  EVALUATION_COMPARISON_MAPPING_REGISTRY,
   MAX_QUERY_GENERATION_PAGE_COUNT,
   buildQueryGenerationVendorPrompt,
   createEvaluationInput,

@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   EVALUATION_FIELD_CATALOG,
+  EVALUATION_COMPARISON_MAPPING_REGISTRY,
   MAX_QUERY_GENERATION_PAGE_COUNT,
   createEvaluationInput,
   createEvaluationResult,
@@ -62,6 +63,67 @@ function createVolcanoQuestionBankCase() {
   });
 }
 
+function createVolcanoEvaluationInput() {
+  const questionBankCase = createVolcanoQuestionBankCase();
+  return createEvaluationInput({
+    evaluationId: "evaluation-volcano-wps-001",
+    mode: "production",
+    questionBankCase,
+    artifact: {
+      artifactId: "artifact-wps-volcano-001",
+      runId: "run-wps-volcano-001",
+      jobId: "job-volcano-001",
+      provenance: "LIVE_PRODUCTION",
+      contentHash: `sha256:${"b".repeat(64)}`,
+      pageCount: 1,
+    },
+    staticSurface: {
+      surfaceClass: "canonical",
+      renderManifestHash: `sha256:${"c".repeat(64)}`,
+      fidelity: "verified",
+      pages: [{
+        pageNumber: 1,
+        pageRole: "cover",
+        imageHash: hash(new Uint8Array([1, 2, 3])),
+        image: new Uint8Array([1, 2, 3]),
+        extractedText: "火山为什么会喷发",
+        extractedTextHash: hash("火山为什么会喷发"),
+        elements: [
+          {
+            elementId: "slide-1-image-1",
+            kind: "IMAGE",
+            bounds: { x: 40, y: 80, width: 500, height: 260 },
+            renderedCropHash: hash(new Uint8Array([4, 5, 6])),
+            renderedCrop: new Uint8Array([4, 5, 6]),
+            altText: "喷发中的火山",
+          },
+          {
+            elementId: "slide-1-text-1",
+            kind: "TEXT_BOX",
+            bounds: { x: 40, y: 360, width: 500, height: 120 },
+            text: "火山为什么会喷发",
+            textHash: hash("火山为什么会喷发"),
+            styleSnapshot: {
+              fontFamilies: ["方正兰亭黑"],
+              minimumFontSizePt: 28,
+              maximumFontSizePt: 40,
+              overflowDetected: false,
+            },
+          },
+        ],
+      }],
+    },
+    referencePack: { contentHash: null, facts: [] },
+    evaluationProtocol: {
+      rubricHash: `sha256:${"a".repeat(64)}`,
+      aggregationSpecHash: `sha256:${"2".repeat(64)}`,
+      batchProtocolHash: `sha256:${"3".repeat(64)}`,
+      promptVersion: "tri-state-judge-v1",
+      judge: { kind: "real", provider: "openai", model: "production-model" },
+    },
+  });
+}
+
 test("QuestionBankCase keeps requester and audience separate, injects both into the vendor prompt, and caps page count", () => {
   const evaluationCase = createVolcanoQuestionBankCase();
 
@@ -114,74 +176,31 @@ test("QuestionBankCase hash is canonical across nested property insertion order"
   assert.equal(reordered.caseHash, baseline.caseHash);
 });
 
+test("QuestionBankCase public enums and Rubric identity fail closed at runtime", () => {
+  const baseline = createVolcanoQuestionBankCase();
+  const { caseHash: _caseHash, vendorPrompt: _vendorPrompt, schemaVersion: _schemaVersion, track: _track, ...input } = baseline;
+  assert.throws(() => createQuestionBankCase({
+    ...input,
+    requesterPersona: { ...input.requesterPersona, role: "ALIEN" as never },
+    vendorPromptTemplateVersion: baseline.vendorPrompt.templateVersion,
+  }), /requesterPersona.role 枚举值无效/);
+  assert.throws(() => createQuestionBankCase({
+    ...input,
+    reviewState: "PUBLISHED" as never,
+    vendorPromptTemplateVersion: baseline.vendorPrompt.templateVersion,
+  }), /reviewState 枚举值无效/);
+  assert.throws(() => createQuestionBankCase({
+    ...input,
+    evaluatorContext: {
+      ...input.evaluatorContext,
+      rubricRef: { ...input.evaluatorContext.rubricRef, rubricHash: "not-a-hash" as never },
+    },
+    vendorPromptTemplateVersion: baseline.vendorPrompt.templateVersion,
+  }), /rubricHash 必须是 sha256 哈希/);
+});
+
 test("EvaluationInput exposes deck, slide, image, and text-box targets and enforces the real-judge production boundary", () => {
-  const questionBankCase = createVolcanoQuestionBankCase();
-  const evaluationInput = createEvaluationInput({
-    evaluationId: "evaluation-volcano-wps-001",
-    mode: "production",
-    questionBankCase,
-    artifact: {
-      artifactId: "artifact-wps-volcano-001",
-      runId: "run-wps-volcano-001",
-      jobId: "job-volcano-001",
-      provenance: "LIVE_PRODUCTION",
-      contentHash: `sha256:${"b".repeat(64)}`,
-      pageCount: 1,
-    },
-    staticSurface: {
-      surfaceClass: "canonical",
-      renderManifestHash: `sha256:${"c".repeat(64)}`,
-      fidelity: "verified",
-      pages: [
-        {
-          pageNumber: 1,
-          pageRole: "cover",
-          imageHash: hash(new Uint8Array([1, 2, 3])),
-          image: new Uint8Array([1, 2, 3]),
-          extractedText: "火山为什么会喷发",
-          extractedTextHash: hash("火山为什么会喷发"),
-          elements: [
-            {
-              elementId: "slide-1-image-1",
-              kind: "IMAGE",
-              bounds: { x: 40, y: 80, width: 500, height: 260 },
-              renderedCropHash: hash(new Uint8Array([4, 5, 6])),
-              renderedCrop: new Uint8Array([4, 5, 6]),
-              altText: "喷发中的火山",
-            },
-            {
-              elementId: "slide-1-text-1",
-              kind: "TEXT_BOX",
-              bounds: { x: 40, y: 360, width: 500, height: 120 },
-              text: "火山为什么会喷发",
-              textHash: hash("火山为什么会喷发"),
-              styleSnapshot: {
-                fontFamilies: ["方正兰亭黑"],
-                minimumFontSizePt: 28,
-                maximumFontSizePt: 40,
-                overflowDetected: false,
-              },
-            },
-          ],
-        },
-      ],
-    },
-    referencePack: {
-      contentHash: null,
-      facts: [],
-    },
-    evaluationProtocol: {
-      rubricHash: `sha256:${"a".repeat(64)}`,
-      aggregationSpecHash: `sha256:${"2".repeat(64)}`,
-      batchProtocolHash: `sha256:${"3".repeat(64)}`,
-      promptVersion: "tri-state-judge-v1",
-      judge: {
-        kind: "real",
-        provider: "openai",
-        model: "production-model",
-      },
-    },
-  });
+  const evaluationInput = createVolcanoEvaluationInput();
 
   assert.equal(evaluationInput.schemaVersion, "evaluation-input-v1");
   assert.equal(evaluationInput.staticSurface.pages[0]?.elements[0]?.kind, "IMAGE");
@@ -191,16 +210,18 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
     { value: "SLIDE", labelZh: "单页" },
     { value: "ELEMENT", labelZh: "页面元素" },
   ]);
-  assert.throws(
-    () => {
-      evaluationInput.staticSurface.pages[0]!.image[0] = 9;
-    },
-    /不可变快照/,
-  );
-  assert.throws(
-    () => evaluationInput.staticSurface.pages[0]!.elements[0]!.kind === "IMAGE" &&
-      evaluationInput.staticSurface.pages[0]!.elements[0]!.renderedCrop.fill(9),
-    /不可变快照/,
+  const pageBytes = evaluationInput.staticSurface.pages[0]!.image;
+  pageBytes[0] = 9;
+  pageBytes.subarray(1)[0] = 8;
+  new Uint8Array(pageBytes.buffer)[2] = 7;
+  assert.deepEqual([...evaluationInput.staticSurface.pages[0]!.image], [1, 2, 3]);
+  assert.equal(hash(evaluationInput.staticSurface.pages[0]!.image), hash(new Uint8Array([1, 2, 3])));
+  const imageElement = evaluationInput.staticSurface.pages[0]!.elements[0]!;
+  assert.equal(imageElement.kind, "IMAGE");
+  if (imageElement.kind === "IMAGE") imageElement.renderedCrop.fill(9);
+  assert.deepEqual(
+    [...(evaluationInput.staticSurface.pages[0]!.elements[0]! as { renderedCrop: Uint8Array }).renderedCrop],
+    [4, 5, 6],
   );
 
   assert.throws(
@@ -253,6 +274,7 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
 });
 
 test("EvaluationResult keeps target hierarchy separate from dimension aggregation and Evidence", () => {
+  const evaluationInput = createVolcanoEvaluationInput();
   const rubricHash = `sha256:${"a".repeat(64)}` as const;
   const annotator = { kind: "real", provider: "openai", model: "production-model" } as const;
   const judgment = (
@@ -278,6 +300,7 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
   });
 
   const resultInput: CreateEvaluationResultInput = {
+    evaluationInput,
     evaluationId: "evaluation-volcano-wps-001",
     caseId: "query-volcano-teacher-001",
     artifactId: "artifact-wps-volcano-001",
@@ -333,21 +356,35 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
     },
     comparisonVector: {
       mappingVersion: "query-strategic-axes-v1",
-      axes: [{
-        axisId: "visual_system",
-        sourceDimensionIds: ["layout_hierarchy", "image_quality_and_fit", "text_readability"],
-        goodRate: 0,
-        badRate: 1 / 3,
-        uncertainRate: 2 / 3,
-        denominator: 3,
-        comparable: true,
-      }],
+      mappingHash: EVALUATION_COMPARISON_MAPPING_REGISTRY["query-strategic-axes-v1"].mappingHash,
+      axes: [
+        {
+          axisId: "task_fit",
+          sourceDimensionIds: ["audience_fit"],
+          goodRate: 1,
+          badRate: 0,
+          uncertainRate: 0,
+          denominator: 1,
+          comparable: true,
+        },
+        {
+          axisId: "visual_system",
+          sourceDimensionIds: ["layout_hierarchy", "image_quality_and_fit", "text_readability"],
+          goodRate: 0,
+          badRate: 1 / 3,
+          uncertainRate: 2 / 3,
+          denominator: 3,
+          comparable: true,
+        },
+      ],
       rankStatus: "EXPLORATORY_ONLY",
     },
     lineage: {
-      caseHash: `sha256:${"4".repeat(64)}`,
-      artifactHash: `sha256:${"b".repeat(64)}`,
-      renderManifestHash: `sha256:${"c".repeat(64)}`,
+      evaluationInputHash: evaluationInput.evaluationInputHash,
+      referencePackHash: evaluationInput.referencePack.contentHash,
+      caseHash: evaluationInput.questionBankCase.caseHash,
+      artifactHash: evaluationInput.artifact.contentHash,
+      renderManifestHash: evaluationInput.staticSurface.renderManifestHash,
       rubricHash,
       aggregationSpecHash: `sha256:${"2".repeat(64)}`,
       batchProtocolHash: `sha256:${"3".repeat(64)}`,
@@ -419,6 +456,35 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
   };
   assert.throws(() => createEvaluationResult(forgedVector), /与原子判断聚合结果不一致/);
 
+  const selectiveVector: CreateEvaluationResultInput = {
+    ...resultInput,
+    comparisonVector: {
+      ...resultInput.comparisonVector,
+      axes: resultInput.comparisonVector.axes.filter(({ axisId }) => axisId !== "task_fit"),
+    },
+  };
+  assert.throws(() => createEvaluationResult(selectiveVector), /比较轴集合与注册映射不一致/);
+
+  const missingElementTarget: CreateEvaluationResultInput = {
+    ...resultInput,
+    tree: {
+      ...resultInput.tree,
+      targets: resultInput.tree.targets.filter(({ targetId }) => targetId !== "image-1"),
+      assessments: resultInput.tree.assessments.filter(({ targetId }) => targetId !== "image-1"),
+      evidence: resultInput.tree.evidence.filter(({ targetId }) => targetId !== "image-1"),
+    },
+  };
+  assert.throws(() => createEvaluationResult(missingElementTarget), /完整覆盖 EvaluationInput 的所有页面元素/);
+
+  const emptyResponseId: CreateEvaluationResultInput = {
+    ...resultInput,
+    lineage: {
+      ...resultInput.lineage,
+      judge: { ...resultInput.lineage.judge, responseIds: [""] },
+    },
+  };
+  assert.throws(() => createEvaluationResult(emptyResponseId), /真实 Judge responseId/);
+
   const brokenLineage: CreateEvaluationResultInput = {
     ...resultInput,
     lineage: {
@@ -426,5 +492,5 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
       rubricHash: `sha256:${"9".repeat(64)}`,
     },
   };
-  assert.throws(() => createEvaluationResult(brokenLineage), /Rubric lineage 不一致/);
+  assert.throws(() => createEvaluationResult(brokenLineage), /lineage 与已验证 EvaluationInput 不一致/);
 });

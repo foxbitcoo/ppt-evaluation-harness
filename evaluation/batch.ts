@@ -275,7 +275,12 @@ function createRunPlan(input: {
     caseId: input.variant.caseId,
     caseVersion: input.variant.caseVersion,
     treatment: input.variant.treatment,
+    variantContentHash: input.variant.contentHash,
     surfaceId: input.surface.surfaceId,
+    surfaceVersion: input.surface.version,
+    productPackageId: input.surface.productPackageId,
+    configurationHash: input.surface.configurationHash,
+    nativeMemoryPolicy: input.surface.nativeMemoryPolicy,
   }));
   const runId = `RUN-${identityHash.slice(0, 24)}`;
   const withoutContentHash = {

@@ -258,6 +258,7 @@ export interface EvaluationJudgeConfiguration {
 
 export interface EvaluationInput {
   readonly schemaVersion: "evaluation-input-v1";
+  readonly evaluationInputHash: Sha256Hash;
   readonly evaluationId: string;
   readonly mode: EvaluationMode;
   readonly questionBankCase: QuestionBankCase;
@@ -298,7 +299,7 @@ export interface EvaluationInput {
 
 export type CreateEvaluationInputInput = Omit<
   EvaluationInput,
-  "schemaVersion"
+  "schemaVersion" | "evaluationInputHash"
 >;
 
 export interface EvaluationTargetNode {
@@ -378,6 +379,7 @@ export interface EvaluationDimensionProfile {
 
 export interface EvaluationComparisonVector {
   readonly mappingVersion: string;
+  readonly mappingHash: Sha256Hash;
   readonly axes: readonly {
     readonly axisId: string;
     readonly sourceDimensionIds: readonly string[];
@@ -395,6 +397,8 @@ export interface EvaluationComparisonVector {
 }
 
 export interface EvaluationResultLineage {
+  readonly evaluationInputHash: Sha256Hash;
+  readonly referencePackHash: Sha256Hash | null;
   readonly caseHash: Sha256Hash;
   readonly artifactHash: Sha256Hash;
   readonly renderManifestHash: Sha256Hash;
@@ -411,6 +415,7 @@ export interface EvaluationResultLineage {
 }
 
 export interface CreateEvaluationResultInput {
+  readonly evaluationInput: EvaluationInput;
   readonly evaluationId: string;
   readonly caseId: string;
   readonly artifactId: string;
@@ -465,42 +470,61 @@ function sha256(value: unknown): Sha256Hash {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
-const BYTE_MUTATORS = new Set(["copyWithin", "fill", "reverse", "set", "sort"]);
+const QUERY_STRATEGIC_AXES_V1 = Object.freeze({
+  mappingVersion: "query-strategic-axes-v1",
+  axes: Object.freeze([
+    Object.freeze({ axisId: "task_fit", sourceDimensionIds: Object.freeze(["audience_fit"]) }),
+    Object.freeze({
+      axisId: "visual_system",
+      sourceDimensionIds: Object.freeze([
+        "layout_hierarchy",
+        "image_quality_and_fit",
+        "text_readability",
+      ]),
+    }),
+  ]),
+});
 
-function readonlyBytes(value: Uint8Array): Uint8Array {
-  const copy = new Uint8Array(value);
-  return new Proxy(copy, {
-    defineProperty() {
-      throw new TypeError("评测输入字节是不可变快照");
-    },
-    deleteProperty() {
-      throw new TypeError("评测输入字节是不可变快照");
-    },
-    get(target, property) {
-      if (BYTE_MUTATORS.has(String(property))) {
-        return () => {
-          throw new TypeError("评测输入字节是不可变快照");
-        };
-      }
-      const result = Reflect.get(target, property, target) as unknown;
-      return typeof result === "function" ? result.bind(target) : result;
-    },
-    set() {
-      throw new TypeError("评测输入字节是不可变快照");
-    },
-  });
-}
+export const EVALUATION_COMPARISON_MAPPING_REGISTRY = Object.freeze({
+  "query-strategic-axes-v1": Object.freeze({
+    ...QUERY_STRATEGIC_AXES_V1,
+    mappingHash: sha256(QUERY_STRATEGIC_AXES_V1),
+  }),
+});
 
 function immutableSnapshot<T>(value: T): T {
-  if (value instanceof Uint8Array) return readonlyBytes(value) as T;
+  if (value instanceof Uint8Array) return new Uint8Array(value) as T;
   if (Array.isArray(value)) {
-    return Object.freeze(value.map((item) => immutableSnapshot(item))) as T;
+    const snapshot: unknown[] = [];
+    value.forEach((item, index) => {
+      if (item instanceof Uint8Array) {
+        const bytes = new Uint8Array(item);
+        Object.defineProperty(snapshot, index, {
+          enumerable: true,
+          configurable: false,
+          get: () => bytes.slice(),
+        });
+      } else {
+        snapshot[index] = immutableSnapshot(item);
+      }
+    });
+    return Object.freeze(snapshot) as T;
   }
   if (value !== null && typeof value === "object") {
-    return Object.freeze(Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .map(([key, child]) => [key, immutableSnapshot(child)]),
-    )) as T;
+    const snapshot: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>).forEach(([key, child]) => {
+      if (child instanceof Uint8Array) {
+        const bytes = new Uint8Array(child);
+        Object.defineProperty(snapshot, key, {
+          enumerable: true,
+          configurable: false,
+          get: () => bytes.slice(),
+        });
+      } else {
+        snapshot[key] = immutableSnapshot(child);
+      }
+    });
+    return Object.freeze(snapshot) as T;
   }
   return value;
 }
@@ -561,6 +585,18 @@ export function createQuestionBankCase(
   assertNonEmpty(input.presentationAudience.description, "presentationAudience.description");
   assertNonEmpty(input.query, "query");
   assertTargetPageCount(input.useContext.targetPageCount);
+  assertOneOf(input.requesterPersona.role, ["student", "teacher", "employee", "manager", "boss", "other"], "requesterPersona.role");
+  assertOneOf(input.requesterPersona.experienceLevel, ["beginner", "intermediate", "expert", "unknown"], "requesterPersona.experienceLevel");
+  assertOneOf(input.presentationAudience.priorKnowledge, ["low", "medium", "high", "unknown"], "presentationAudience.priorKnowledge");
+  assertOneOf(input.presentationAudience.readingMode, ["self_reading", "presented_with_speaker"], "presentationAudience.readingMode");
+  assertOneOf(input.useContext.occasion, ["classroom", "homework", "meeting", "sales", "self_learning", "other"], "useContext.occasion");
+  assertOneOf(input.intentConfirmation.status, ["not_requested", "pending", "confirmed"], "intentConfirmation.status");
+  assertOneOf(input.intentConfirmation.source, ["case_author", "vendor_confirmation"], "intentConfirmation.source");
+  assertOneOf(input.evaluatorContext.referencePackMode, ["automatic", "force", "off"], "evaluatorContext.referencePackMode");
+  assertOneOf(input.reviewState, ["draft", "reviewed", "retired"], "reviewState");
+  assertSha256Hash(input.evaluatorContext.rubricRef.rubricHash, "evaluatorContext.rubricRef.rubricHash");
+  assertNonEmpty(input.evaluatorContext.rubricRef.rubricId, "evaluatorContext.rubricRef.rubricId");
+  assertNonEmpty(input.evaluatorContext.rubricRef.rubricVersion, "evaluatorContext.rubricRef.rubricVersion");
 
   if (!Number.isInteger(input.caseVersion) || input.caseVersion < 1) {
     throw new Error("caseVersion 必须是正整数");
@@ -596,6 +632,43 @@ export function createQuestionBankCase(
   return immutableSnapshot({
     ...withoutCaseHash,
     caseHash: sha256(withoutCaseHash),
+  });
+}
+
+function buildEvaluationInputHash(input: CreateEvaluationInputInput): Sha256Hash {
+  return sha256({
+    evaluationId: input.evaluationId,
+    mode: input.mode,
+    questionBankCaseHash: input.questionBankCase.caseHash,
+    artifact: input.artifact,
+    staticSurface: {
+      surfaceClass: input.staticSurface.surfaceClass,
+      renderManifestHash: input.staticSurface.renderManifestHash,
+      fidelity: input.staticSurface.fidelity,
+      pages: input.staticSurface.pages.map((page) => ({
+        pageNumber: page.pageNumber,
+        pageRole: page.pageRole,
+        imageHash: page.imageHash,
+        extractedTextHash: page.extractedTextHash,
+        elements: page.elements.map((element) => element.kind === "IMAGE"
+          ? {
+              elementId: element.elementId,
+              kind: element.kind,
+              bounds: element.bounds,
+              renderedCropHash: element.renderedCropHash,
+              sourceAssetHash: element.sourceAssetHash,
+            }
+          : {
+              elementId: element.elementId,
+              kind: element.kind,
+              bounds: element.bounds,
+              textHash: element.textHash,
+              styleSnapshot: element.styleSnapshot,
+            }),
+      })),
+    },
+    referencePack: input.referencePack,
+    evaluationProtocol: input.evaluationProtocol,
   });
 }
 
@@ -649,6 +722,19 @@ export function createEvaluationInput(
   if (input.referencePack.contentHash !== null) {
     assertSha256Hash(input.referencePack.contentHash, "referencePack.contentHash");
   }
+  if (input.referencePack.facts.length > 0 && input.referencePack.contentHash === null) {
+    throw new Error("Reference Pack 含事实时必须记录 contentHash");
+  }
+  const factIds = new Set<string>();
+  input.referencePack.facts.forEach((fact) => {
+    assertNonEmpty(fact.factId, "referencePack.factId");
+    assertNonEmpty(fact.statement, `Reference Fact ${fact.factId}.statement`);
+    if (factIds.has(fact.factId)) throw new Error(`Reference Fact ID 重复：${fact.factId}`);
+    if (fact.sourceIds.length === 0 || fact.sourceIds.some((sourceId) => sourceId.trim().length === 0)) {
+      throw new Error(`Reference Fact ${fact.factId} 必须记录非空 sourceIds`);
+    }
+    factIds.add(fact.factId);
+  });
 
   assertSha256Hash(input.questionBankCase.caseHash, "questionBankCase.caseHash");
   assertSha256Hash(
@@ -713,8 +799,9 @@ export function createEvaluationInput(
   });
 
   return immutableSnapshot({
-    schemaVersion: "evaluation-input-v1",
     ...input,
+    schemaVersion: "evaluation-input-v1",
+    evaluationInputHash: buildEvaluationInputHash(input),
   });
 }
 
@@ -815,6 +902,16 @@ function validateComparisonVector(
   assessments: readonly EvaluationAssessment[],
 ): EvaluationComparisonVector {
   assertNonEmpty(vector.mappingVersion, "comparisonVector.mappingVersion");
+  const mapping = EVALUATION_COMPARISON_MAPPING_REGISTRY[
+    vector.mappingVersion as keyof typeof EVALUATION_COMPARISON_MAPPING_REGISTRY
+  ];
+  if (mapping === undefined) {
+    throw new Error(`比较映射版本未注册：${vector.mappingVersion}`);
+  }
+  assertSha256Hash(vector.mappingHash, "comparisonVector.mappingHash");
+  if (vector.mappingHash !== mapping.mappingHash) {
+    throw new Error("比较映射哈希与注册表不一致");
+  }
   assertOneOf(
     vector.rankStatus,
     ["NOT_CALIBRATED", "NOT_COMPARABLE", "EXPLORATORY_ONLY", "ELIGIBLE"],
@@ -825,10 +922,23 @@ function validateComparisonVector(
   }
   const axisIds = new Set<string>();
   const dimensionIds = new Set(assessments.map(({ dimensionId }) => dimensionId));
+  if (vector.axes.length !== mapping.axes.length) {
+    throw new Error("比较轴集合与注册映射不一致");
+  }
   vector.axes.forEach((axis) => {
     assertNonEmpty(axis.axisId, "comparisonVector.axisId");
     if (axisIds.has(axis.axisId)) throw new Error(`比较轴 ID 重复：${axis.axisId}`);
     axisIds.add(axis.axisId);
+    const registeredAxis = mapping.axes.find((candidate) => candidate.axisId === axis.axisId);
+    if (
+      registeredAxis === undefined ||
+      registeredAxis.sourceDimensionIds.length !== axis.sourceDimensionIds.length ||
+      registeredAxis.sourceDimensionIds.some((dimensionId, index) =>
+        dimensionId !== axis.sourceDimensionIds[index]
+      )
+    ) {
+      throw new Error(`比较轴 ${axis.axisId} 的维度映射与注册表不一致`);
+    }
     if (axis.sourceDimensionIds.length === 0) {
       throw new Error(`比较轴 ${axis.axisId} 必须引用至少一个维度`);
     }
@@ -865,6 +975,12 @@ function validateComparisonVector(
       !closeEnough(axis.uncertainRate, expectedRate(counts.UNCERTAIN))
     ) {
       throw new Error(`比较轴 ${axis.axisId} 与原子判断聚合结果不一致`);
+    }
+  });
+  const mappedDimensionIds = new Set(mapping.axes.flatMap(({ sourceDimensionIds }) => sourceDimensionIds));
+  dimensionIds.forEach((dimensionId) => {
+    if (!mappedDimensionIds.has(dimensionId)) {
+      throw new Error(`评测维度未进入冻结比较映射：${dimensionId}`);
     }
   });
   if (
@@ -912,9 +1028,61 @@ function buildDimensionProfiles(
   }));
 }
 
+function validateTargetsAgainstEvaluationInput(
+  targets: ReadonlyMap<string, EvaluationTargetNode>,
+  evaluationInput: EvaluationInput,
+): void {
+  const slideTargets = [...targets.values()].filter(({ scope }) => scope === "SLIDE");
+  const elementTargets = [...targets.values()].filter(({ scope }) => scope === "ELEMENT");
+  const expectedPages = new Set(evaluationInput.staticSurface.pages.map(({ pageNumber }) => pageNumber));
+  const actualPages = new Set(slideTargets.map(({ pageNumber }) => pageNumber!));
+  if (
+    slideTargets.length !== expectedPages.size ||
+    [...expectedPages].some((pageNumber) => !actualPages.has(pageNumber))
+  ) {
+    throw new Error("评测 Target 树必须完整覆盖 EvaluationInput 的所有页面");
+  }
+  const expectedElements = new Map<string, { pageNumber: number; kind: EvaluationElementKind }>();
+  evaluationInput.staticSurface.pages.forEach((page) => {
+    page.elements.forEach((element) => {
+      expectedElements.set(element.elementId, { pageNumber: page.pageNumber, kind: element.kind });
+    });
+  });
+  if (elementTargets.length !== expectedElements.size) {
+    throw new Error("评测 Target 树必须完整覆盖 EvaluationInput 的所有页面元素");
+  }
+  elementTargets.forEach((target) => {
+    const expected = target.elementId === null ? undefined : expectedElements.get(target.elementId);
+    if (
+      expected === undefined ||
+      expected.pageNumber !== target.pageNumber ||
+      expected.kind !== target.elementKind
+    ) {
+      throw new Error(`Element Target 未绑定 EvaluationInput：${target.targetId}`);
+    }
+  });
+}
+
 export function createEvaluationResult(
   input: CreateEvaluationResultInput,
 ): EvaluationResult {
+  const {
+    schemaVersion: _inputSchemaVersion,
+    evaluationInputHash: suppliedEvaluationInputHash,
+    ...evaluationInputPayload
+  } = input.evaluationInput;
+  const evaluationInput = createEvaluationInput(evaluationInputPayload);
+  if (evaluationInput.evaluationInputHash !== suppliedEvaluationInputHash) {
+    throw new Error("EvaluationInput 哈希校验失败");
+  }
+  if (
+    input.evaluationId !== evaluationInput.evaluationId ||
+    input.caseId !== evaluationInput.questionBankCase.caseId ||
+    input.artifactId !== evaluationInput.artifact.artifactId ||
+    input.mode !== evaluationInput.mode
+  ) {
+    throw new Error("EvaluationResult 身份与 EvaluationInput 不一致");
+  }
   assertOneOf(input.mode, ["mock", "production"], "mode");
   assertOneOf(input.deliveryStatus, ["PASS", "FAIL", "UNKNOWN"], "deliveryStatus");
   assertOneOf(input.lineage.judge.kind, ["mock", "real"], "lineage.judge.kind");
@@ -927,8 +1095,15 @@ export function createEvaluationResult(
   assertNonEmpty(input.lineage.promptVersion, "lineage.promptVersion");
   assertNonEmpty(input.lineage.judge.provider, "lineage.judge.provider");
   assertNonEmpty(input.lineage.judge.model, "lineage.judge.model");
-  if (input.mode === "production" && input.lineage.judge.responseIds.length === 0) {
+  if (
+    input.mode === "production" &&
+    (input.lineage.judge.responseIds.length === 0 ||
+      input.lineage.judge.responseIds.some((responseId) => responseId.trim().length === 0))
+  ) {
     throw new Error("生产评测结果必须记录真实 Judge responseId");
+  }
+  if (new Set(input.lineage.judge.responseIds).size !== input.lineage.judge.responseIds.length) {
+    throw new Error("Judge responseId 不能重复");
   }
   [
     [input.lineage.caseHash, "lineage.caseHash"],
@@ -937,8 +1112,29 @@ export function createEvaluationResult(
     [input.lineage.rubricHash, "lineage.rubricHash"],
     [input.lineage.aggregationSpecHash, "lineage.aggregationSpecHash"],
     [input.lineage.batchProtocolHash, "lineage.batchProtocolHash"],
+    [input.lineage.evaluationInputHash, "lineage.evaluationInputHash"],
   ].forEach(([hash, fieldName]) => assertSha256Hash(hash!, fieldName!));
+  if (input.lineage.referencePackHash !== null) {
+    assertSha256Hash(input.lineage.referencePackHash, "lineage.referencePackHash");
+  }
+  if (
+    input.lineage.evaluationInputHash !== evaluationInput.evaluationInputHash ||
+    input.lineage.referencePackHash !== evaluationInput.referencePack.contentHash ||
+    input.lineage.caseHash !== evaluationInput.questionBankCase.caseHash ||
+    input.lineage.artifactHash !== evaluationInput.artifact.contentHash ||
+    input.lineage.renderManifestHash !== evaluationInput.staticSurface.renderManifestHash ||
+    input.lineage.rubricHash !== evaluationInput.evaluationProtocol.rubricHash ||
+    input.lineage.aggregationSpecHash !== evaluationInput.evaluationProtocol.aggregationSpecHash ||
+    input.lineage.batchProtocolHash !== evaluationInput.evaluationProtocol.batchProtocolHash ||
+    input.lineage.promptVersion !== evaluationInput.evaluationProtocol.promptVersion ||
+    input.lineage.judge.kind !== evaluationInput.evaluationProtocol.judge.kind ||
+    input.lineage.judge.provider !== evaluationInput.evaluationProtocol.judge.provider ||
+    input.lineage.judge.model !== evaluationInput.evaluationProtocol.judge.model
+  ) {
+    throw new Error("EvaluationResult lineage 与已验证 EvaluationInput 不一致");
+  }
   const targets = validateTargetTree(input.tree.rootTargetId, input.tree.targets);
+  validateTargetsAgainstEvaluationInput(targets, evaluationInput);
 
   const evidenceById = new Map<string, EvaluationEvidence>();
   input.tree.evidence.forEach((evidence) => {
@@ -951,6 +1147,19 @@ export function createEvaluationResult(
       ["VISUAL_OBSERVATION", "EXTRACTED_TEXT", "REFERENCE_FACT", "ELEMENT_CROP", "GATE"],
       `Evidence ${evidence.evidenceId}.kind`,
     );
+    if (evidence.kind === "REFERENCE_FACT") {
+      if (evidence.sourceFactId === undefined || evidence.sourceIds === undefined || evidence.sourceIds.length === 0) {
+        throw new Error(`Reference Evidence ${evidence.evidenceId} 必须记录 sourceFactId/sourceIds`);
+      }
+      const fact = evaluationInput.referencePack.facts.find(({ factId }) => factId === evidence.sourceFactId);
+      if (
+        fact === undefined ||
+        fact.sourceIds.length !== evidence.sourceIds.length ||
+        fact.sourceIds.some((sourceId, index) => sourceId !== evidence.sourceIds![index])
+      ) {
+        throw new Error(`Reference Evidence ${evidence.evidenceId} 未绑定已验证 Reference Pack`);
+      }
+    }
     const target = targets.get(evidence.targetId)!;
     if (target.scope === "DECK" && evidence.elementId !== null) {
       throw new Error(`Deck Evidence ${evidence.evidenceId} 不能定位元素`);
