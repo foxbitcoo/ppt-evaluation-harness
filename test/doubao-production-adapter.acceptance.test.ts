@@ -232,7 +232,13 @@ async function executeWithDriver(
     parseAdapterExecutionConfiguration(
       adapter.executionConfigurationPackage,
     ),
-    { doubaoBrowserDriver: driver },
+    {
+      attemptCheckpointStore:
+        new InMemoryAttemptCheckpointStore(
+          `doubao-test-execution:${attemptId}`,
+        ),
+      doubaoBrowserDriver: driver,
+    },
   );
   const execution = await executor({
     jobId: `job-${attemptId}`,
@@ -406,7 +412,13 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
     parseAdapterExecutionConfiguration(
       adapter.executionConfigurationPackage,
     ),
-    { doubaoBrowserDriver: driver },
+    {
+      attemptCheckpointStore:
+        new InMemoryAttemptCheckpointStore(
+          "doubao-test-real-boundary",
+        ),
+      doubaoBrowserDriver: driver,
+    },
   );
   const execution = await executor({
     jobId: "job-doubao-real-1",
@@ -465,6 +477,97 @@ test("the trusted registry drives the real Doubao boundary from the frozen Query
     }),
     /cookie|authorization|bearer|password|localstorage|sessionstorage|chain.of.thought/i,
   );
+});
+
+test("a Doubao crash after submit begins leaves durable unknown intent and never submits again", async () => {
+  const checkpoints = new InMemoryAttemptCheckpointStore(
+    "doubao-submission-intent-crash",
+  );
+  let submitCalls = 0;
+  let reconcileCalls = 0;
+  const driver: DoubaoBrowserDriverPort = {
+    ...completeDoubaoDriver(),
+    async submitFrozenQuery() {
+      submitCalls += 1;
+      throw new Error(
+        "simulated process crash after the provider accepted submission",
+      );
+    },
+    async reconcileTask(query) {
+      reconcileCalls += 1;
+      return {
+        query,
+        observedState: "failed",
+        observedAt: "2026-07-27T06:01:00.000Z",
+        evidenceRef:
+          "screenshot://doubao/crash-reconciliation-failed",
+      };
+    },
+  };
+  const adapter = new DoubaoProductionProductAdapter();
+  const executor = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      attemptCheckpointStore: checkpoints,
+      doubaoBrowserDriver: driver,
+    },
+  );
+  const command = {
+    jobId: "job-doubao-submission-intent-crash",
+    runId: "run-doubao-submission-intent-crash",
+    attemptId: "attempt-doubao-submission-intent-crash-1",
+    attemptSeq: 1,
+    timeoutMs: 30 * 60 * 1_000,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  } as const;
+
+  await assert.rejects(
+    executor(command),
+    /simulated process crash/i,
+  );
+  const durableIntent = checkpoints
+    .snapshot()
+    .find(({ eventType }) => eventType === "submission_intent");
+  assert.equal(
+    durableIntent?.submissionEvidenceAtCheckpoint,
+    "unknown",
+  );
+
+  const restarted = await executor(command);
+  assert.ok(!("content" in restarted));
+  assert.equal(restarted.terminalReason, "task_state_unknown");
+  assert.equal(restarted.submissionEvidence, "unknown");
+  assert.equal(submitCalls, 1);
+
+  await checkpoints.append({
+    eventId:
+      "attempt-doubao-submission-intent-crash-1-submitted",
+    jobId: command.jobId,
+    caseId: command.evaluationCase.caseId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    attemptSeq: command.attemptSeq,
+    eventType: "query_submitted",
+    sourceAt: "2026-07-27T06:00:10.000Z",
+    observedAt: "2026-07-27T06:00:10.000Z",
+    writerId: "doubao-web-ppt@1",
+    evidenceRef: "screenshot://doubao/submitted-after-intent",
+    submissionEvidenceAtCheckpoint: "submitted",
+    vendorTaskId: "task_doubao_crash_1234",
+    taskStateVersion: "query_submitted@2",
+    adapterVersion: "doubao-web-ppt@1",
+    artifactId: null,
+  });
+  const reconciled = await executor(command);
+  assert.ok(!("content" in reconciled));
+  assert.equal(reconciled.terminalReason, "technical_failure");
+  assert.equal(reconciled.submissionEvidence, "submitted");
+  assert.equal(reconcileCalls, 1);
+  assert.equal(submitCalls, 1);
 });
 
 test("a package that needs new payment is blocked before submission with observable not-submitted evidence", async () => {
@@ -724,6 +827,7 @@ test("the harness retries once only after proven non-submission and never retrie
     productPackage: {
       ...productionAdapter.productPackage,
       packageId: "MOCK-doubao-production-boundary-v1",
+      displayName: "Mock-boundary Doubao PPT",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
       egressDestination: {
@@ -1263,12 +1367,15 @@ test("deadline shutdown completes when durable reconciliation confirms the submi
   const checkpoints = new InMemoryAttemptCheckpointStore(
     "doubao-deadline-vendor-failed",
   );
+  const runId =
+    "MOCK-run-mock-doubao-production-boundary--f06b6b1c3ff3fdd00f55761d6926e4ea-volcano-v1";
+  const attemptId = `${runId}-attempt-1`;
   await checkpoints.append({
-    eventId: "MOCK-run-doubao-volcano-v1-attempt-1-event-1",
+    eventId: `${attemptId}-event-1`,
     jobId: "MOCK-job-volcano-v1",
     caseId: VOLCANO_EVALUATION_CASE.caseId,
-    runId: "MOCK-run-doubao-volcano-v1",
-    attemptId: "MOCK-run-doubao-volcano-v1-attempt-1",
+    runId,
+    attemptId,
     attemptSeq: 1,
     eventType: "query_submitted",
     sourceAt: "2026-07-27T06:00:10.000Z",
@@ -1288,7 +1395,8 @@ test("deadline shutdown completes when durable reconciliation confirms the submi
       productionAdapter.executionConfigurationPackage,
     productPackage: {
       ...productionAdapter.productPackage,
-      packageId: "MOCK-doubao-package-v1",
+      packageId: "MOCK-doubao-production-boundary-v1",
+      displayName: "Mock-boundary Doubao PPT",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
       egressDestination: {
@@ -1338,8 +1446,7 @@ test("deadline shutdown completes when durable reconciliation confirms the submi
   const attempt = feishu
     .snapshot()
     .runRecordTable.find(
-      ({ recordId }) =>
-        recordId === "MOCK-run-doubao-volcano-v1-attempt-1",
+      ({ recordId }) => recordId === attemptId,
     );
 
   assert.equal(outcome.job.status, "failed");

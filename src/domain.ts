@@ -23,6 +23,11 @@ export type ProvenanceLabel =
   | "LIVE_PRODUCTION"
   | "PRODUCTION_REPLAY";
 
+export type ExecutionProvenance =
+  | MockProvenance
+  | "LIVE_PRODUCTION"
+  | "PRODUCTION_REPLAY";
+
 export type RunStatus =
   | "active"
   | "completed"
@@ -139,6 +144,8 @@ export interface RunRecord {
   readonly productConfigurationEvidence?: ObservedProductConfiguration | null;
   readonly costEvidence: CostEvidence | null;
   readonly provenance: ProvenanceLabel;
+  /** Provider execution source; production replay must remain distinct from LIVE. */
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly createdAt: string;
   readonly lastSyncedAt: string;
@@ -308,8 +315,10 @@ export interface JudgeFailureLineage {
 }
 
 export interface JudgeLineage {
-  readonly provider: "openai";
-  readonly adapterVersion: "openai-responses-judge@1";
+  readonly provider: "openai" | "codex_cli";
+  readonly adapterVersion:
+    | "openai-responses-judge@1"
+    | "codex-cli-judge@1";
   readonly requestedModel: "gpt-5.6-sol";
   readonly responseModel: string;
   readonly responseId: string;
@@ -330,6 +339,21 @@ export interface JudgeLineage {
   readonly rasterizedImageHashes: readonly RasterizedImageLineage[];
   readonly imageDetail: "high";
   readonly store: false;
+  readonly executionEvidence?: CodexCliJudgeExecutionEvidence;
+}
+
+export interface CodexCliJudgeExecutionEvidence {
+  readonly schemaVersion: "codex-cli-judge-execution-v1";
+  readonly binaryPath: string;
+  readonly binaryHash: `sha256:${string}`;
+  readonly fixedArgumentsHash: `sha256:${string}`;
+  readonly sandboxBinaryPath: string;
+  readonly sandboxBinaryHash: `sha256:${string}`;
+  readonly sandboxProfileHash: `sha256:${string}`;
+  readonly isolationAttestationHash: `sha256:${string}`;
+  readonly invocationHash: `sha256:${string}`;
+  readonly transcriptHash: `sha256:${string}`;
+  readonly resultHash: `sha256:${string}`;
 }
 
 export interface EvaluationInputManifest {
@@ -491,6 +515,7 @@ export interface ComparisonRecord {
   readonly leftScorecardId: string;
   readonly rightScorecardId: string;
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
 }
 
@@ -561,6 +586,7 @@ export interface ProductGapCardRecord {
   readonly jobId: string;
   readonly comparisonId: string;
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly workflowState: "pending_review";
   readonly causeAttribution: "HYPOTHESIS";
@@ -662,11 +688,19 @@ export interface VendorComparisonSummary {
 export interface FeishuReportDraft {
   readonly reportId: string;
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance?: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
   readonly title: string;
   readonly jobId: string;
   readonly runIds: readonly string[];
   readonly artifactIds: readonly string[];
+  /**
+   * Exact persisted Comparison inputs used to derive this report.
+   * Delivery-only reports use an empty list.
+   */
+  readonly comparisonIds: readonly string[];
+  /** Exact persisted Product Gap Cards rendered into this report. */
+  readonly gapCardIds: readonly string[];
   readonly claimLevel: "case_sample";
   readonly markdown: string;
   readonly createdAt: string;
@@ -689,6 +723,7 @@ export interface BakeoffJobSummary {
   readonly environment: "test" | "production";
   readonly status: "active" | "completed" | "partial" | "failed";
   readonly provenance: ProvenanceLabel;
+  readonly executionProvenance: ExecutionProvenance;
   readonly environmentOrigin: EnvironmentOrigin;
 }
 
@@ -703,8 +738,19 @@ export interface BakeoffJobOutcome {
   readonly report: FeishuReport;
 }
 
+export interface CaptureOnlyBakeoffJobOutcome
+  extends Omit<
+    BakeoffJobOutcome,
+    "scorecard" | "scorecards" | "report"
+  > {
+  readonly scorecard: null;
+  readonly scorecards: readonly [];
+  readonly report: null;
+}
+
 export interface StartBakeoffJobCommand {
   readonly environment: "test" | "production";
   readonly caseId: string;
   readonly referencePackMode?: "automatic" | "force" | "off";
+  readonly executionMode?: "evaluate" | "capture_only";
 }

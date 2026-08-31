@@ -18,6 +18,14 @@ import type {
   SubmissionEvidence,
   TerminalReason,
 } from "./domain.ts";
+import {
+  appendProviderSubmissionIntentCheckpoint,
+  attemptSubmissionState,
+  InMemoryAttemptCheckpointStore,
+  isHarnessProviderExecutionNotStartedCheckpoint,
+  isUnresolvedProviderSubmissionIntent,
+  submissionEvidenceBoundToCheckpoints,
+} from "./product-adapter.ts";
 import type {
   ProductAdapterImplementationPackage,
   AttemptCheckpointPort,
@@ -194,11 +202,20 @@ export interface QwenBrowserDriverPort {
   readonly browserProfileDigest?: typeof QWEN_BROWSER_PROFILE_DIGEST;
   readonly implementationPackage?: ProductAdapterImplementationPackage;
   readonly configurationPackage?: ProductAdapterImplementationPackage;
+  readonly captureReceipt?: QwenReplayCaptureReceipt;
   readonly sessions?: readonly QwenBrowserExecution[];
   readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
   execute(
     command: QwenBrowserExecutionCommand,
   ): Promise<QwenBrowserExecution>;
+}
+
+export interface QwenReplayCaptureReceipt {
+  readonly captureId: string;
+  readonly artifactContentHash: `sha256:${string}` | null;
+  readonly traceDigest: `sha256:${string}`;
+  readonly renderDigest: `sha256:${string}` | null;
+  readonly packageIdentityDigest: `sha256:${string}`;
 }
 
 export interface QwenTaskReconciliationQuery {
@@ -316,6 +333,68 @@ export interface QwenBrowserDriverEvidence
     | "REAL_PROVIDER_CAPTURE";
   readonly driverVersion: typeof QWEN_BROWSER_DRIVER_VERSION;
   readonly browserProfileDigest: typeof QWEN_BROWSER_PROFILE_DIGEST;
+  readonly captureReceipt?: QwenReplayCaptureReceipt;
+}
+
+const HARNESS_OWNED_QWEN_CAPTURE_RECEIPTS = new Map<
+  string,
+  QwenReplayCaptureReceipt
+>();
+const harnessOwnedQwenReplayPackages = new WeakSet<object>();
+
+function qwenReplayPackageIdentityDigest(): `sha256:${string}` {
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify({
+        configurationDigest:
+          qwenDriverConfigurationPackage().contentHash,
+        driverVersion: QWEN_BROWSER_DRIVER_VERSION,
+        browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
+      }),
+    ),
+  );
+}
+
+function qwenReplayTraceDigest(input: {
+  readonly sessions: readonly QwenBrowserExecution[];
+  readonly reconciliations: readonly QwenTaskReconciliationEvidence[];
+}): `sha256:${string}` {
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify({
+        sessionTraces: input.sessions.map((session) =>
+          session.status === "completed"
+            ? session.milestones
+            : {
+                milestones: session.milestones,
+                observedAt: session.observedAt,
+                terminalReason: session.terminalReason,
+              },
+        ),
+        reconciliations: input.reconciliations,
+      }),
+    ),
+  );
+}
+
+function qwenReplayRenderDigest(
+  session: QwenBrowserExecution,
+): `sha256:${string}` | null {
+  if (session.status !== "completed") return null;
+  return sha256(
+    textEncoder.encode(
+      JSON.stringify(
+        session.staticRenders.map(
+          ({ pageNumber, filename, mimeType, contentHash }) => ({
+            pageNumber,
+            filename,
+            mimeType,
+            contentHash,
+          }),
+        ),
+      ),
+    ),
+  );
 }
 
 const HARNESS_OWNED_QWEN_DRIVER_EVIDENCE:
@@ -360,6 +439,17 @@ export function registeredQwenBrowserDriverEvidence(
       "Production registry requires an allowlisted Qwen browser driver package",
     );
   }
+  if (
+    !harnessOwnedQwenReplayPackages.has(driver) ||
+    driver.captureReceipt === undefined ||
+    HARNESS_OWNED_QWEN_CAPTURE_RECEIPTS.get(
+      driver.captureReceipt.captureId,
+    ) !== driver.captureReceipt
+  ) {
+    throw new Error(
+      "Qwen production replay requires an immutable harness-owned capture receipt",
+    );
+  }
   return Object.freeze({
     driverId: driver.driverId,
     provenance: driver.runtimeProvenance,
@@ -370,6 +460,7 @@ export function registeredQwenBrowserDriverEvidence(
       qwenDriverImplementationPackage().contentHash,
     configurationDigest:
       qwenDriverConfigurationPackage().contentHash,
+    captureReceipt: driver.captureReceipt,
   });
 }
 
@@ -412,6 +503,7 @@ function registeredProductionQwenDriver(
 }
 
 export function createQwenRealProviderReplayPackage(input: {
+  readonly captureId: string;
   readonly sessions: readonly QwenBrowserExecution[];
   readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
 }): QwenBrowserDriverPort {
@@ -423,12 +515,58 @@ export function createQwenRealProviderReplayPackage(input: {
       "Qwen replay ingest requires retained real-provider evidence",
     );
   }
+  const receipt =
+    HARNESS_OWNED_QWEN_CAPTURE_RECEIPTS.get(input.captureId);
+  if (receipt === undefined) {
+    throw new Error(
+      "Qwen replay ingest requires a harness-owned capture receipt; the capture is unregistered",
+    );
+  }
+  const reconciliations = input.reconciliations ?? [];
+  if (
+    receipt.packageIdentityDigest !==
+    qwenReplayPackageIdentityDigest()
+  ) {
+    throw new Error(
+      "Qwen harness-owned capture receipt package binding is invalid",
+    );
+  }
+  if (
+    qwenReplayTraceDigest({
+      sessions: input.sessions,
+      reconciliations,
+    }) !== receipt.traceDigest
+  ) {
+    throw new Error(
+      "Qwen trace does not match the harness-owned capture receipt",
+    );
+  }
+  const completedSessions = input.sessions.filter(
+    (
+      session,
+    ): session is QwenBrowserCompletedExecution =>
+      session.status === "completed",
+  );
+  if (
+    completedSessions.length > 1 ||
+    (completedSessions[0] === undefined
+      ? receipt.artifactContentHash !== null ||
+        receipt.renderDigest !== null
+      : sha256(completedSessions[0].download.content) !==
+          receipt.artifactContentHash ||
+        qwenReplayRenderDigest(completedSessions[0]) !==
+          receipt.renderDigest)
+  ) {
+    throw new Error(
+      "Qwen Artifact or Render does not match the harness-owned capture receipt",
+    );
+  }
   const sessions = Object.freeze(
     input.sessions.map((session) =>
       Object.freeze(structuredClone(session)),
     ),
   );
-  return Object.freeze({
+  const replayPackage = Object.freeze({
     driverId: "qwen-real-provider-replay",
     runtimeProvenance: "PRODUCTION_REPLAY",
     captureSource: "REAL_PROVIDER_CAPTURE",
@@ -436,9 +574,10 @@ export function createQwenRealProviderReplayPackage(input: {
     browserProfileDigest: QWEN_BROWSER_PROFILE_DIGEST,
     implementationPackage: qwenDriverImplementationPackage(),
     configurationPackage: qwenDriverConfigurationPackage(),
+    captureReceipt: receipt,
     sessions,
     reconciliations: Object.freeze(
-      (input.reconciliations ?? []).map((entry) =>
+      reconciliations.map((entry) =>
         Object.freeze(structuredClone(entry)),
       ),
     ),
@@ -448,6 +587,8 @@ export function createQwenRealProviderReplayPackage(input: {
       );
     },
   });
+  harnessOwnedQwenReplayPackages.add(replayPackage);
+  return replayPackage;
 }
 
 function reconcileRegisteredQwenTask(
@@ -467,6 +608,31 @@ function reconcileRegisteredQwenTask(
   if (evidence === undefined) {
     throw new Error(
       "Qwen reconciliation API has no task/history/hash match",
+    );
+  }
+  assertIsoTimestamp(evidence.observedAt, "reconciliation time");
+  if (!/^ev_[a-f0-9]{16,64}$/.test(evidence.evidenceId)) {
+    throw new Error("Qwen reconciliation evidence ID must be opaque");
+  }
+  return Object.freeze(structuredClone(evidence));
+}
+
+function reconcileTestQwenTask(
+  driver: QwenBrowserDriverPort,
+  query: QwenTaskReconciliationQuery,
+): QwenTaskReconciliationEvidence {
+  if (driver.runtimeProvenance !== "TEST") {
+    throw new Error(
+      "Qwen test reconciliation requires a TEST browser driver",
+    );
+  }
+  const evidence = driver.reconciliations?.find(
+    (candidate) =>
+      JSON.stringify(candidate.query) === JSON.stringify(query),
+  );
+  if (evidence === undefined) {
+    throw new Error(
+      "Qwen test reconciliation fixture has no task/history/hash match",
     );
   }
   assertIsoTimestamp(evidence.observedAt, "reconciliation time");
@@ -742,15 +908,41 @@ function opaqueEvidenceId(
   return `ev_${sha256(textEncoder.encode(JSON.stringify(value))).slice(7, 39)}`;
 }
 
+function nextQwenObservableEventIndex(
+  recoveredEvents: readonly ObservableAttemptEvent[],
+  attemptId: string,
+): number {
+  const escapedAttemptId = attemptId.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const eventIdPattern = new RegExp(
+    `^${escapedAttemptId}-qwen-event-([1-9]\\d*)$`,
+  );
+  let maximum = 0;
+  for (const event of recoveredEvents) {
+    const match = eventIdPattern.exec(event.eventId);
+    if (match === null) continue;
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index)) {
+      throw new Error("Recovered Qwen event identity is not safely ordered");
+    }
+    maximum = Math.max(maximum, index);
+  }
+  return maximum + 1;
+}
+
 async function persistedObservableEvents(
   command: ProductRunCommand,
   execution: QwenBrowserExecution,
   checkpointStore: AttemptCheckpointPort | undefined,
   production: boolean,
+  firstEventIndex: number,
 ): Promise<readonly ObservableAttemptEvent[]> {
   const events: ObservableAttemptEvent[] = [];
   let submitted = false;
   for (const [index, milestone] of execution.milestones.entries()) {
+    const eventIndex = firstEventIndex + index;
     assertIsoTimestamp(milestone.observedAt, "milestone time");
     safeQwenUrl(milestone.url);
     const evidenceId =
@@ -758,7 +950,7 @@ async function persistedObservableEvents(
       opaqueEvidenceId({
         attemptId: command.attemptId,
         eventType: milestone.eventType,
-        index,
+        index: eventIndex,
         observedAt: milestone.observedAt,
       });
     if (!/^ev_[a-f0-9]{16,64}$/.test(evidenceId)) {
@@ -782,7 +974,7 @@ async function persistedObservableEvents(
       );
     }
     const event = Object.freeze({
-      eventId: `${command.attemptId}-qwen-event-${index + 1}`,
+      eventId: `${command.attemptId}-qwen-event-${eventIndex}`,
       jobId: command.jobId,
       caseId: command.evaluationCase.caseId,
       runId: command.runId,
@@ -806,6 +998,48 @@ async function persistedObservableEvents(
     events.push(event);
   }
   return Object.freeze(events);
+}
+
+async function appendTerminalNotSubmittedEvent(
+  command: ProductRunCommand,
+  execution: QwenBrowserTerminalExecution,
+  checkpointStore: AttemptCheckpointPort | undefined,
+  events: readonly ObservableAttemptEvent[],
+  firstEventIndex: number,
+): Promise<readonly ObservableAttemptEvent[]> {
+  if (
+    execution.submissionEvidence !== "not_submitted"
+  ) {
+    return events;
+  }
+  const eventIndex = firstEventIndex + events.length;
+  const evidenceId = opaqueEvidenceId({
+    attemptId: command.attemptId,
+    eventType: "query_not_submitted",
+    observedAt: execution.observedAt,
+    terminalReason: execution.terminalReason,
+  });
+  const terminalNotSubmitted = Object.freeze({
+    eventId: `${command.attemptId}-qwen-event-${eventIndex}`,
+    jobId: command.jobId,
+    caseId: command.evaluationCase.caseId,
+    runId: command.runId,
+    attemptId: command.attemptId,
+    attemptSeq: command.attemptSeq,
+    eventType: "query_not_submitted",
+    sourceAt: execution.observedAt,
+    observedAt: execution.observedAt,
+    writerId: QWEN_ADAPTER_VERSION,
+    evidenceRef: evidenceId,
+    sourceUrl: `urn:qwen-evidence:${evidenceId}`,
+    submissionEvidenceAtCheckpoint: "not_submitted" as const,
+    vendorTaskId: null,
+    taskStateVersion: `not_submitted@${eventIndex}`,
+    adapterVersion: QWEN_ADAPTER_VERSION,
+    artifactId: null,
+  });
+  await checkpointStore?.append(terminalNotSubmitted);
+  return Object.freeze([...events, terminalNotSubmitted]);
 }
 
 function validateTerminalExecution(
@@ -973,7 +1207,13 @@ function qwenExecutor(
   environmentOrigin: EnvironmentOrigin,
   checkpointStore?: AttemptCheckpointPort,
   reconciliationDriver?: QwenBrowserDriverPort,
+  testOnlyReconciliation = false,
+  testOnlyProductionValidation = false,
+  recordSubmissionIntent =
+    provenance === "LIVE_PRODUCTION",
 ): QwenProductAdapterExecutor {
+  const productionValidation =
+    provenance !== "MOCK" || testOnlyProductionValidation;
   const executor: QwenProductAdapterExecutor = async (command) => {
     if (
       command.evaluationCase.caseId !== VOLCANO_CASE_ID ||
@@ -1003,7 +1243,11 @@ function qwenExecutor(
           event.runId !== command.runId ||
           event.attemptId !== command.attemptId ||
           event.attemptSeq !== command.attemptSeq ||
-          event.adapterVersion !== QWEN_ADAPTER_VERSION
+          (!isHarnessProviderExecutionNotStartedCheckpoint(
+            event,
+            command,
+          ) &&
+            event.adapterVersion !== QWEN_ADAPTER_VERSION)
         ) {
           throw new Error(
             "Recovered Qwen checkpoint lineage does not match the Attempt",
@@ -1044,91 +1288,144 @@ function qwenExecutor(
           staticRenders: Object.freeze([]),
         });
       }
-      const latestTaskCheckpoint = [...recoveredEvents].reverse().find(
-        (event) =>
-          event.vendorTaskId !== null &&
-          event.vendorTaskId !== undefined &&
-          event.taskStateVersion !== null &&
-          event.taskStateVersion !== undefined,
-      );
+      const recoveredSubmissionState =
+        attemptSubmissionState(recoveredEvents);
+      const latestTaskCheckpoint =
+        recoveredSubmissionState === "not_submitted"
+          ? undefined
+          : [...recoveredEvents].reverse().find(
+              (event) =>
+                event.vendorTaskId !== null &&
+                event.vendorTaskId !== undefined &&
+                event.taskStateVersion !== null &&
+                event.taskStateVersion !== undefined,
+            );
       if (latestTaskCheckpoint === undefined) {
+        if (
+          recoveredEvents.some(
+            isUnresolvedProviderSubmissionIntent,
+          ) &&
+          recoveredSubmissionState === "unknown"
+        ) {
+          return Object.freeze({
+            terminalReason: "task_state_unknown",
+            blockReason: null,
+            submissionEvidence: "unknown",
+            elapsedMs: 0,
+            artifactCandidates: Object.freeze([]),
+            observableEvents: Object.freeze(
+              recoveredEvents.map((event) =>
+                Object.freeze(structuredClone(event)),
+              ),
+            ),
+            observedConfiguration: null,
+            trace: Object.freeze([]),
+            manualActions: Object.freeze([
+              "provider submission intent is unresolved; automatic resubmission suppressed",
+            ]),
+            staticRenders: Object.freeze([]),
+          });
+        }
+        if (
+          recoveredSubmissionState !== "not_submitted"
+        ) {
+          throw new Error(
+            "Recovered Qwen checkpoints require vendor task identity and state version",
+          );
+        }
+      } else {
+        const reconciliationQuery = {
+            vendorTaskId:
+              latestTaskCheckpoint.vendorTaskId as `task_${string}`,
+            taskStateVersion:
+              latestTaskCheckpoint.taskStateVersion as string,
+            eventHistoryHash: sha256(
+              textEncoder.encode(JSON.stringify(recoveredEvents)),
+            ),
+            artifactContentHash: null,
+          };
+        const reconciliation = testOnlyReconciliation
+          ? reconcileTestQwenTask(
+              reconciliationDriver!,
+              reconciliationQuery,
+            )
+          : reconcileRegisteredQwenTask(
+              reconciliationDriver,
+              reconciliationQuery,
+            );
+        const reconciliationEvent = Object.freeze({
+          eventId: `${command.attemptId}-qwen-reconciliation-${recoveredEvents.length + 1}`,
+          jobId: command.jobId,
+          caseId: command.evaluationCase.caseId,
+          runId: command.runId,
+          attemptId: command.attemptId,
+          attemptSeq: command.attemptSeq,
+          eventType: "task_reconciliation_result",
+          sourceAt: reconciliation.observedAt,
+          observedAt: reconciliation.observedAt,
+          writerId: QWEN_ADAPTER_VERSION,
+          evidenceRef: reconciliation.evidenceId,
+          sourceUrl:
+            `urn:qwen-evidence:${reconciliation.evidenceId}`,
+          submissionEvidenceAtCheckpoint: recoveredEvents.some(
+            ({ submissionEvidenceAtCheckpoint }) =>
+              submissionEvidenceAtCheckpoint === "submitted",
+          )
+            ? "submitted" as const
+            : "unknown" as const,
+          vendorTaskId: reconciliation.query.vendorTaskId,
+          taskStateVersion: reconciliation.query.taskStateVersion,
+          adapterVersion: QWEN_ADAPTER_VERSION,
+          artifactId: null,
+          reconciliationObservedState: reconciliation.observedState,
+          reconciliationTerminalReason:
+            terminalReasonForQwenReconciliation(
+              reconciliation.observedState,
+            ),
+          reconciliationArtifactReference:
+            artifactReferenceForQwenReconciliation(
+              reconciliation.observedState,
+              reconciliation.query.vendorTaskId,
+            ),
+        });
+        await checkpointStore?.append(reconciliationEvent);
+        const reconciledEvents = Object.freeze([
+          ...recoveredEvents.map((event) =>
+            Object.freeze(structuredClone(event)),
+          ),
+          reconciliationEvent,
+        ]);
+        return Object.freeze({
+          terminalReason:
+            reconciliationEvent.reconciliationTerminalReason,
+          blockReason: null,
+          submissionEvidence: recoveredEvents.some(
+            ({ submissionEvidenceAtCheckpoint }) =>
+              submissionEvidenceAtCheckpoint === "submitted",
+          )
+            ? "submitted"
+            : "unknown",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: reconciledEvents,
+          observedConfiguration: null,
+          trace: Object.freeze([]),
+          manualActions: Object.freeze([]),
+          staticRenders: Object.freeze([]),
+        });
+      }
+    }
+    if (recordSubmissionIntent) {
+      if (checkpointStore === undefined) {
         throw new Error(
-          "Recovered Qwen checkpoints require vendor task identity and state version",
+          "Qwen live provider submission requires durable checkpoints",
         );
       }
-      const reconciliation = reconcileRegisteredQwenTask(
-        reconciliationDriver,
-        {
-          vendorTaskId:
-            latestTaskCheckpoint.vendorTaskId as `task_${string}`,
-          taskStateVersion:
-            latestTaskCheckpoint.taskStateVersion as string,
-          eventHistoryHash: sha256(
-            textEncoder.encode(JSON.stringify(recoveredEvents)),
-          ),
-          artifactContentHash: null,
-        },
+      await appendProviderSubmissionIntentCheckpoint(
+        checkpointStore,
+        command,
+        QWEN_ADAPTER_VERSION,
       );
-      const reconciliationEvent = Object.freeze({
-        eventId: `${command.attemptId}-qwen-reconciliation-${recoveredEvents.length + 1}`,
-        jobId: command.jobId,
-        caseId: command.evaluationCase.caseId,
-        runId: command.runId,
-        attemptId: command.attemptId,
-        attemptSeq: command.attemptSeq,
-        eventType: "task_reconciliation_result",
-        sourceAt: reconciliation.observedAt,
-        observedAt: reconciliation.observedAt,
-        writerId: QWEN_ADAPTER_VERSION,
-        evidenceRef: reconciliation.evidenceId,
-        sourceUrl:
-          `urn:qwen-evidence:${reconciliation.evidenceId}`,
-        submissionEvidenceAtCheckpoint: recoveredEvents.some(
-          ({ submissionEvidenceAtCheckpoint }) =>
-            submissionEvidenceAtCheckpoint === "submitted",
-        )
-          ? "submitted" as const
-          : "unknown" as const,
-        vendorTaskId: reconciliation.query.vendorTaskId,
-        taskStateVersion: reconciliation.query.taskStateVersion,
-        adapterVersion: QWEN_ADAPTER_VERSION,
-        artifactId: null,
-        reconciliationObservedState: reconciliation.observedState,
-        reconciliationTerminalReason:
-          terminalReasonForQwenReconciliation(
-            reconciliation.observedState,
-          ),
-        reconciliationArtifactReference:
-          artifactReferenceForQwenReconciliation(
-            reconciliation.observedState,
-            reconciliation.query.vendorTaskId,
-          ),
-      });
-      await checkpointStore?.append(reconciliationEvent);
-      const reconciledEvents = Object.freeze([
-        ...recoveredEvents.map((event) =>
-          Object.freeze(structuredClone(event)),
-        ),
-        reconciliationEvent,
-      ]);
-      return Object.freeze({
-        terminalReason:
-          reconciliationEvent.reconciliationTerminalReason,
-        blockReason: null,
-        submissionEvidence: recoveredEvents.some(
-          ({ submissionEvidenceAtCheckpoint }) =>
-            submissionEvidenceAtCheckpoint === "submitted",
-        )
-          ? "submitted"
-          : "unknown",
-        elapsedMs: 0,
-        artifactCandidates: Object.freeze([]),
-        observableEvents: reconciledEvents,
-        observedConfiguration: null,
-        trace: Object.freeze([]),
-        manualActions: Object.freeze([]),
-        staticRenders: Object.freeze([]),
-      });
     }
     const execution = await driver.execute({
       attemptSeq: command.attemptSeq,
@@ -1143,18 +1440,48 @@ function qwenExecutor(
       signal: command.signal,
     });
     assertSafeQwenReplayInput(execution);
-    const observableEvents = await persistedObservableEvents(
+    const milestoneEvents = await persistedObservableEvents(
       command,
       execution,
       checkpointStore,
-      provenance !== "MOCK",
+      productionValidation,
+      nextQwenObservableEventIndex(
+        recoveredEvents,
+        command.attemptId,
+      ),
     );
     if (execution.status === "terminal") {
       validateTerminalExecution(execution);
+    } else {
+      assertSubmissionEvidenceMatchesMilestones(execution);
+    }
+    const observableEvents =
+      execution.status === "terminal"
+        ? await appendTerminalNotSubmittedEvent(
+            command,
+            execution,
+            checkpointStore,
+            milestoneEvents,
+            nextQwenObservableEventIndex(
+              recoveredEvents,
+              command.attemptId,
+            ),
+          )
+        : milestoneEvents;
+    const durableResultEvents =
+      checkpointStore?.readAttempt === undefined
+        ? observableEvents
+        : await checkpointStore.readAttempt(command.attemptId);
+    const durableSubmissionEvidence =
+      submissionEvidenceBoundToCheckpoints(
+        execution.submissionEvidence,
+        durableResultEvents,
+    );
+    if (execution.status === "terminal") {
       return Object.freeze({
         terminalReason: execution.terminalReason,
         blockReason: execution.blockReason,
-        submissionEvidence: execution.submissionEvidence,
+        submissionEvidence: durableSubmissionEvidence,
         elapsedMs: execution.elapsedMs,
         artifactCandidates: Object.freeze([]),
         observableEvents,
@@ -1163,7 +1490,7 @@ function qwenExecutor(
             ? null
             : validateObservedConfiguration(
                 execution.observedConfiguration,
-                provenance !== "MOCK",
+                productionValidation,
               ),
         trace: createTerminalTrace(execution),
         manualActions: Object.freeze(
@@ -1174,13 +1501,12 @@ function qwenExecutor(
         staticRenders: Object.freeze([]),
       });
     }
-    assertSubmissionEvidenceMatchesMilestones(execution);
     const observedConfiguration =
       validateObservedConfiguration(
         execution.observedConfiguration,
-        provenance !== "MOCK",
+        productionValidation,
       );
-    if (provenance !== "MOCK") {
+    if (productionValidation) {
       const evidenceBindings =
         observedConfiguration.evidenceBindings!;
       const dedicatedMilestones = [
@@ -1210,7 +1536,7 @@ function qwenExecutor(
       environmentOrigin,
     );
     if (
-      provenance !== "MOCK" &&
+      productionValidation &&
       execution.staticRenders.length > 0
     ) {
       throw new Error(
@@ -1303,6 +1629,7 @@ function qwenExecutor(
 
 export function createQwenProductAdapterExecutorForTest(
   driver: QwenBrowserDriverPort,
+  checkpointStore?: AttemptCheckpointPort,
 ): QwenProductAdapterExecutor {
   if (driver.runtimeProvenance !== "TEST") {
     throw new Error("Qwen test executor requires a TEST browser driver");
@@ -1311,6 +1638,52 @@ export function createQwenProductAdapterExecutorForTest(
     driver,
     "MOCK",
     MOCK_TEST_ENVIRONMENT_ORIGIN,
+    checkpointStore ??
+      new InMemoryAttemptCheckpointStore(
+        "qwen-test-product-adapter-checkpoints",
+      ),
+    undefined,
+    false,
+    false,
+    true,
+  );
+}
+
+export function createQwenReplayBehaviorExecutorForTest(input: {
+  readonly sessions: readonly QwenBrowserExecution[];
+  readonly reconciliations?: readonly QwenTaskReconciliationEvidence[];
+  readonly checkpointStore?: AttemptCheckpointPort;
+}): QwenProductAdapterExecutor {
+  const sessions = Object.freeze(
+    input.sessions.map((session) =>
+      Object.freeze(structuredClone(session)),
+    ),
+  );
+  const driver: QwenBrowserDriverPort = Object.freeze({
+    runtimeProvenance: "TEST",
+    reconciliations: Object.freeze(
+      (input.reconciliations ?? []).map((entry) =>
+        Object.freeze(structuredClone(entry)),
+      ),
+    ),
+    async execute(command: QwenBrowserExecutionCommand) {
+      const session = sessions[command.attemptSeq - 1];
+      if (session === undefined) {
+        throw new Error(
+          `Qwen TEST replay fixture has no session for attempt ${command.attemptSeq}`,
+        );
+      }
+      return Object.freeze(structuredClone(session));
+    },
+  });
+  return qwenExecutor(
+    driver,
+    "MOCK",
+    MOCK_TEST_ENVIRONMENT_ORIGIN,
+    input.checkpointStore,
+    driver,
+    true,
+    true,
   );
 }
 

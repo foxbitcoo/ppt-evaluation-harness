@@ -12,7 +12,7 @@ import {
   calculateArtifactDerivativeSetHash,
   canonicalJsonBytes,
   loadDurableRootRegistry,
-  resolveDurableRoot,
+  resolveDurableRootIdentity,
   trustedDoubaoRecoveryCheckpoint,
   parseStrictJson,
   type TrustedDoubaoRecoveryCheckpoint,
@@ -348,9 +348,12 @@ function normalizedProductionTaskId(rawVendorTaskId: string): string {
         .slice(0, 32)}`;
 }
 
-export async function validateDoubaoRecoveryStoresAgainstCheckpoint(
+async function validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
   command: DoubaoProductionRecoveryCommand,
   trustedCheckpoint: TrustedDoubaoRecoveryCheckpoint,
+  checkpointReadMode:
+    | "legacy_read_only"
+    | "authenticated_hash_chain",
 ) {
 const {
   registryId,
@@ -366,23 +369,33 @@ const {
   attemptId,
 } = command;
 const registry = await loadDurableRootRegistry(registryId);
+const artifactRootIdentity = resolveDurableRootIdentity(
+  registry,
+  artifactRecoveryRootReference,
+);
+const runSpecificationRootIdentity = resolveDurableRootIdentity(
+  registry,
+  runSpecificationRootReference,
+);
+const checkpointRootIdentity = resolveDurableRootIdentity(
+  registry,
+  checkpointRootReference,
+);
 const artifactStore = new FileSystemImmutableBlobStore({
   storeId: artifactStoreId,
-  rootPath: resolveDurableRoot(
-    registry,
-    artifactRecoveryRootReference,
-  ),
+  rootPath: artifactRootIdentity.canonicalPath,
+  expectedRootIdentity: artifactRootIdentity,
 });
 const runSpecificationStore = new FileSystemImmutableBlobStore({
   storeId: runSpecificationStoreId,
-  rootPath: resolveDurableRoot(
-    registry,
-    runSpecificationRootReference,
-  ),
+  rootPath: runSpecificationRootIdentity.canonicalPath,
+  expectedRootIdentity: runSpecificationRootIdentity,
 });
 const checkpointStore = new FileSystemAttemptCheckpointStore({
   checkpointStoreId,
-  rootPath: resolveDurableRoot(registry, checkpointRootReference),
+  rootPath: checkpointRootIdentity.canonicalPath,
+  expectedRootIdentity: checkpointRootIdentity,
+  legacyReadOnly: checkpointReadMode === "legacy_read_only",
 });
 const [manifest, original, runSpecification, checkpoints] =
   await Promise.all([
@@ -2030,6 +2043,40 @@ return Object.freeze({
   });
 }
 
+export async function validateDoubaoRecoveryStoresAgainstCheckpoint(
+  command: DoubaoProductionRecoveryCommand,
+  trustedCheckpointId: string,
+) {
+  const trustedCheckpoint =
+    trustedDoubaoRecoveryCheckpoint(trustedCheckpointId);
+  if (trustedCheckpoint.purpose !== "real_provider_recovery") {
+    throw new Error(
+      "Production Doubao recovery checkpoint purpose is invalid",
+    );
+  }
+  return validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
+    command,
+    trustedCheckpoint,
+    "legacy_read_only",
+  );
+}
+
+export async function validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTest(
+  command: DoubaoProductionRecoveryCommand,
+  trustedCheckpoint: TrustedDoubaoRecoveryCheckpoint,
+) {
+  if (trustedCheckpoint.purpose !== "offline_validation_fixture") {
+    throw new Error(
+      "Doubao recovery TEST-only validator requires an offline fixture trusted checkpoint",
+    );
+  }
+  return validateDoubaoRecoveryStoresAgainstTrustedCheckpoint(
+    command,
+    trustedCheckpoint,
+    "legacy_read_only",
+  );
+}
+
 function productionCommandFromArguments(
   values: readonly string[],
 ): {
@@ -2100,16 +2147,9 @@ if (
       "Production Doubao recovery requires the real-provider trusted checkpoint",
     );
   }
-  const trustedCheckpoint =
-    trustedDoubaoRecoveryCheckpoint(trustedCheckpointId);
-  if (trustedCheckpoint.purpose !== "real_provider_recovery") {
-    throw new Error(
-      "Production Doubao recovery checkpoint purpose is invalid",
-    );
-  }
   const result = await validateDoubaoRecoveryStoresAgainstCheckpoint(
     command,
-    trustedCheckpoint,
+    trustedCheckpointId,
   );
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

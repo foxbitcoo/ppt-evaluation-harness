@@ -1,0 +1,122 @@
+{
+  "qwen": {
+    "dimensions": {
+      "requirement_understanding_and_content_coverage": {
+        "assessmentStatus": "ASSESSED",
+        "value": 4,
+        "evidencePages": [1, 2, 8],
+        "rationale": "Fixture：8 页产物满足历史页数要求，结构基本可见。"
+      },
+      "factual_accuracy_and_content_quality": {
+        "assessmentStatus": "NOT_ASSESSABLE",
+        "value": null,
+        "evidencePages": [],
+        "rationale": "没有可辩护的知识包，事实维度不评估。"
+      },
+      "narrative_and_audience_fit": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [2, 4, 8],
+        "rationale": "Fixture：主线基本完整。"
+      },
+      "visual_aesthetics_and_professional_finish": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [1, 5, 8],
+        "rationale": "Fixture：视觉完成度中等。"
+      },
+      "layout_hierarchy_and_readability": {
+        "assessmentStatus": "ASSESSED",
+        "value": 4,
+        "evidencePages": [2, 6, 8],
+        "rationale": "Fixture：静态层级较清楚。"
+      },
+      "imagery_chart_and_information_expression": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [3, 5, 7],
+        "rationale": "Fixture：存在基础图文表达。"
+      }
+    }
+  },
+  "doubao": {
+    "dimensions": {
+      "requirement_understanding_and_content_coverage": {
+        "assessmentStatus": "ASSESSED",
+        "value": 4,
+        "evidencePages": [1, 2, 8],
+        "rationale": "Fixture：8 页产物满足历史页数要求，结构基本可见。"
+      },
+      "factual_accuracy_and_content_quality": {
+        "assessmentStatus": "NOT_ASSESSABLE",
+        "value": null,
+        "evidencePages": [],
+        "rationale": "没有可辩护的知识包，事实维度不评估。"
+      },
+      "narrative_and_audience_fit": {
+        "assessmentStatus": "ASSESSED",
+        "value": 4,
+        "evidencePages": [2, 5, 8],
+        "rationale": "Fixture：叙事路径较完整。"
+      },
+      "visual_aesthetics_and_professional_finish": {
+        "assessmentStatus": "ASSESSED",
+        "value": 4,
+        "evidencePages": [1, 4, 8],
+        "rationale": "Fixture：视觉完成度较高。"
+      },
+      "layout_hierarchy_and_readability": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [2, 6, 8],
+        "rationale": "Fixture：层级基本清楚。"
+      },
+      "imagery_chart_and_information_expression": {
+        "assessmentStatus": "ASSESSED",
+        "value": 4,
+        "evidencePages": [3, 5, 7],
+        "rationale": "Fixture：图文表达较丰富。"
+      }
+    }
+  },
+  "lingxi": {
+    "dimensions": {
+      "requirement_understanding_and_content_coverage": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [1, 2, 12],
+        "rationale": "Fixture：实际 12 页，相对历史 8 页要求偏差 +4 页。"
+      },
+      "factual_accuracy_and_content_quality": {
+        "assessmentStatus": "NOT_ASSESSABLE",
+        "value": null,
+        "evidencePages": [],
+        "rationale": "没有可辩护的知识包，事实维度不评估。"
+      },
+      "narrative_and_audience_fit": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [2, 6, 12],
+        "rationale": "Fixture：叙事路径基本连贯。"
+      },
+      "visual_aesthetics_and_professional_finish": {
+        "assessmentStatus": "ASSESSED",
+        "value": 2,
+        "evidencePages": [1, 7, 12],
+        "rationale": "Fixture：视觉完成度仍有改进空间。"
+      },
+      "layout_hierarchy_and_readability": {
+        "assessmentStatus": "ASSESSED",
+        "value": 3,
+        "evidencePages": [2, 8, 12],
+        "rationale": "Fixture：静态层级基本清楚。"
+      },
+      "imagery_chart_and_information_expression": {
+        "assessmentStatus": "ASSESSED",
+        "value": 2,
+        "evidencePages": [3, 9, 11],
+        "rationale": "Fixture：信息表达形式偏少。"
+      }
+    }
+  }
+}

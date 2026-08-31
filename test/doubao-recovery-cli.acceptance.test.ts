@@ -41,7 +41,17 @@ import {
   artifactManifestAttestedPayloadHash,
   renderManifestAttestedPayloadHash,
   validateDoubaoRecoveryStoresAgainstCheckpoint,
+  validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTest,
 } from "../scripts/recover-doubao-production-run.ts";
+
+type PublicRecoveryCheckpointArgument =
+  Parameters<
+    typeof validateDoubaoRecoveryStoresAgainstCheckpoint
+  >[1];
+const publicRecoveryCheckpointArgumentIsIdOnly:
+  PublicRecoveryCheckpointArgument extends string ? true : false =
+    true;
+void publicRecoveryCheckpointArgumentIsIdOnly;
 
 const execFileAsync = promisify(execFile);
 const encoder = new TextEncoder();
@@ -136,6 +146,28 @@ const OFFLINE_RECOVERY_FIXTURE_CHECKPOINT =
     slideDimensions: Object.freeze({ width: 1, height: 1 }),
     contactSheetDimensions: Object.freeze({ width: 1, height: 1 }),
   });
+
+test("the public Doubao recovery validator rejects caller-supplied trust objects before reading stores", async () => {
+  await assert.rejects(
+    validateDoubaoRecoveryStoresAgainstCheckpoint(
+      {
+        registryId: "must-not-read-caller-selected-registry",
+        artifactRecoveryRootReference: "root:artifact",
+        runSpecificationRootReference: "root:specification",
+        checkpointRootReference: "root:checkpoint",
+        artifactStoreId: "caller-selected-artifact-store",
+        manifestKey: "artifacts/caller-selected/manifest",
+        originalKey: "artifacts/caller-selected/original",
+        runSpecificationStoreId: "caller-selected-specification-store",
+        runSpecificationKey: "run-specifications/caller-selected",
+        checkpointStoreId: "caller-selected-checkpoint-store",
+        attemptId: "caller-selected-attempt",
+      },
+      OFFLINE_RECOVERY_FIXTURE_CHECKPOINT as unknown as string,
+    ),
+    /harness-owned allowlist/i,
+  );
+});
 
 type MalformedLineageCase =
   | "valid"
@@ -777,7 +809,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
         trustedRunSpecificationCanonicalHash,
     });
     const result =
-      await validateDoubaoRecoveryStoresAgainstCheckpoint(
+      await validateDoubaoRecoveryStoresAgainstTrustedCheckpointForTest(
         {
           registryId,
           artifactRecoveryRootReference: "root:artifact",
@@ -813,7 +845,7 @@ async function runRecoveryFixture(malformedCase: MalformedLineageCase) {
   }
 }
 
-test("the shipped Doubao recovery validator accepts a real minimal binary fixture through an injected trusted checkpoint", async () => {
+test("the TEST-only Doubao recovery fixture validator accepts a real minimal binary fixture", async () => {
   const result = await runRecoveryFixture("valid");
   assert.deepEqual(
     {
@@ -1035,10 +1067,10 @@ test("the production CLI rejects the offline fixture checkpoint before reading r
   );
 });
 
-test("checked-in evidence records a successful allowlisted v30 replay under the current verifier", async () => {
+test("checked-in evidence records a successful allowlisted v35 replay under the current verifier", async () => {
   const evidenceSource = await readFile(
     new URL(
-      "../evidence/doubao-v30-current-verifier-recovery.json",
+      "../evidence/doubao-v35-current-verifier-recovery.json",
       import.meta.url,
     ),
     "utf8",
@@ -1048,7 +1080,7 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
   const rawRecoveryCliResultBytes = Uint8Array.from(
     await readFile(
       new URL(
-        "../evidence/doubao-v30-final-recovery-cli-result.json",
+        "../evidence/doubao-v35-final-recovery-cli-result.json",
         import.meta.url,
       ),
     ),
@@ -1067,9 +1099,9 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
     schemaVersion:
       "doubao-current-verifier-trusted-recovery-evidence-v1",
     status: "recovery_succeeded",
-    recordedOn: "2026-07-31",
+    recordedOn: "2026-08-02",
     timingBasis: "date_only_unobserved_exact_time",
-    registryId: "doubao-real-provider-20260730-t09-v30",
+    registryId: "doubao-real-provider-20260802-t10-v34",
     checkpointId: DOUBAO_REAL_PROVIDER_RECOVERY_CHECKPOINT_ID,
     artifactContentHash:
       "sha256:ca1235d230e2b61ce083bebadaeaa5e434df985e7e81cfb1e41e068cba3a08a4",
@@ -1125,20 +1157,20 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
     recoveryCliEvidence: {
       schemaVersion: "doubao-recovery-cli-evidence-v1",
       rawResultReference:
-        "evidence/doubao-v30-final-recovery-cli-result.json",
+        "evidence/doubao-v35-final-recovery-cli-result.json",
       rawResultHashScope:
         "exact_stdout_bytes_including_terminal_lf",
       rawResultHash:
-        "sha256:2f81743de3abe4d005fda974b020e11f388fc14a210e09cf394c0952a1540ea8",
+        "sha256:36edc027a29452cb3490265e7b7ba67edb975fe4a12edd11b502e759529faed6",
       rawResultVerifierBuildIdentity: BUILD_IDENTITY,
       attestedResultSchemaVersion:
         "doubao-recovery-result-attestation-v1",
       attestedResultHash:
-        "sha256:2dd62b501ad029f1ef5def7c7e403957586789953dbe96b762a8890627ce825b",
+        "sha256:7f42520ce1193501f873dd95b084cf2d495bb83f7addf70d272b4bb6fb732131",
       attestedResultVerifierBuildIdentity: BUILD_IDENTITY,
     },
     resultHash:
-      "sha256:3288b2ff43c2f6866f823a617fee68f99f7da9d87536178388556d8555004488",
+      "sha256:90a5c535894b05b1b112f7104bd94c82b51ebb42a25c5ae9f696a6916a775173",
   });
   assert.notEqual(
     evidence.evaluatedRunIdentity.specCommitSha,
@@ -1175,11 +1207,95 @@ test("checked-in evidence records a successful allowlisted v30 replay under the 
   );
 });
 
+test("the recovery evidence index preserves history and identifies exactly one current verifier record", async () => {
+  const index = JSON.parse(
+    await readFile(
+      new URL(
+        "../evidence/doubao-recovery-evidence-index.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+
+  assert.deepEqual(index, {
+    schemaVersion: "doubao-recovery-evidence-index-v1",
+    latestEvidenceVersion: "v35",
+    entries: [
+      {
+        version: "v30",
+        status: "historical",
+        recordedOn: "2026-07-31",
+        verifierSpecCommitSha:
+          "2d795e4e5c9dae6f77663b44598d396106181b6e",
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v30-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v30-final-recovery-cli-result.json",
+      },
+      {
+        version: "v31",
+        status: "historical",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha:
+          "56058f12032b16effaeb079802014406ac0e7e92",
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v31-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v31-final-recovery-cli-result.json",
+      },
+      {
+        version: "v32",
+        status: "historical",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha:
+          "d4712f982860eea55409da7349ae67b7ba9f2c65",
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v32-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v32-final-recovery-cli-result.json",
+      },
+      {
+        version: "v33",
+        status: "historical",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha:
+          "5c2312ae6abed54e797f70f3e85e1621ce5e4581",
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v33-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v33-final-recovery-cli-result.json",
+      },
+      {
+        version: "v34",
+        status: "historical",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha:
+          "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v34-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v34-final-recovery-cli-result.json",
+      },
+      {
+        version: "v35",
+        status: "current",
+        recordedOn: "2026-08-02",
+        verifierSpecCommitSha: BUILD_SPEC_COMMIT_SHA,
+        currentVerifierEvidenceReference:
+          "evidence/doubao-v35-current-verifier-recovery.json",
+        rawRecoveryCliResultReference:
+          "evidence/doubao-v35-final-recovery-cli-result.json",
+      },
+    ],
+  });
+});
+
 test("raw recovery stdout attestation is whitespace-sensitive while its parsed attested view is canonical", async () => {
   const checkedBytes = Uint8Array.from(
     await readFile(
       new URL(
-        "../evidence/doubao-v30-final-recovery-cli-result.json",
+        "../evidence/doubao-v35-final-recovery-cli-result.json",
         import.meta.url,
       ),
     ),
@@ -1226,7 +1342,7 @@ test("raw recovery stdout attestation is whitespace-sensitive while its parsed a
 test("current-verifier recovery evidence rejects duplicate and unknown authenticated fields", async () => {
   const evidenceSource = await readFile(
     new URL(
-      "../evidence/doubao-v30-current-verifier-recovery.json",
+      "../evidence/doubao-v35-current-verifier-recovery.json",
       import.meta.url,
     ),
     "utf8",

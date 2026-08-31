@@ -46,11 +46,17 @@ import {
   type WpsAiPptBrowserResult,
   type WpsAiPptCapturedBrowserResult,
 } from "../src/index.ts";
-import { resolveHarnessProductAdapterExecutor } from "../src/mock-wps.ts";
+import {
+  resolveHarnessProductAdapterExecutor as resolvePublicHarnessProductAdapterExecutor,
+  resolveHarnessProductAdapterExecutorForTest as resolveHarnessProductAdapterExecutor,
+} from "../src/mock-wps.ts";
 import {
   reconcileHarnessOwnedWpsAiPptTask,
   runHarnessOwnedWpsAiPptBrowser,
 } from "../src/wps-aippt-external-runtime.ts";
+import {
+  createWpsAiPptReplayBehaviorExecutorForTest,
+} from "../src/wps-aippt.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -171,7 +177,10 @@ async function knownGoodPptxBytes(): Promise<Uint8Array> {
 
 function capturedBrowserResult(
   pptx: Uint8Array,
-  submissionEvidence: "submitted" | "unknown" = "submitted",
+  submissionEvidence:
+    | "submitted"
+    | "not_submitted"
+    | "unknown" = "submitted",
   renderOutcome: "faithful" | "degraded" = "faithful",
 ): WpsAiPptCapturedBrowserResult {
   const png = Uint8Array.from(
@@ -438,6 +447,59 @@ function browserDriverPackage(
   });
 }
 
+function productionCheckpointCapabilities(root: string) {
+  const tombstones = new InMemoryTombstoneLedger(
+    "wps-private-checkpoint-authority-tombstones",
+  );
+  return createHarnessOwnedProductionCapabilities({
+    artifactPrimary: {
+      operatorDomainLabel: "wps-private-checkpoint-primary",
+      rootPath: join(root, "primary"),
+      rootReference: "root:wps-private-checkpoint-primary",
+      storeId: "wps-private-checkpoint-primary",
+    },
+    artifactRecovery: {
+      operatorDomainLabel: "wps-private-checkpoint-recovery",
+      rootPath: join(root, "recovery"),
+      rootReference: "root:wps-private-checkpoint-recovery",
+      storeId: "wps-private-checkpoint-recovery",
+    },
+    runSpecification: {
+      operatorDomainLabel: "wps-private-checkpoint-run-spec",
+      rootPath: join(root, "run-spec"),
+      rootReference: "root:wps-private-checkpoint-run-spec",
+      storeId: "wps-private-checkpoint-run-spec",
+    },
+    checkpoint: {
+      rootPath: join(root, "checkpoints"),
+      rootReference: "root:wps-private-checkpoint-store",
+      storeId: "wps-private-checkpoint-store",
+    },
+    profileLock: {
+      rootPath: join(root, "locks"),
+      rootReference: "root:wps-private-checkpoint-lock",
+      lockId: "wps-private-checkpoint-lock",
+    },
+    renderer: {
+      rendererId: "wps-private-checkpoint-renderer",
+      slidesDirectory: join(root, "unused-slides"),
+      extractedTextPrefix: "page",
+      fontPack: "test",
+      resolution: "1x1",
+      colorProfile: "sRGB",
+      fidelityNotes: ["test"],
+    },
+    tombstones,
+    payloadInventory: new InMemoryPayloadInventory(tombstones),
+    egressAuthorization: {
+      async authorize() {
+        throw new Error("checkpoint fixture must not authorize storage");
+      },
+    },
+    egressAudit: new InMemoryEgressAuthorizationAudit(),
+  });
+}
+
 test("the public browser-driver fixture factory cannot mint PRODUCTION sessions", async () => {
   const pptx = await knownGoodPptxBytes();
 
@@ -451,7 +513,28 @@ test("the public browser-driver fixture factory cannot mint PRODUCTION sessions"
   );
 });
 
-test("retained real-provider capture is ingested only as PRODUCTION_REPLAY", async () => {
+test("the public WPS production resolver rejects TEST_FAKE before any command provenance is considered", () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const driver = browserDriverPackage({
+    outcome: "technical_failure",
+    submissionEvidence: "not_submitted",
+    elapsedMs: 1,
+    events: [],
+    manualActions: [],
+  });
+
+  assert.throws(
+    () =>
+      resolvePublicHarnessProductAdapterExecutor(
+        adapter.implementationPackage,
+        adapter.executionConfiguration,
+        { wpsAiPptBrowserDriver: driver },
+      ),
+    /production resolver.*TEST_FAKE|TEST_FAKE.*production resolver/i,
+  );
+});
+
+test("synthetic WPS capture cannot be ingested as PRODUCTION_REPLAY", async () => {
   const pptx = await knownGoodPptxBytes();
   const { render: _render, ...captured } =
     capturedBrowserResult(pptx);
@@ -472,157 +555,45 @@ test("retained real-provider capture is ingested only as PRODUCTION_REPLAY", asy
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     },
   };
-  const adapter = new WpsAiPptReplayAdapter();
-  const execute = resolveHarnessProductAdapterExecutor(
-    adapter.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      adapter.executionConfigurationPackage,
-    ),
-    {
-      wpsAiPptBrowserDriver:
-        createWpsAiPptRealProviderReplayPackage({
+  assert.throws(
+    () =>
+      createWpsAiPptRealProviderReplayPackage({
+          captureId: "unregistered-wps-test-capture",
           sessions: [replayResult],
-        }),
-    },
-  );
-
-  const result = (await execute({
-    jobId: "job-wps-real-provider-replay",
-    runId: "run-wps-real-provider-replay",
-    attemptId: "attempt-wps-real-provider-replay-1",
-    attemptSeq: 1,
-    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-    signal: new AbortController().signal,
-    evaluationCase: PRODUCTION_VOLCANO_EVALUATION_CASE,
-  })) as ProductAttemptResult;
-
-  assert.equal(result.terminalReason, "success");
-  assert.equal(
-    result.artifactCandidates[0]?.artifact.provenance,
-    "PRODUCTION_REPLAY",
-  );
-  assert.equal(
-    result.artifactCandidates[0]?.productionExecutionEvidence
-      ?.executionMode,
-    "PRODUCTION_REPLAY",
-  );
-  assert.equal(
-    result.artifactCandidates[0]?.productionExecutionEvidence
-      ?.captureSource,
-    "REAL_PROVIDER_CAPTURE",
-  );
-  assert.equal(
-    result.artifactCandidates[0]?.productionExecutionEvidence
-      ?.artifactContentHash,
-    result.artifactCandidates[0]?.artifact.contentHash,
-  );
-  assert.match(
-    result.artifactCandidates[0]?.productionExecutionEvidence
-      ?.traceHash ?? "",
-    /^sha256:[a-f0-9]{64}$/,
+          renderedPages: [],
+      }),
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
-test("production rejects default in-memory recovery dependencies before driver execution", async () => {
-  await assert.rejects(
-    async () =>
-      createBakeoffHarness({
-        feishu: new InMemoryFeishuProjection({
-          targetEnvironment: "production",
-        }),
-        productAdapter: new WpsAiPptProductAdapter(),
-        egressAuthorization: {
-          async authorize() {
-            throw new Error("durability preflight must run before egress");
-          },
-        },
-        rendererDestination:
-          ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
-      }).startBakeoffJob({
-        environment: "production",
-        caseId: VOLCANO_EVALUATION_CASE.caseId,
+// Generic production durability/capability rejection remains covered by
+// production-readiness.acceptance.test.ts and the registered Doubao
+// retained-recovery acceptance path. These WPS cases now stop at the
+// provider-specific receipt boundary because Mock bytes cannot progress
+// far enough to exercise production capability preflight.
+test("WPS Mock replay fails closed at its receipt before default durability preflight", async () => {
+  const pptx = await knownGoodPptxBytes();
+  assert.throws(
+    () =>
+      createWpsAiPptRealProviderReplayPackage({
+        captureId: "unregistered-wps-durability-test-capture",
+        sessions: [capturedBrowserResult(pptx)],
+        renderedPages: [],
       }),
-    /production.*durable.*ArtifactVault/i,
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
-test("production rejects caller objects that merely self-report durable and isolated capabilities", async () => {
-  const artifactVault = {
-    storageProfile: {
-      durability: "durable",
-      primaryStoreId: "test-primary",
-      secondaryStoreId: "test-recovery",
-      recoveryReferencePrefix: "store:test-recovery:key",
-    },
-    async capture() {
-      throw new Error("must not capture");
-    },
-    async readFromSecondary() {
-      throw new Error("must not read");
-    },
-  } as ArtifactVault;
-  const runSpecificationVault = {
-    storageProfile: {
-      durability: "durable",
-      storeId: "test-run-spec",
-      recoveryReferencePrefix: "store:test-run-spec:key",
-    },
-    async capture() {
-      throw new Error("must not capture");
-    },
-    async read() {
-      throw new Error("must not read");
-    },
-    retentionLocation() {
-      throw new Error("must not resolve retention");
-    },
-  } as RunSpecificationVault;
-  const attemptCheckpointStore: AttemptCheckpointPort = {
-    checkpointStoreId: "test-durable-checkpoints",
-    durability: "durable",
-    recoveryReferencePrefix: "checkpoint:test",
-    async append() {
-      throw new Error("must not append");
-    },
-  };
-  const browserProfileLock: BrowserProfileLockPort = {
-    lockId: "test-cross-process-lock",
-    isolation: "cross_process",
-    async runExclusive(_profileDigest, operation) {
-      return await operation();
-    },
-  };
-  const safeRasterRenderer: SafeRasterRendererPort = {
-    rendererId: "test-authorized-renderer",
-    async render() {
-      throw new Error("must not render");
-    },
-  };
-
-  await assert.rejects(
-    async () =>
-      createBakeoffHarness({
-        feishu: new InMemoryFeishuProjection({
-          targetEnvironment: "production",
-        }),
-        productAdapter: new WpsAiPptProductAdapter(),
-        artifactVault,
-        runSpecificationVault,
-        attemptCheckpointStore,
-        browserProfileLock,
-        safeRasterRenderer,
-        rendererDestination:
-          ISOLATED_OFFLINE_PNG_RENDERER_DESTINATION,
-        egressAuthorization: {
-          async authorize() {
-            throw new Error("must not authorize");
-          },
-        },
-      }).startBakeoffJob({
-        environment: "production",
-        caseId: VOLCANO_EVALUATION_CASE.caseId,
+test("WPS Mock replay fails closed at its receipt before caller-claimed capabilities", async () => {
+  const pptx = await knownGoodPptxBytes();
+  assert.throws(
+    () =>
+      createWpsAiPptRealProviderReplayPackage({
+        captureId: "unregistered-wps-capability-test-capture",
+        sessions: [capturedBrowserResult(pptx)],
+        renderedPages: [],
       }),
-    /production.*harness-owned attested capabilities/i,
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
@@ -756,14 +727,14 @@ test("the embedded build manifest verifies the exact executable source archive",
     {
       source: "EMBEDDED_VERIFIED_BUILD_MANIFEST",
       sourceArchiveDigest:
-        "sha256:f89282f9eb2197cd2e277400b751d1b97eab5fd2f8aa494e90e3e0dc8a98a9a2",
-      sourceArchiveEntryCount: 45,
+        "sha256:b168e7de44496a8c32daef7b051cd342a7db1032e560d5e87c175c07b2b17e05",
+      sourceArchiveEntryCount: 130,
     },
   );
 });
 
 function testWpsBoundaryAdapter(
-  packageId = "MOCK-wps-aippt-browser-package-v1",
+  _packageId = "MOCK-wps-aippt-browser-package-v1",
 ): ProductAdapterPort {
   const productionAdapter = new WpsAiPptProductAdapter();
   return {
@@ -773,7 +744,7 @@ function testWpsBoundaryAdapter(
       productionAdapter.executionConfigurationPackage,
     productPackage: {
       ...productionAdapter.productPackage,
-      packageId,
+      packageId: "MOCK-wps-aippt-browser-package-v1",
       displayName: "Mock-boundary WPS AI PPT",
       provenance: "MOCK",
       environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
@@ -860,6 +831,78 @@ test("the trusted registry executes the WPS package only through the registered 
   );
 });
 
+test("a WPS crash before the submitted checkpoint leaves durable unknown intent and never runs the browser again", async () => {
+  const adapter = new WpsAiPptProductAdapter();
+  const retained = new InMemoryAttemptCheckpointStore(
+    "wps-submission-intent-crash-retained",
+  );
+  let submittedCheckpointCalls = 0;
+  const crashStore: AttemptCheckpointPort = {
+    checkpointStoreId: "wps-submission-intent-crash",
+    async append(event) {
+      if (
+        event.submissionEvidenceAtCheckpoint === "submitted"
+      ) {
+        submittedCheckpointCalls += 1;
+        throw new Error(
+          "simulated process crash before submitted checkpoint persistence",
+        );
+      }
+      await retained.append(event);
+    },
+    async readAttempt(attemptId) {
+      return await retained.readAttempt(attemptId);
+    },
+  };
+  const captured = capturedBrowserResult(
+    await knownGoodPptxBytes(),
+  );
+  const browserResult: WpsAiPptCapturedBrowserResult = {
+    ...captured,
+    events: [captured.events[1]!],
+  };
+  const execute = resolveHarnessProductAdapterExecutor(
+    adapter.implementationPackage,
+    parseAdapterExecutionConfiguration(
+      adapter.executionConfigurationPackage,
+    ),
+    {
+      wpsAiPptBrowserDriver: browserDriverPackage(
+        browserResult,
+      ),
+      attemptCheckpointStore: crashStore,
+      recordWpsSubmissionIntentForTest: true,
+    },
+  );
+  const command = {
+    jobId: "job-wps-submission-intent-crash",
+    runId: "run-wps-submission-intent-crash",
+    attemptId: "attempt-wps-submission-intent-crash-1",
+    attemptSeq: 1,
+    timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+    signal: new AbortController().signal,
+    evaluationCase: VOLCANO_EVALUATION_CASE,
+  } as const;
+
+  await assert.rejects(
+    execute(command),
+    /simulated process crash/i,
+  );
+  assert.equal(
+    retained
+      .snapshot()
+      .find(({ eventType }) => eventType === "submission_intent")
+      ?.submissionEvidenceAtCheckpoint,
+    "unknown",
+  );
+
+  const restarted = await execute(command);
+  assert.ok(!("content" in restarted));
+  assert.equal(restarted.terminalReason, "task_state_unknown");
+  assert.equal(restarted.submissionEvidence, "unknown");
+  assert.equal(submittedCheckpointCalls, 1);
+});
+
 test("production rejects an arbitrary browser closure that is not backed by the harness allowlist packages", async () => {
   const forgedDriver = {
     driverId: "wps-aippt-test-fixture",
@@ -925,15 +968,16 @@ test("the Bakeoff harness owns WPS browser-driver injection and still blocks pro
   });
 
   await assert.rejects(
-    createBakeoffHarness({
-      feishu: new InMemoryFeishuProjection(),
-      productAdapter: new WpsAiPptProductAdapter(),
-      wpsAiPptBrowserDriver: driver,
-    }).startBakeoffJob({
-      environment: "test",
-      caseId: VOLCANO_EVALUATION_CASE.caseId,
-    }),
-    /test rejected Product Package/,
+    async () =>
+      createBakeoffHarness({
+        feishu: new InMemoryFeishuProjection(),
+        productAdapter: new WpsAiPptProductAdapter(),
+        wpsAiPptBrowserDriver: driver,
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_EVALUATION_CASE.caseId,
+      }),
+    /test rejected Product Package|canonical registry/i,
   );
 });
 
@@ -1038,29 +1082,34 @@ test("WPS Trace rejects non-WPS origins and JWT-like path evidence", async () =>
 test("a captured WPS Artifact must carry proved submission evidence", async () => {
   const adapter = new WpsAiPptProductAdapter();
   const pptx = await knownGoodPptxBytes();
-  const driver = browserDriverPackage(
-    capturedBrowserResult(pptx, "unknown"),
-  );
-  const execute = resolveHarnessProductAdapterExecutor(
-    adapter.implementationPackage,
-    parseAdapterExecutionConfiguration(
-      adapter.executionConfigurationPackage,
-    ),
-    { wpsAiPptBrowserDriver: driver },
-  );
+  for (const submissionEvidence of [
+    "unknown",
+    "not_submitted",
+  ] as const) {
+    const driver = browserDriverPackage(
+      capturedBrowserResult(pptx, submissionEvidence),
+    );
+    const execute = resolveHarnessProductAdapterExecutor(
+      adapter.implementationPackage,
+      parseAdapterExecutionConfiguration(
+        adapter.executionConfigurationPackage,
+      ),
+      { wpsAiPptBrowserDriver: driver },
+    );
 
-  await assert.rejects(
-    execute({
-      jobId: "job-wps-unknown",
-      runId: "run-wps-unknown",
-      attemptId: "attempt-wps-unknown-1",
-      attemptSeq: 1,
-      timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
-      signal: new AbortController().signal,
-      evaluationCase: VOLCANO_EVALUATION_CASE,
-    }),
-    /captured Artifact requires submitted evidence/,
-  );
+    await assert.rejects(
+      execute({
+        jobId: `job-wps-${submissionEvidence}`,
+        runId: `run-wps-${submissionEvidence}`,
+        attemptId: `attempt-wps-${submissionEvidence}-1`,
+        attemptSeq: 1,
+        timeoutMs: VENDOR_GENERATION_TIMEOUT_MS,
+        signal: new AbortController().signal,
+        evaluationCase: VOLCANO_EVALUATION_CASE,
+      }),
+      /captured Artifact requires submitted evidence/,
+    );
+  }
 });
 
 test("the WPS adapter rejects a PPTX whose ZIP central-directory CRC does not match its entry bytes", async () => {
@@ -1677,7 +1726,7 @@ test("relationship validation ignores Relationship markup inside comments and CD
   }
 });
 
-test("the harness persists WPS observable Trace and the driver-provided 16-page static render", async () => {
+test("the harness gives the selected WPS adapter a private Attempt-scoped checkpoint writer and persists its Trace", async () => {
   const productionAdapter = new WpsAiPptProductAdapter();
   const pptx = await knownGoodPptxBytes();
   const driver = browserDriverPackage(capturedBrowserResult(pptx));
@@ -1701,33 +1750,49 @@ test("the harness persists WPS observable Trace and the driver-provided 16-page 
     },
   };
   const feishu = new InMemoryFeishuProjection();
-
-  const outcome = await createBakeoffHarness({
-    feishu,
-    productAdapter: testDescriptor,
-    wpsAiPptBrowserDriver: driver,
-  }).startBakeoffJob({
-    environment: "test",
-    caseId: VOLCANO_EVALUATION_CASE.caseId,
-  });
-
-  assert.equal(
-    outcome.renderManifest?.renderer,
-    "chrome-native-static-capture@1",
+  const root = await mkdtemp(
+    join(tmpdir(), "wps-private-checkpoint-authority-"),
   );
-  assert.equal(outcome.renderManifest?.slides.length, 16);
-  const attempt = feishu
-    .snapshot()
-    .runRecordTable.find(
-      ({ recordType }) => recordType === "evaluation_attempt",
+  try {
+    const capabilities = productionCheckpointCapabilities(root);
+    const outcome = await createBakeoffHarness({
+      feishu,
+      productAdapter: testDescriptor,
+      wpsAiPptBrowserDriver: driver,
+      attemptCheckpointStore: capabilities.attemptCheckpointStore,
+    }).startBakeoffJob({
+      environment: "test",
+      caseId: VOLCANO_EVALUATION_CASE.caseId,
+    });
+
+    assert.equal(
+      outcome.renderManifest?.renderer,
+      "chrome-native-static-capture@1",
     );
-  assert.deepEqual(
-    attempt?.observableEvents?.map(({ eventType }) => eventType),
-    ["configuration_observed", "artifact_downloaded"],
-  );
-  assert.deepEqual(attempt?.manualActions, [
-    "selected professional mode",
-  ]);
+    assert.equal(outcome.renderManifest?.slides.length, 16);
+    const attempt = feishu
+      .snapshot()
+      .runRecordTable.find(
+        ({ recordType }) => recordType === "evaluation_attempt",
+      );
+    assert.deepEqual(
+      attempt?.observableEvents?.map(({ eventType }) => eventType),
+      ["configuration_observed", "artifact_downloaded"],
+    );
+    assert.deepEqual(attempt?.manualActions, [
+      "selected professional mode",
+    ]);
+    assert.deepEqual(
+      (
+        await capabilities.attemptCheckpointStore.readAttempt(
+          attempt?.recordId ?? "missing-attempt",
+        )
+      ).map(({ eventType }) => eventType),
+      ["configuration_observed", "artifact_downloaded"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("the public WPS real-smoke fixture records one safe 16-page capture without browser secrets or local paths", () => {
@@ -2000,24 +2065,16 @@ test("production WPS execution rejects caller-supplied TEST_FAKE sessions", asyn
   );
 });
 
-test("public production replay passes only its explicit REAL_PROVIDER_CAPTURE package to durable gates", async () => {
+test("public production replay rejects a synthetic REAL_PROVIDER_CAPTURE before durable gates", async () => {
   const pptx = await knownGoodPptxBytes();
-  await assert.rejects(
-    async () =>
-      createBakeoffHarness({
-        feishu: new InMemoryFeishuProjection({
-          targetEnvironment: "production",
-        }),
-        productAdapter: new WpsAiPptReplayAdapter(),
-        wpsAiPptBrowserDriver:
-          createWpsAiPptRealProviderReplayPackage({
-            sessions: [capturedBrowserResult(pptx)],
-          }),
-      }).startBakeoffJob({
-        environment: "production",
-        caseId: VOLCANO_EVALUATION_CASE.caseId,
+  assert.throws(
+    () =>
+      createWpsAiPptRealProviderReplayPackage({
+        captureId: "unregistered-wps-test-capture",
+        sessions: [capturedBrowserResult(pptx)],
+        renderedPages: [],
       }),
-    /requires an explicit durable ArtifactVault/,
+    /harness-owned capture receipt.*unregistered/i,
   );
 });
 
@@ -2508,7 +2565,7 @@ test("an arbitrary localhost fetch mock cannot mint a LIVE_PRODUCTION bridge out
   }
 });
 
-test("a submitted retained replay checkpoint is durably reconciled without a live bridge", async () => {
+test("a submitted WPS TEST replay checkpoint is durably reconciled without a live bridge", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "wps-submitted-reconcile-"),
   );
@@ -2553,17 +2610,10 @@ test("a submitted retained replay checkpoint is durably reconciled without a liv
       .update(JSON.stringify([rawEvent]))
       .digest("hex")}` as const;
   try {
-    const adapter = new WpsAiPptReplayAdapter();
-    const execute = resolveHarnessProductAdapterExecutor(
-      adapter.implementationPackage,
-      parseAdapterExecutionConfiguration(
-        adapter.executionConfigurationPackage,
-      ),
-      {
-        attemptCheckpointStore: checkpoints,
-        wpsAiPptBrowserDriver:
-          createWpsAiPptRealProviderReplayPackage({
-            sessions: [
+    const execute =
+      createWpsAiPptReplayBehaviorExecutorForTest({
+        checkpointStore: checkpoints,
+        sessions: [
               {
                 outcome: "task_state_unknown",
                 submissionEvidence: "submitted",
@@ -2571,8 +2621,8 @@ test("a submitted retained replay checkpoint is durably reconciled without a liv
                 events: [rawEvent],
                 manualActions: [],
               },
-            ],
-            reconciliations: [
+        ],
+        reconciliations: [
               {
                 query: {
                   vendorTaskId: rawEvent.vendorTaskId,
@@ -2585,10 +2635,8 @@ test("a submitted retained replay checkpoint is durably reconciled without a liv
                 observedAt: "2026-07-27T06:00:02.000Z",
                 evidenceId: "ev_0000000000000112",
               },
-            ],
-          }),
-      },
-    );
+        ],
+      });
     const result = (await execute({
       jobId: "job-wps-interrupted",
       runId: "run-wps-interrupted",
@@ -2610,7 +2658,7 @@ test("a submitted retained replay checkpoint is durably reconciled without a liv
   }
 });
 
-test("a restarted production Attempt reads durable stateVersion checkpoints and reconciles before another browser call", async () => {
+test("a restarted WPS TEST Attempt reads durable stateVersion checkpoints and reconciles before another browser call", async () => {
   const root = await mkdtemp(
     join(tmpdir(), "wps-restart-reconcile-"),
   );
@@ -2643,18 +2691,11 @@ test("a restarted production Attempt reads durable stateVersion checkpoints and 
       .update(JSON.stringify([checkpointEvent]))
       .digest("hex")}` as const;
   try {
-    const adapter = new WpsAiPptReplayAdapter();
-    const execute = resolveHarnessProductAdapterExecutor(
-      adapter.implementationPackage,
-      parseAdapterExecutionConfiguration(
-        adapter.executionConfigurationPackage,
-      ),
-      {
-        attemptCheckpointStore: checkpoints,
-        wpsAiPptBrowserDriver:
-          createWpsAiPptRealProviderReplayPackage({
-            sessions: [],
-            reconciliations: [
+    const execute =
+      createWpsAiPptReplayBehaviorExecutorForTest({
+        checkpointStore: checkpoints,
+        sessions: [],
+        reconciliations: [
               {
                 query: {
                   vendorTaskId:
@@ -2667,10 +2708,8 @@ test("a restarted production Attempt reads durable stateVersion checkpoints and 
                 observedAt: "2026-07-27T06:00:02.000Z",
                 evidenceId: "ev_0000000000000122",
               },
-            ],
-          }),
-      },
-    );
+        ],
+      });
     const result = (await execute({
       jobId: "job-wps-restart",
       runId: "run-wps-restart",

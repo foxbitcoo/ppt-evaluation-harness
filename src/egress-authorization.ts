@@ -88,6 +88,7 @@ export interface EgressAuthorizationPort {
 
 export interface EgressAuthorizationAuditPort {
   readonly auditId: string;
+  readonly durability?: "ephemeral" | "durable";
   append(decision: ApprovedEgressAuthorization): Promise<void>;
   assertRecorded(decision: ApprovedEgressAuthorization): Promise<void>;
 }
@@ -96,6 +97,7 @@ export class InMemoryEgressAuthorizationAudit
   implements EgressAuthorizationAuditPort
 {
   readonly auditId: string;
+  readonly durability = "ephemeral" as const;
   readonly #decisions: ApprovedEgressAuthorization[] = [];
 
   constructor(

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "doubao-recovery-evidence-index-v1",
+  "latestEvidenceVersion": "v35",
+  "entries": [
+    {
+      "version": "v30",
+      "status": "historical",
+      "recordedOn": "2026-07-31",
+      "verifierSpecCommitSha": "2d795e4e5c9dae6f77663b44598d396106181b6e",
+      "currentVerifierEvidenceReference": "evidence/doubao-v30-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v30-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v31",
+      "status": "historical",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "56058f12032b16effaeb079802014406ac0e7e92",
+      "currentVerifierEvidenceReference": "evidence/doubao-v31-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v31-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v32",
+      "status": "historical",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "d4712f982860eea55409da7349ae67b7ba9f2c65",
+      "currentVerifierEvidenceReference": "evidence/doubao-v32-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v32-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v33",
+      "status": "historical",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "5c2312ae6abed54e797f70f3e85e1621ce5e4581",
+      "currentVerifierEvidenceReference": "evidence/doubao-v33-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v33-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v34",
+      "status": "historical",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "be528f0bf754d14e2aa6f7ad91b86ab574264416",
+      "currentVerifierEvidenceReference": "evidence/doubao-v34-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v34-final-recovery-cli-result.json"
+    },
+    {
+      "version": "v35",
+      "status": "current",
+      "recordedOn": "2026-08-02",
+      "verifierSpecCommitSha": "856776e27fb9eba1f3cec2457653fa721696a4b6",
+      "currentVerifierEvidenceReference": "evidence/doubao-v35-current-verifier-recovery.json",
+      "rawRecoveryCliResultReference": "evidence/doubao-v35-final-recovery-cli-result.json"
+    }
+  ]
+}

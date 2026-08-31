@@ -4,21 +4,30 @@ import type {
   RunStatus,
   FeishuReportDraft,
   JudgeFailureLineage,
+  ExecutionProvenance,
+  ProvenanceLabel,
+  RenderManifest,
   ScoreDimension,
   TerminalReason,
 } from "./domain.ts";
 import { MOCK_TEST_ENVIRONMENT_ORIGIN } from "./environment-origin.ts";
 import type { EnvironmentOrigin } from "./environment-origin.ts";
 import { MOCK_SCENARIO } from "./mock-scenario.ts";
+import {
+  conciseTimingMarkdown,
+  type ConciseReportTiming,
+} from "./report-timing.ts";
 
 export interface MockReportVendorResult {
   readonly product: string;
   readonly runId: string;
   readonly status: RunStatus;
-  readonly stateReason: TerminalReason;
+  readonly stateReason: TerminalReason | "human_intervention";
   readonly artifact: Artifact | null;
   readonly scorecard: ArtifactScorecard | null;
   readonly judgeFailure: JudgeFailureLineage | null;
+  readonly renderManifest?: RenderManifest | null;
+  readonly timing?: ConciseReportTiming;
 }
 
 const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
@@ -32,21 +41,23 @@ const DIMENSION_LABELS: Readonly<Record<ScoreDimension, string>> = {
 
 export function createMockReportDraft(
   jobId: string,
-  jobStatus: "active" | "completed" | "partial" | "failed",
+  jobStatus: RunStatus,
   results: readonly MockReportVendorResult[],
   lineage: {
-    readonly provenance: "MOCK" | "PRODUCTION";
+    readonly provenance: ProvenanceLabel;
+    readonly executionProvenance?: ExecutionProvenance;
     readonly environmentOrigin: EnvironmentOrigin;
     readonly createdAt: string;
   } = {
     provenance: "MOCK",
+    executionProvenance: "MOCK",
     environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
     createdAt: MOCK_SCENARIO.fixedTime,
   },
 ): FeishuReportDraft {
   const firstResult = results[0];
   if (firstResult === undefined) {
-    throw new Error("A Mock report requires at least one vendor Run");
+    throw new Error("A Case Sample report requires at least one vendor Run");
   }
   const vendorSections = results
     .map(
@@ -58,25 +69,39 @@ export function createMockReportDraft(
         artifact,
         scorecard,
         judgeFailure,
+        renderManifest,
+        timing,
       }) => {
+        const timingLine = `- 耗时（分钟）：${conciseTimingMarkdown(timing)}`;
         if (artifact === null) {
           return `## ${product}
 
 - Run：\`${runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
+${timingLine}
 - Artifact：无`;
         }
         if (scorecard === null) {
+          const degradedRender =
+            renderManifest !== null &&
+            renderManifest !== undefined &&
+            renderManifest.renderOutcome !== "faithful";
           return `## ${product}
 
 - Run：\`${runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
+${timingLine}
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
-- Judge：失败（\`${judgeFailure?.submissionStatus ?? "unknown"}\`），Artifact 与静态渲染已独立留存`;
+${
+  degradedRender && judgeFailure === null
+    ? `- 静态渲染：\`${renderManifest.renderOutcome}\`（Artifact 已留存）
+- 视觉评估：\`NOT_ASSESSABLE\`（渲染保真门禁未通过，Judge 未调用）`
+    : `- Judge：失败（\`${judgeFailure?.submissionStatus ?? "unknown"}\`），Artifact 与静态渲染已独立留存`
+}`;
         }
         const scoreRows = scorecard.dimensions
           .map(
@@ -89,6 +114,7 @@ export function createMockReportDraft(
 - Run：\`${scorecard.runId}\`
 - 状态：\`${status}\`
 - 状态原因：\`${stateReason}\`
+${timingLine}
 - Artifact：\`${artifact.artifactId}\`
 - Artifact SHA-256：\`${artifact.contentHash}\`
 - 页数：${artifact.pageCount}
@@ -99,16 +125,45 @@ ${scoreRows}`;
       },
     )
     .join("\n\n");
-  const reportPrefix = lineage.provenance === "MOCK" ? "MOCK｜" : "";
+  const executionProvenance =
+    lineage.executionProvenance ??
+    (lineage.provenance === "MOCK"
+      ? "MOCK"
+      : (() => {
+          throw new Error(
+            "Production delivery report requires explicit LIVE_PRODUCTION or PRODUCTION_REPLAY execution provenance",
+          );
+        })());
+  const reportPrefix =
+    executionProvenance === "MOCK"
+      ? "MOCK｜"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "历史真实产物回放｜"
+        : "LIVE｜";
+  const scopeNotice =
+    executionProvenance === "MOCK"
+      ? "> **MOCK 测试数据，禁止作为真实厂商结论。**"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "> **历史真实产物回放，非本次 LIVE 生产验收；仅验证已留存真实产物的当前读取与评测链路。**"
+        : "> **LIVE 真实单次 Case Sample，仅记录本次运行，不外推为稳定厂商结论。**";
+  const claimScope =
+    executionProvenance === "MOCK"
+      ? "仅适用于当前固定 Mock 火山 Case"
+      : executionProvenance === "PRODUCTION_REPLAY"
+        ? "仅适用于已留存历史真实产物的回放，不代表本次 LIVE 厂商运行"
+        : "仅适用于本次 LIVE 真实火山 Case 的单次样本";
   const markdown = `# ${reportPrefix}火山 Case Sample 三厂商评测报告
 
-${lineage.provenance === "MOCK" ? "> **MOCK 测试数据，禁止作为真实厂商结论。**" : "> **真实单次 Case Sample，仅记录当前运行，不外推为稳定厂商结论。**"}
+${scopeNotice}
 
 - Bakeoff Job：\`${jobId}\`
 - Job 状态：\`${jobStatus}\`
-- 证据等级：Case Sample（仅适用于当前固定 Mock 火山 Case）
+- 执行血缘：\`${executionProvenance}\`
+- 证据等级：Case Sample（${claimScope}）
 
 ${vendorSections}
+
+本次未生成兼容的直接对比；相对比较为 \`NOT_ASSESSABLE\`。
 
 Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分。本报告展示独立维度，不生成总分或总冠军，也不外推为稳定厂商排名。
 `;
@@ -118,6 +173,7 @@ Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分
         ? MOCK_SCENARIO.reportId
         : `${jobId}-report`,
     provenance: lineage.provenance,
+    executionProvenance,
     environmentOrigin: lineage.environmentOrigin,
     title: `${reportPrefix}火山 Case Sample 三厂商评测报告`,
     jobId,
@@ -125,6 +181,8 @@ Delivery Quality 仅作为自动门禁另行记录，不进入六维主观评分
     artifactIds: results.flatMap(({ artifact }) =>
       artifact === null ? [] : [artifact.artifactId],
     ),
+    comparisonIds: [],
+    gapCardIds: [],
     claimLevel: "case_sample",
     markdown,
     createdAt: lineage.createdAt,

@@ -6,6 +6,12 @@ import { VOLCANO_EVALUATION_CASE } from "./fixtures/volcano-case.ts";
 import type {
   ObservableAttemptEvent,
 } from "./domain.ts";
+import {
+  appendProviderSubmissionIntentCheckpoint,
+  attemptSubmissionState,
+  isHarnessProviderExecutionNotStartedCheckpoint,
+  isUnresolvedProviderSubmissionIntent,
+} from "./product-adapter.ts";
 import type {
   ObservedProductConfiguration,
   ProductAdapterImplementationPackage,
@@ -814,6 +820,7 @@ function failedAttempt(
     readonly observedConfiguration?: ObservedProductConfiguration;
     readonly vendorTaskId?: string;
     readonly artifactId?: string;
+    readonly firstEventIndex: number;
   },
 ): ProductAttemptResult {
   return Object.freeze({
@@ -827,6 +834,7 @@ function failedAttempt(
       input.observableEvents,
       input.vendorTaskId,
       input.artifactId,
+      input.firstEventIndex,
     ),
     manualActions: Object.freeze([...input.manualActions]),
     ...(input.observedConfiguration === undefined
@@ -840,12 +848,14 @@ function materializeObservableEvents(
   events: readonly ProductAdapterObservableEvent[],
   vendorTaskId?: string,
   artifactId?: string,
+  firstEventIndex = 1,
 ): readonly ObservableAttemptEvent[] {
   const submittedIndex = events.findIndex(
     ({ eventType }) => eventType === "query_submitted",
   );
   return Object.freeze(
     events.map((event, index) => {
+      const eventIndex = firstEventIndex + index;
       const eventVendorTaskId =
         vendorTaskId !== undefined &&
         submittedIndex >= 0 &&
@@ -853,7 +863,7 @@ function materializeObservableEvents(
           ? vendorTaskId
           : undefined;
       return Object.freeze({
-        eventId: `${command.attemptId}-event-${index + 1}`,
+        eventId: `${command.attemptId}-event-${eventIndex}`,
         jobId: command.jobId,
         caseId: command.evaluationCase.caseId,
         runId: command.runId,
@@ -873,8 +883,10 @@ function materializeObservableEvents(
         vendorTaskId: eventVendorTaskId ?? null,
         taskStateVersion:
           eventVendorTaskId === undefined
-            ? null
-            : `${event.eventType}@${index + 1}`,
+            ? event.eventType === "query_not_submitted"
+              ? `not_submitted@${eventIndex}`
+              : null
+            : `${event.eventType}@${eventIndex}`,
         artifactId:
           event.eventType === "artifact_exported"
             ? artifactId ?? null
@@ -882,6 +894,30 @@ function materializeObservableEvents(
       });
     }),
   );
+}
+
+function nextDoubaoObservableEventIndex(
+  recoveredEvents: readonly ObservableAttemptEvent[],
+  attemptId: string,
+): number {
+  const escapedAttemptId = attemptId.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    "\\$&",
+  );
+  const eventIdPattern = new RegExp(
+    `^${escapedAttemptId}-event-([1-9]\\d*)$`,
+  );
+  let maximum = 0;
+  for (const event of recoveredEvents) {
+    const match = eventIdPattern.exec(event.eventId);
+    if (match === null) continue;
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index)) {
+      throw new Error("Recovered Doubao event identity is not safely ordered");
+    }
+    maximum = Math.max(maximum, index);
+  }
+  return maximum + 1;
 }
 
 function observedConfiguration(
@@ -1015,6 +1051,51 @@ function validatedStaticRenders(
   );
 }
 
+function terminalReasonForDoubaoReconciliation(
+  observedState: ObservableAttemptEvent["reconciliationObservedState"],
+): "task_state_unknown" | "download_failure" | "technical_failure" {
+  if (observedState === "artifact_ready") return "download_failure";
+  if (observedState === "failed") return "technical_failure";
+  return "task_state_unknown";
+}
+
+function assertDurableDoubaoReconciliation(
+  event: ObservableAttemptEvent,
+): void {
+  const observedState = event.reconciliationObservedState;
+  if (
+    observedState === undefined ||
+    !["unknown", "submitted", "artifact_ready", "failed"].includes(
+      observedState,
+    ) ||
+    event.vendorTaskId === null ||
+    event.vendorTaskId === undefined ||
+    event.taskStateVersion === null ||
+    event.taskStateVersion === undefined ||
+    event.submissionEvidenceAtCheckpoint !== "submitted"
+  ) {
+    throw new Error(
+      "Durable Doubao reconciliation result is structurally incomplete",
+    );
+  }
+  if (
+    event.reconciliationTerminalReason !==
+      terminalReasonForDoubaoReconciliation(observedState) ||
+    (event.reconciliationArtifactReference ?? null) !== null
+  ) {
+    throw new Error(
+      "Durable Doubao reconciliation result is internally inconsistent",
+    );
+  }
+  assertIsoTimestamp(event.observedAt, "reconciliation.observedAt");
+  assertSafeEvidenceRef(event.evidenceRef);
+  assertSafeText(event.vendorTaskId, "reconciliation.vendorTaskId");
+  assertSafeText(
+    event.taskStateVersion,
+    "reconciliation.taskStateVersion",
+  );
+}
+
 export function resolveDoubaoProductionExecutor(
   implementationPackage: ProductAdapterImplementationPackage,
   driver: DoubaoBrowserDriverPort | undefined,
@@ -1053,6 +1134,12 @@ export function resolveDoubaoProductionExecutor(
     const operation = operationCommand(command);
     const events: ProductAdapterObservableEvent[] = [];
     const manualActions: string[] = [];
+    const recovered =
+      (await checkpointStore?.readAttempt?.(command.attemptId)) ?? [];
+    const firstEventIndex = nextDoubaoObservableEventIndex(
+      recovered,
+      command.attemptId,
+    );
     const persistLatest = async (
       vendorTaskId?: string,
       artifactId?: string,
@@ -1062,11 +1149,10 @@ export function resolveDoubaoProductionExecutor(
         events,
         vendorTaskId,
         artifactId,
+        firstEventIndex,
       ).at(-1);
       if (latest !== undefined) await checkpointStore?.append(latest);
     };
-    const recovered =
-      (await checkpointStore?.readAttempt?.(command.attemptId)) ?? [];
     if (recovered.length > 0) {
       if (
         recovered.some(
@@ -1074,14 +1160,46 @@ export function resolveDoubaoProductionExecutor(
             event.jobId !== command.jobId ||
             event.runId !== command.runId ||
             event.attemptId !== command.attemptId ||
+            event.attemptSeq !== command.attemptSeq ||
             event.caseId !== command.evaluationCase.caseId ||
-            event.adapterVersion !==
-              DOUBAO_PRODUCTION_ADAPTER_VERSION,
+            (!isHarnessProviderExecutionNotStartedCheckpoint(
+              event,
+              command,
+            ) &&
+              event.adapterVersion !==
+                DOUBAO_PRODUCTION_ADAPTER_VERSION),
         )
       ) {
         throw new Error(
           "Recovered Doubao checkpoint lineage does not match the Attempt",
         );
+      }
+      const latestDurableReconciliation = [...recovered]
+        .reverse()
+        .find(
+          ({ eventType }) =>
+            eventType === "task_reconciliation_result",
+        );
+      if (latestDurableReconciliation !== undefined) {
+        assertDurableDoubaoReconciliation(
+          latestDurableReconciliation,
+        );
+        return Object.freeze({
+          terminalReason:
+            latestDurableReconciliation.reconciliationTerminalReason!,
+          blockReason: null,
+          submissionEvidence: "submitted",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: Object.freeze(
+            recovered.map((event) =>
+              Object.freeze(structuredClone(event)),
+            ),
+          ),
+          manualActions: Object.freeze([
+            "reconciled retained submitted Doubao task before browser reuse",
+          ]),
+        });
       }
       const latestTask = [...recovered].reverse().find(
         ({ vendorTaskId, taskStateVersion }) =>
@@ -1121,21 +1239,17 @@ export function resolveDoubaoProductionExecutor(
             reconciliationObservedState:
               reconciliation.observedState,
             reconciliationTerminalReason:
-              reconciliation.observedState === "artifact_ready"
-                ? "download_failure"
-                : reconciliation.observedState === "failed"
-                  ? "technical_failure"
-                : "task_state_unknown",
+              terminalReasonForDoubaoReconciliation(
+                reconciliation.observedState,
+              ),
             reconciliationArtifactReference: null,
           });
         await checkpointStore?.append(reconciliationEvent);
         return Object.freeze({
           terminalReason:
-            reconciliation.observedState === "artifact_ready"
-              ? "download_failure"
-              : reconciliation.observedState === "failed"
-                ? "technical_failure"
-              : "task_state_unknown",
+            terminalReasonForDoubaoReconciliation(
+              reconciliation.observedState,
+            ),
           blockReason: null,
           submissionEvidence: "submitted",
           elapsedMs: 0,
@@ -1146,6 +1260,26 @@ export function resolveDoubaoProductionExecutor(
           ]),
           manualActions: Object.freeze([
             "reconciled retained submitted Doubao task before browser reuse",
+          ]),
+        });
+      }
+      if (
+        recovered.some(isUnresolvedProviderSubmissionIntent) &&
+        attemptSubmissionState(recovered) === "unknown"
+      ) {
+        return Object.freeze({
+          terminalReason: "task_state_unknown",
+          blockReason: null,
+          submissionEvidence: "unknown",
+          elapsedMs: 0,
+          artifactCandidates: Object.freeze([]),
+          observableEvents: Object.freeze(
+            recovered.map((event) =>
+              Object.freeze(structuredClone(event)),
+            ),
+          ),
+          manualActions: Object.freeze([
+            "provider submission intent is unresolved; automatic resubmission suppressed",
           ]),
         });
       }
@@ -1173,6 +1307,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest();
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: preflight.incrementalChargeRequired
           ? "payment"
           : "technical_failure",
@@ -1185,6 +1320,18 @@ export function resolveDoubaoProductionExecutor(
         observableEvents: events,
         manualActions,
       });
+    }
+    if (executionMode === "live") {
+      if (checkpointStore === undefined) {
+        throw new Error(
+          "Doubao live provider submission requires durable checkpoints",
+        );
+      }
+      await appendProviderSubmissionIntentCheckpoint(
+        checkpointStore,
+        command,
+        DOUBAO_PRODUCTION_ADAPTER_VERSION,
+      );
     }
     const submission = await activeDriver.submitFrozenQuery({
       ...operation,
@@ -1212,6 +1359,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest();
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: submission.status,
@@ -1260,6 +1408,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest(submission.vendorTaskId);
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason:
           generation.status === "timed_out"
             ? "vendor_timeout"
@@ -1293,6 +1442,7 @@ export function resolveDoubaoProductionExecutor(
     if (command.signal.aborted) {
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "task_state_unknown",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -1326,6 +1476,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest(submission.vendorTaskId);
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -1352,6 +1503,7 @@ export function resolveDoubaoProductionExecutor(
       await persistLatest(submission.vendorTaskId);
       return failedAttempt({
         command,
+        firstEventIndex,
         terminalReason: "technical_failure",
         blockReason: null,
         submissionEvidence: "submitted",
@@ -1388,6 +1540,7 @@ export function resolveDoubaoProductionExecutor(
       events,
       submission.vendorTaskId,
       artifactId,
+      firstEventIndex,
     );
     const provenance =
       isProduction
@@ -1500,6 +1653,7 @@ export function resolveDoubaoProductionExecutor(
             events,
             submission.vendorTaskId,
             artifactId,
+            firstEventIndex,
           ),
         manualActions: Object.freeze(manualActions),
         observedConfiguration: configuration,
@@ -1529,6 +1683,7 @@ export function resolveDoubaoProductionExecutor(
             events,
             submission.vendorTaskId,
             artifactId,
+            firstEventIndex,
           ),
         manualActions: Object.freeze(manualActions),
         observedConfiguration: configuration,
@@ -1554,6 +1709,7 @@ export function resolveDoubaoProductionExecutor(
         events,
         submission.vendorTaskId,
         artifactId,
+        firstEventIndex,
       ),
       manualActions: Object.freeze(manualActions),
       observedConfiguration: configuration,

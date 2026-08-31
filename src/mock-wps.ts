@@ -14,6 +14,8 @@ import {
   DOUBAO_PRODUCTION_ADAPTER_KIND,
   DOUBAO_PRODUCTION_REPLAY_SCENARIO,
   DOUBAO_PRODUCTION_SCENARIO,
+  DoubaoProductionProductAdapter,
+  DoubaoProductionReplayAdapter,
   resolveDoubaoProductionExecutor,
   type DoubaoBrowserDriverPort,
 } from "./doubao-production-adapter.ts";
@@ -36,11 +38,16 @@ import { parseAdapterExecutionConfiguration } from "./product-adapter.ts";
 import { calculateRenderManifestHash } from "./render-manifest.ts";
 import {
   QWEN_PRODUCTION_ADAPTER_KIND,
+  QwenProductionProductAdapter,
+  QwenReplayProductAdapter,
   resolveQwenProductionAdapterExecutor,
   type QwenBrowserDriverPort,
 } from "./qwen-production-adapter.ts";
 import {
+  WpsAiPptProductAdapter,
+  WpsAiPptReplayAdapter,
   resolveWpsAiPptProductAdapterExecutor,
+  resolveWpsAiPptProductAdapterExecutorForTest,
 } from "./wps-aippt.ts";
 import type { WpsAiPptBrowserDriverPort } from "./wps-aippt-driver.ts";
 
@@ -958,6 +965,142 @@ export function resolveHarnessProductAdapterExecutor(
     );
   };
   return Object.freeze(executor);
+}
+
+export function resolveHarnessProductAdapterExecutorForTest(
+  implementationPackage: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  dependencies: {
+    readonly qwenBrowserDriver?:
+      | QwenBrowserDriverPort
+      | undefined;
+    readonly wpsAiPptBrowserDriver?:
+      | WpsAiPptBrowserDriverPort
+      | undefined;
+    readonly attemptCheckpointStore?:
+      | AttemptCheckpointPort
+      | undefined;
+    readonly doubaoBrowserDriver?: DoubaoBrowserDriverPort | undefined;
+    readonly recordWpsSubmissionIntentForTest?: boolean;
+  } = {},
+): ProductAdapterExecutor {
+  if (executionConfiguration.adapterKind === "wps-aippt-browser") {
+    return resolveWpsAiPptProductAdapterExecutorForTest(
+      implementationPackage,
+      executionConfiguration,
+      dependencies.wpsAiPptBrowserDriver,
+      dependencies.attemptCheckpointStore,
+      dependencies.recordWpsSubmissionIntentForTest,
+    );
+  }
+  return resolveHarnessProductAdapterExecutor(
+    implementationPackage,
+    executionConfiguration,
+    dependencies,
+  );
+}
+
+export function resolveCanonicalProductPackage(
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  environment: "test" | "production",
+): ProductPackageSnapshot {
+  const { adapterKind, scenario } = executionConfiguration;
+  if (adapterKind === "wps-aippt-browser") {
+    if (scenario === "production-live") {
+      if (environment === "test") {
+        return Object.freeze({
+          ...new WpsAiPptProductAdapter().productPackage,
+          packageId: "MOCK-wps-aippt-browser-package-v1",
+          displayName: "Mock-boundary WPS AI PPT",
+          provenance: "MOCK",
+          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+          egressDestination: Object.freeze({
+            targetService: "mock-wps-aippt-browser",
+            targetAccount: "mock-current-account",
+            targetRegion: "test",
+            subprocessors: Object.freeze([]),
+          }),
+        });
+      }
+      return new WpsAiPptProductAdapter().productPackage;
+    }
+    if (scenario === "production-replay") {
+      return new WpsAiPptReplayAdapter().productPackage;
+    }
+  }
+  if (adapterKind === QWEN_PRODUCTION_ADAPTER_KIND) {
+    if (scenario === "production-live") {
+      if (environment === "test") {
+        return Object.freeze({
+          ...new QwenProductionProductAdapter().productPackage,
+          packageId: "MOCK-qwen-production-boundary-v1",
+          displayName: "Mock-boundary Qwen PPT",
+          provenance: "MOCK",
+          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+          egressDestination: Object.freeze({
+            targetService: "mock-qwen-production-boundary",
+            targetAccount: "mock-current-account",
+            targetRegion: "test",
+            subprocessors: Object.freeze([]),
+          }),
+        });
+      }
+      return new QwenProductionProductAdapter().productPackage;
+    }
+    if (scenario === "production-replay") {
+      return new QwenReplayProductAdapter().productPackage;
+    }
+  }
+  if (adapterKind === DOUBAO_PRODUCTION_ADAPTER_KIND) {
+    if (scenario === DOUBAO_PRODUCTION_SCENARIO) {
+      if (environment === "test") {
+        return Object.freeze({
+          ...new DoubaoProductionProductAdapter().productPackage,
+          packageId: "MOCK-doubao-production-boundary-v1",
+          displayName: "Mock-boundary Doubao PPT",
+          provenance: "MOCK",
+          environmentOrigin: MOCK_TEST_ENVIRONMENT_ORIGIN,
+          egressDestination: Object.freeze({
+            targetService: "mock-doubao-production-boundary",
+            targetAccount: "mock-current-account",
+            targetRegion: "test",
+            subprocessors: Object.freeze([]),
+          }),
+        });
+      }
+      return new DoubaoProductionProductAdapter().productPackage;
+    }
+    if (scenario === DOUBAO_PRODUCTION_REPLAY_SCENARIO) {
+      return new DoubaoProductionReplayAdapter().productPackage;
+    }
+  }
+  if (adapterKind === "mock-wps") {
+    return new MockWpsProductAdapter({
+      scenario: mockScenarioFromExecutionConfiguration(
+        executionConfiguration,
+        adapterKind,
+      ),
+    }).productPackage;
+  }
+  if (adapterKind === "mock-qwen") {
+    return new MockQwenProductAdapter({
+      scenario: mockScenarioFromExecutionConfiguration(
+        executionConfiguration,
+        adapterKind,
+      ),
+    }).productPackage;
+  }
+  if (adapterKind === "mock-doubao") {
+    return new MockDoubaoProductAdapter({
+      scenario: mockScenarioFromExecutionConfiguration(
+        executionConfiguration,
+        adapterKind,
+      ),
+    }).productPackage;
+  }
+  throw new Error(
+    `Canonical Product Package is not registered: ${adapterKind}:${scenario}`,
+  );
 }
 
 export class MockWpsProductAdapter implements ProductAdapterPort {

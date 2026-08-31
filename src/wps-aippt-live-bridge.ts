@@ -4,10 +4,12 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 
 import { EMBEDDED_BUILD_MANIFEST } from "./embedded-build-manifest.ts";
+import { terminateChildProcessGroup } from "./process-group-supervisor.ts";
 
 export interface HarnessOwnedWpsLiveBridgeSession {
   readonly executableHash: `sha256:${string}`;
@@ -40,32 +42,52 @@ function hmac(
     .digest("hex")}`;
 }
 
-export async function startHarnessOwnedWpsLiveBridge():
-  Promise<HarnessOwnedWpsLiveBridgeSession> {
+export function assertHarnessOwnedWpsLiveBridgeReady():
+  `sha256:${string}` {
   const expectedHash =
     EMBEDDED_BUILD_MANIFEST.trustedWpsLiveBridgeExecutableHash;
   if (expectedHash === null) {
     throw new Error(
-      "Trusted live bridge executable is unavailable in this build",
+      "Trusted WPS live bridge executable is unavailable in this build",
     );
   }
+  let executable: Uint8Array;
+  try {
+    executable = Uint8Array.from(readFileSync(fixedExecutableUrl));
+  } catch {
+    throw new Error(
+      "Trusted WPS live bridge executable is unavailable in this build",
+    );
+  }
+  if (sha256(executable) !== expectedHash) {
+    throw new Error(
+      "Trusted WPS live bridge executable content hash verification failed",
+    );
+  }
+  return expectedHash;
+}
+
+export async function startHarnessOwnedWpsLiveBridge():
+    Promise<HarnessOwnedWpsLiveBridgeSession> {
+  const expectedHash = assertHarnessOwnedWpsLiveBridgeReady();
   let executable: Uint8Array;
   try {
     executable = Uint8Array.from(await readFile(fixedExecutableUrl));
   } catch {
     throw new Error(
-      "Trusted live bridge executable is unavailable in this build",
+      "Trusted WPS live bridge executable is unavailable in this build",
     );
   }
   if (sha256(executable) !== expectedHash) {
     throw new Error(
-      "Trusted live bridge executable content hash verification failed",
+      "Trusted WPS live bridge executable content hash verification failed",
     );
   }
   const challenge = Uint8Array.from(randomBytes(32));
   const child = spawn(fixedExecutableUrl.pathname, [], {
     stdio: ["pipe", "ignore", "ignore"],
     env: {},
+    detached: true,
   });
   child.stdin.end(Buffer.from(challenge).toString("base64"));
   const session: InternalLiveBridgeSession = {
@@ -157,22 +179,5 @@ export async function stopHarnessOwnedWpsLiveBridge(
   const internal = internalSession(session);
   liveSessions.delete(internal);
   transcriptBySession.delete(internal);
-  if (internal.child.exitCode === null) {
-    internal.child.kill("SIGTERM");
-  }
-  await Promise.race([
-    new Promise<void>((resolveExit) => {
-      if (internal.child.exitCode !== null) {
-        resolveExit();
-        return;
-      }
-      internal.child.once("exit", () => resolveExit());
-    }),
-    new Promise<void>((resolveGrace) => {
-      setTimeout(resolveGrace, 2_000);
-    }),
-  ]);
-  if (internal.child.exitCode === null) {
-    internal.child.kill("SIGKILL");
-  }
+  await terminateChildProcessGroup(internal.child);
 }

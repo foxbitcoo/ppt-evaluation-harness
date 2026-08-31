@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type {
   AdjudicationEventRecord,
   ArtifactScorecard,
-  ComparisonRecord,
+  DynamicComparisonView,
   ComparisonCompatibilityFingerprint,
   EvaluationCaseRecord,
   FeishuReport,
@@ -94,7 +94,7 @@ export interface OperationalLedgerRecoveryExport {
   readonly gapCardWorkflowEvents: readonly ProductGapCardWorkflowEventRecord[];
   readonly githubIssueDeliveryReservations: readonly GitHubIssueDeliveryReservationRecord[];
   readonly githubIssueLinkEvents: readonly GitHubIssueLinkEventRecord[];
-  readonly comparisons: readonly ComparisonRecord[];
+  readonly comparisons: readonly DynamicComparisonView[];
   readonly productGapCards: readonly ProductGapCardRecord[];
   readonly reports: readonly FeishuReport[];
   readonly recordCount: number;
@@ -139,7 +139,7 @@ export interface RecoveredOperationalJob {
   readonly gapCardWorkflowEvents: readonly ProductGapCardWorkflowEventRecord[];
   readonly githubIssueDeliveryReservations: readonly GitHubIssueDeliveryReservationRecord[];
   readonly githubIssueLinkEvents: readonly GitHubIssueLinkEventRecord[];
-  readonly comparisons: readonly ComparisonRecord[];
+  readonly comparisons: readonly DynamicComparisonView[];
   readonly productGapCards: readonly ProductGapCardRecord[];
   readonly reports: readonly FeishuReport[];
 }
@@ -495,7 +495,7 @@ function createExport(
       gapCardIds.has(gapCardId),
     );
   const comparisons = command.snapshot.productGapCardTable.filter(
-    (record): record is ComparisonRecord =>
+    (record): record is DynamicComparisonView =>
       record.recordType === "comparison" &&
       record.jobId === command.jobId,
   );
@@ -506,9 +506,13 @@ function createExport(
   const cases = command.snapshot.caseTable.filter(({ caseId }) =>
     runRecords.some((record) => record.caseId === caseId),
   );
-  const events = runRecords.flatMap(
-    ({ observableEvents }) => observableEvents ?? [],
-  );
+  // Vendor-run rows carry a denormalized copy of their attempts' events for
+  // reporting. The recovery ledger stores the authoritative event stream once,
+  // from the evaluation-attempt rows, so an ordinary completed Job cannot be
+  // rejected as a duplicate of its own projection.
+  const events = runRecords
+    .filter(({ recordType }) => recordType === "evaluation_attempt")
+    .flatMap(({ observableEvents }) => observableEvents ?? []);
   const reports = command.snapshot.reports.filter(
     ({ jobId }) => jobId === command.jobId,
   );

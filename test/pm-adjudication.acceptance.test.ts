@@ -15,6 +15,7 @@ import {
   type FeishuProjectionPort,
   type GitHubIssueCreateCommand,
   type GitHubIssuePort,
+  type ReviewEventRecord,
 } from "../src/index.ts";
 
 function withAdjudicationEvents(
@@ -29,6 +30,28 @@ function withAdjudicationEvents(
         return async (scorecardId: string) =>
           transform(
             await target.listAdjudicationEvents(scorecardId),
+          );
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function"
+        ? value.bind(target)
+        : value;
+    },
+  });
+}
+
+function withReviewEvents(
+  feishu: InMemoryFeishuProjection,
+  transform: (
+    events: readonly ReviewEventRecord[],
+  ) => readonly ReviewEventRecord[],
+): FeishuProjectionPort {
+  return new Proxy(feishu, {
+    get(target, property, receiver) {
+      if (property === "listReviewEvents") {
+        return async (scorecardId: string) =>
+          transform(
+            await target.listReviewEvents(scorecardId),
           );
       }
       const value = Reflect.get(target, property, receiver) as unknown;
@@ -56,6 +79,459 @@ async function createScoredWpsProjection(): Promise<{
   assert.ok(scorecardId);
   return { feishu, scorecardId, jobId: outcome.job.jobId };
 }
+
+test("effective Scorecard readback fails closed on duplicate logical Scorecard identities", async () => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const snapshot = feishu.snapshot();
+  const score = snapshot.artifactScoreTable[0];
+  assert.ok(score);
+  const readback = feishu.forkForStaging({
+    ...snapshot,
+    artifactScoreTable: [
+      score,
+      {
+        ...score,
+        recordId: `${score.recordId}:duplicate`,
+      },
+    ],
+  });
+
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: readback,
+    }).getEffectiveScorecard(scorecardId),
+    /duplicate|multiple|identity/i,
+  );
+});
+
+test("effective Scorecard readback fails closed when its Artifact payload diverges from the Captured Artifact", async () => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const snapshot = feishu.snapshot();
+  const readback = feishu.forkForStaging({
+    ...snapshot,
+    artifactScoreTable: snapshot.artifactScoreTable.map(
+      (score) => ({
+        ...score,
+        artifact: {
+          ...score.artifact,
+          filename: "effective-score-cross-table-conflict.pptx",
+        },
+      }),
+    ),
+  });
+
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: readback,
+    }).getEffectiveScorecard(scorecardId),
+    /Captured Artifact|cross-table|lineage/i,
+  );
+});
+
+test("adjudication append and readback reject invalid human-final fields", async (t) => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const modelOriginal = score?.scorecard.dimensions.find(
+    ({ dimension }) =>
+      dimension === "narrative_and_audience_fit",
+  );
+  assert.ok(score);
+  assert.ok(modelOriginal);
+  assert.equal(modelOriginal.assessmentStatus, "ASSESSED");
+  assert.notEqual(modelOriginal.value, null);
+  const validEvent: AdjudicationEventRecord = {
+    recordType: "adjudication_event",
+    schemaVersion: "adjudication-event-v1",
+    adjudicationEventId: "adj-runtime-validation",
+    scorecardId,
+    artifactId: score.artifactId,
+    runId: score.runId,
+    jobId: score.jobId,
+    dimension: modelOriginal.dimension,
+    modelOriginalAssessmentStatus: modelOriginal.assessmentStatus,
+    modelOriginalScore: modelOriginal.value,
+    humanFinalAssessmentStatus: "ASSESSED",
+    humanFinalScore: 4,
+    evidencePages: modelOriginal.evidencePages,
+    actorId: "pm-runtime-reviewer",
+    occurredAt: "2026-07-31T00:00:00.000Z",
+    createdAt: "2026-07-31T00:00:00.000Z",
+    lastSyncedAt: "2026-07-31T00:00:00.000Z",
+    reason: "Runtime validation fixture.",
+    priorAdjudicationEventId: null,
+    provenance: score.provenance,
+    environmentOrigin: score.environmentOrigin,
+  };
+  const invalidEvents = [
+    {
+      label: "invalid record type",
+      event: { ...validEvent, recordType: "review_event" },
+    },
+    {
+      label: "invalid schema",
+      event: {
+        ...validEvent,
+        schemaVersion: "adjudication-event-v0",
+      },
+    },
+    {
+      label: "blank event ID",
+      event: { ...validEvent, adjudicationEventId: " " },
+    },
+    {
+      label: "out-of-range human score",
+      event: { ...validEvent, humanFinalScore: 99 },
+    },
+    {
+      label: "contradictory assessment status",
+      event: {
+        ...validEvent,
+        humanFinalAssessmentStatus: "NOT_ASSESSABLE",
+      },
+    },
+    {
+      label: "blank actor",
+      event: { ...validEvent, actorId: " " },
+    },
+    {
+      label: "blank reason",
+      event: { ...validEvent, reason: "" },
+    },
+    {
+      label: "invalid occurrence timestamp",
+      event: { ...validEvent, occurredAt: "not-a-date" },
+    },
+    {
+      label: "invalid creation timestamp",
+      event: { ...validEvent, createdAt: "not-a-date" },
+    },
+    {
+      label: "invalid sync timestamp",
+      event: { ...validEvent, lastSyncedAt: "not-a-date" },
+    },
+    {
+      label: "creation precedes occurrence",
+      event: {
+        ...validEvent,
+        createdAt: "2026-07-30T23:59:59.000Z",
+      },
+    },
+    {
+      label: "sync precedes creation",
+      event: {
+        ...validEvent,
+        lastSyncedAt: "2026-07-30T23:59:59.000Z",
+      },
+    },
+  ] as const;
+
+  for (const { label, event } of invalidEvents) {
+    await t.test(label, async () => {
+      await assert.rejects(
+        feishu.appendAdjudicationEvent(
+          event as unknown as AdjudicationEventRecord,
+        ),
+        /Adjudication Event.*(?:invalid|schema|ID|score|actor|reason|timestamp)/i,
+      );
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withAdjudicationEvents(
+            feishu,
+            () => [
+              event as unknown as AdjudicationEventRecord,
+            ],
+          ),
+        }).getEffectiveScorecard(scorecardId),
+        /Adjudication Event.*(?:invalid|schema|ID|score|actor|reason|timestamp)/i,
+      );
+    });
+  }
+  assert.deepEqual(feishu.snapshot().adjudicationEventTable, []);
+});
+
+test("adjudication append rejects a causal child that predates its parent", async () => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) => assessmentStatus === "ASSESSED",
+  );
+  assert.ok(dimension);
+  const parent = await service.adjudicateDimension({
+    adjudicationEventId: "adj-causal-parent",
+    scorecardId,
+    dimension: dimension.dimension,
+    humanFinalScore: 4,
+    actorId: "pm-causal-reviewer",
+    occurredAt: "2026-08-02T10:00:00.000Z",
+    reason: "Causal parent fixture.",
+    priorAdjudicationEventId: null,
+  });
+
+  await assert.rejects(
+    service.adjudicateDimension({
+      adjudicationEventId: "adj-causal-child",
+      scorecardId,
+      dimension: dimension.dimension,
+      humanFinalScore: 1,
+      actorId: "pm-causal-reviewer",
+      occurredAt: "2026-08-02T09:59:59.000Z",
+      reason: "This child predates its causal parent.",
+      priorAdjudicationEventId: parent.adjudicationEventId,
+    }),
+    /Adjudication Event.*(?:precedes|causal parent)/i,
+  );
+  assert.deepEqual(
+    feishu.snapshot().adjudicationEventTable.map(
+      ({ adjudicationEventId }) => adjudicationEventId,
+    ),
+    [parent.adjudicationEventId],
+  );
+});
+
+test("effective Scorecard readback rejects an adjudication child that predates its parent", async () => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) => assessmentStatus === "ASSESSED",
+  );
+  assert.ok(dimension);
+  const parent = await service.adjudicateDimension({
+    adjudicationEventId: "adj-readback-causal-parent",
+    scorecardId,
+    dimension: dimension.dimension,
+    humanFinalScore: 4,
+    actorId: "pm-causal-reviewer",
+    occurredAt: "2026-08-02T10:00:00.000Z",
+    reason: "Causal parent fixture.",
+    priorAdjudicationEventId: null,
+  });
+  const child: AdjudicationEventRecord = {
+    ...parent,
+    adjudicationEventId: "adj-readback-causal-child",
+    humanFinalScore: 1,
+    occurredAt: "2026-08-02T09:59:59.000Z",
+    createdAt: "2026-08-02T09:59:59.000Z",
+    lastSyncedAt: "2026-08-02T09:59:59.000Z",
+    reason: "This persisted child predates its causal parent.",
+    priorAdjudicationEventId: parent.adjudicationEventId,
+  };
+
+  await assert.rejects(
+    createScoreAdjudicationService({
+      feishu: withAdjudicationEvents(feishu, () => [parent, child]),
+    }).getEffectiveScorecard(scorecardId),
+    /adjudication causal history.*child precedes parent/i,
+  );
+});
+
+test("review append and readback accept only causal human acceptance events", async (t) => {
+  const { feishu, scorecardId } = await createScoredWpsProjection();
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const modelOriginal = score?.scorecard.dimensions[0];
+  assert.ok(score);
+  assert.ok(modelOriginal);
+  const validReview: ReviewEventRecord = {
+    recordType: "review_event",
+    schemaVersion: "review-event-v1",
+    reviewEventId: "review-runtime-validation",
+    scorecardId,
+    artifactId: score.artifactId,
+    runId: score.runId,
+    jobId: score.jobId,
+    reviewedDimensions: [modelOriginal.dimension],
+    decision: "accepted_model_scores",
+    actorId: "pm-runtime-reviewer",
+    occurredAt: "2026-08-02T00:00:00.000Z",
+    createdAt: "2026-08-02T00:00:00.000Z",
+    lastSyncedAt: "2026-08-02T00:00:00.000Z",
+    reason: "Runtime review validation fixture.",
+    priorReviewEventId: null,
+    provenance: score.provenance,
+    environmentOrigin: score.environmentOrigin,
+  };
+  const invalidReviews = [
+    {
+      label: "rejected decision",
+      event: {
+        ...validReview,
+        decision: "rejected_model_scores",
+      },
+    },
+    {
+      label: "blank actor",
+      event: { ...validReview, actorId: " " },
+    },
+    {
+      label: "blank reason",
+      event: { ...validReview, reason: "" },
+    },
+    {
+      label: "invalid timestamp",
+      event: { ...validReview, occurredAt: "not-a-date" },
+    },
+    {
+      label: "impossible calendar timestamp",
+      event: {
+        ...validReview,
+        occurredAt: "2026-02-30T00:00:00.000Z",
+      },
+    },
+    {
+      label: "unknown reviewed dimension",
+      event: {
+        ...validReview,
+        reviewedDimensions: ["invented_dimension"],
+      },
+    },
+    {
+      label: "non-causal sync timestamp",
+      event: {
+        ...validReview,
+        lastSyncedAt: "2026-07-31T23:59:59.000Z",
+      },
+    },
+    {
+      label: "invalid schema",
+      event: { ...validReview, schemaVersion: "review-event-v0" },
+    },
+  ] as const;
+
+  for (const { label, event } of invalidReviews) {
+    await t.test(label, async () => {
+      const invalid = event as unknown as ReviewEventRecord;
+      await assert.rejects(
+        feishu.appendReviewEvent(invalid),
+        /Review Event.*(?:schema|decision|actor|reason|timestamp|dimension)/i,
+      );
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withReviewEvents(feishu, () => [invalid]),
+        }).getEffectiveScorecard(scorecardId),
+        /Review Event.*(?:schema|decision|actor|reason|timestamp|dimension)/i,
+      );
+    });
+  }
+  assert.deepEqual(feishu.snapshot().reviewEventTable, []);
+});
+
+test("effective Scorecard readback rejects foreign adjudication and review lineage", async (t) => {
+  const { feishu, scorecardId } =
+    await createScoredWpsProjection();
+  const service = createScoreAdjudicationService({ feishu });
+  const score = feishu.snapshot().artifactScoreTable[0];
+  const dimension = score?.scorecard.dimensions.find(
+    ({ assessmentStatus }) => assessmentStatus === "ASSESSED",
+  );
+  assert.ok(score);
+  assert.ok(dimension);
+  assert.notEqual(dimension.value, null);
+  const adjudication = await service.adjudicateDimension({
+    adjudicationEventId: "adj-readback-lineage",
+    scorecardId,
+    dimension: dimension.dimension,
+    humanFinalScore: dimension.value === 1 ? 2 : 1,
+    actorId: "pm-lineage-reviewer",
+    occurredAt: "2026-07-31T00:00:00.000Z",
+    reason: "Readback lineage fixture.",
+    priorAdjudicationEventId: null,
+  });
+  const review = await service.recordReview({
+    reviewEventId: "review-readback-lineage",
+    scorecardId,
+    reviewedDimensions: [dimension.dimension],
+    actorId: "pm-lineage-reviewer",
+    occurredAt: "2026-07-31T00:01:00.000Z",
+    reason: "Readback lineage fixture.",
+    priorReviewEventId: null,
+  });
+  const foreignOrigin = {
+    originId: "test:foreign-readback",
+    environment: "test",
+  } as unknown as typeof score.environmentOrigin;
+  const adjudicationDrifts = [
+    {
+      label: "foreign Scorecard",
+      event: { ...adjudication, scorecardId: "foreign-scorecard" },
+    },
+    {
+      label: "foreign Artifact",
+      event: { ...adjudication, artifactId: "foreign-artifact" },
+    },
+    {
+      label: "foreign Run",
+      event: { ...adjudication, runId: "foreign-run" },
+    },
+    {
+      label: "foreign Job",
+      event: { ...adjudication, jobId: "foreign-job" },
+    },
+    {
+      label: "foreign provenance",
+      event: { ...adjudication, provenance: "PRODUCTION" as const },
+    },
+    {
+      label: "foreign environment",
+      event: { ...adjudication, environmentOrigin: foreignOrigin },
+    },
+  ] as const;
+  for (const { label, event } of adjudicationDrifts) {
+    await t.test(`adjudication ${label}`, async () => {
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withAdjudicationEvents(
+            feishu,
+            () => [event],
+          ),
+        }).getEffectiveScorecard(scorecardId),
+        /adjudication.*lineage|score.*lineage/i,
+      );
+    });
+  }
+  const reviewDrifts = [
+    {
+      label: "foreign Scorecard",
+      event: { ...review, scorecardId: "foreign-scorecard" },
+    },
+    {
+      label: "foreign Artifact",
+      event: { ...review, artifactId: "foreign-artifact" },
+    },
+    {
+      label: "foreign Run",
+      event: { ...review, runId: "foreign-run" },
+    },
+    {
+      label: "foreign Job",
+      event: { ...review, jobId: "foreign-job" },
+    },
+    {
+      label: "foreign provenance",
+      event: { ...review, provenance: "PRODUCTION" as const },
+    },
+    {
+      label: "foreign environment",
+      event: { ...review, environmentOrigin: foreignOrigin },
+    },
+  ] as const;
+  for (const { label, event } of reviewDrifts) {
+    await t.test(`review ${label}`, async () => {
+      await assert.rejects(
+        createScoreAdjudicationService({
+          feishu: withReviewEvents(
+            feishu,
+            () => [event],
+          ),
+        }).getEffectiveScorecard(scorecardId),
+        /review.*lineage|score.*lineage/i,
+      );
+    });
+  }
+});
 
 test("a PM adjudication is append-only and exposes the latest human score without overwriting the model score", async () => {
   const { feishu, scorecardId } = await createScoredWpsProjection();

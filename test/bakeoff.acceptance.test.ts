@@ -313,7 +313,7 @@ test("the Feishu domain tables keep Artifact capture independent from scoring an
   assert.match(parentRecord?.reportUrl ?? "", /^mock-feishu:\/\//);
 });
 
-test("the public product adapter descriptor can be versioned without changing the Bakeoff Job seam", async () => {
+test("Product Package metadata cannot be versioned without a new canonical registry entry", () => {
   const fixedMockAdapter = new MockWpsProductAdapter();
   const replacementAdapter: ProductAdapterPort = {
     implementationPackage: fixedMockAdapter.implementationPackage,
@@ -328,24 +328,18 @@ test("the public product adapter descriptor can be versioned without changing th
   };
   const feishu = new InMemoryFeishuProjection();
 
-  const outcome = await createBakeoffHarness({
-    feishu,
-    productAdapter: replacementAdapter,
-  }).startBakeoffJob({
-    environment: "test",
-    caseId: VOLCANO_CASE_ID,
-  });
-  requireCaptured(outcome);
-
-  assert.equal(
-    feishu.snapshot().runRecordTable[1]?.product,
-    "Replacement Playwright-ready WPS Adapter",
+  assert.throws(
+    () =>
+      createBakeoffHarness({
+        feishu,
+        productAdapter: replacementAdapter,
+      }).startBakeoffJob({
+        environment: "test",
+        caseId: VOLCANO_CASE_ID,
+      }),
+    /canonical registry/i,
   );
-  assert.equal(
-    feishu.snapshot().runRecordTable[1]?.productPackageId,
-    "MOCK-replacement-package-v1",
-  );
-  assert.equal(outcome.artifact.filename, "MOCK-wps-volcano-16.pptx");
+  assert.equal(feishu.snapshot().runRecordTable.length, 0);
 });
 
 test("the Bakeoff Job rejects an adapter Artifact whose bytes no longer match its content hash", async () => {

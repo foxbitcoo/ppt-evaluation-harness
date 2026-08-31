@@ -14,7 +14,12 @@ import {
   PRODUCTION_ENVIRONMENT_ORIGIN,
 } from "./environment-origin.ts";
 import {
+  appendProviderSubmissionIntentCheckpoint,
+  attemptSubmissionState,
+  isHarnessProviderExecutionNotStartedCheckpoint,
+  isUnresolvedProviderSubmissionIntent,
   parseAdapterExecutionConfiguration,
+  submissionEvidenceBoundToCheckpoints,
   type AttemptCheckpointPort,
   type ProductAdapterExecutionConfiguration,
   type ProductAdapterExecutor,
@@ -29,10 +34,15 @@ import {
   type SafeRasterCandidate,
 } from "./product-adapter.ts";
 import {
+  createWpsAiPptBrowserDriverPackage,
   reconcileRegisteredWpsAiPptTask,
   resolveRegisteredWpsAiPptBrowserDriver,
   type WpsAiPptBrowserDriverPort,
+  type WpsAiPptTaskReconciliationEvidence,
 } from "./wps-aippt-driver.ts";
+import {
+  isOwnerFailStopRequiredError,
+} from "./process-group-supervisor.ts";
 
 export const WPS_AIPPT_URL = "https://aippt.wps.cn/aippt/" as const;
 export const WPS_AIPPT_ADAPTER_VERSION = "wps-aippt-browser@1" as const;
@@ -388,6 +398,59 @@ function artifactReferenceForReconciliation(
   return observedState === "artifact_ready"
     ? `wps-task:${vendorTaskId}`
     : null;
+}
+
+function submissionEvidenceForReconciliation(
+  observedState: WpsAiPptBrowserEvent["reconciliationObservedState"],
+  priorEvidence: SubmissionEvidence,
+): Exclude<SubmissionEvidence, "not_submitted"> {
+  if (
+    observedState === "unknown" &&
+    priorEvidence !== "submitted"
+  ) {
+    return "unknown";
+  }
+  return "submitted";
+}
+
+function assertDurableWpsAiPptReconciliation(
+  event: ObservableAttemptEvent,
+): void {
+  const observedState = event.reconciliationObservedState;
+  if (
+    event.eventType !== "task_reconciliation_result" ||
+    observedState === undefined ||
+    !["unknown", "submitted", "artifact_ready", "failed"].includes(
+      observedState,
+    ) ||
+    event.vendorTaskId === null ||
+    event.vendorTaskId === undefined ||
+    event.taskStateVersion === null ||
+    event.taskStateVersion === undefined
+  ) {
+    throw new Error(
+      "Durable WPS reconciliation result is structurally incomplete",
+    );
+  }
+  const submissionEvidenceIsConsistent =
+    observedState === "unknown"
+      ? event.submissionEvidenceAtCheckpoint === "unknown" ||
+        event.submissionEvidenceAtCheckpoint === "submitted"
+      : event.submissionEvidenceAtCheckpoint === "submitted";
+  if (
+    event.reconciliationTerminalReason !==
+      terminalReasonForReconciliation(observedState) ||
+    (event.reconciliationArtifactReference ?? null) !==
+      artifactReferenceForReconciliation(
+        observedState,
+        event.vendorTaskId,
+      ) ||
+    !submissionEvidenceIsConsistent
+  ) {
+    throw new Error(
+      "Durable WPS reconciliation result is internally inconsistent",
+    );
+  }
 }
 
 function assertObservedConfiguration(
@@ -1155,11 +1218,13 @@ function capturedResult(
   };
 }
 
-export function resolveWpsAiPptProductAdapterExecutor(
+function createWpsAiPptProductAdapterExecutor(
   implementation: ProductAdapterImplementationPackage,
   executionConfiguration: ProductAdapterExecutionConfiguration,
   browserDriver: WpsAiPptBrowserDriverPort | undefined,
   checkpointStore?: AttemptCheckpointPort,
+  testOnlyReplay = false,
+  testOnlyRecordSubmissionIntent = false,
 ): ProductAdapterExecutor {
   if (
     executionConfiguration.adapterKind !== "wps-aippt-browser" ||
@@ -1173,6 +1238,9 @@ export function resolveWpsAiPptProductAdapterExecutor(
     executionConfiguration.scenario === "production-replay"
       ? "replay"
       : "live";
+  const driverExecutionMode = testOnlyReplay
+    ? "test-replay" as const
+    : executionMode;
   assertRegisteredImplementationPackage(implementation);
   return Object.freeze(async (command: ProductRunCommand) => {
     if (
@@ -1194,7 +1262,11 @@ export function resolveWpsAiPptProductAdapterExecutor(
         event.attemptId !== command.attemptId ||
         event.attemptSeq !== command.attemptSeq ||
         event.caseId !== command.evaluationCase.caseId ||
-        event.adapterVersion !== WPS_AIPPT_ADAPTER_VERSION
+        (!isHarnessProviderExecutionNotStartedCheckpoint(
+          event,
+          command,
+        ) &&
+          event.adapterVersion !== WPS_AIPPT_ADAPTER_VERSION)
       ) {
         throw new Error(
           "Recovered WPS checkpoint lineage does not match the Attempt",
@@ -1230,14 +1302,24 @@ export function resolveWpsAiPptProductAdapterExecutor(
         ({ eventType }) =>
           eventType === "task_reconciliation_result",
       );
+      if (latestReconciliation !== undefined) {
+        assertDurableWpsAiPptReconciliation(
+          latestReconciliation,
+        );
+      }
       const alreadyReconciled = latestReconciliation !== undefined;
-      const latestTaskCheckpoint = [...persistedEvents].reverse().find(
-        (event) =>
-          event.vendorTaskId !== null &&
-          event.vendorTaskId !== undefined &&
-          event.taskStateVersion !== null &&
-          event.taskStateVersion !== undefined,
-      );
+      const recoveredSubmissionState =
+        attemptSubmissionState(recoveredEvents);
+      const latestTaskCheckpoint =
+        recoveredSubmissionState === "not_submitted"
+          ? undefined
+          : [...persistedEvents].reverse().find(
+              (event) =>
+                event.vendorTaskId !== null &&
+                event.vendorTaskId !== undefined &&
+                event.taskStateVersion !== null &&
+                event.taskStateVersion !== undefined,
+            );
       if (latestTaskCheckpoint !== undefined && !alreadyReconciled) {
         const reconciliation =
           await reconcileRegisteredWpsAiPptTask(browserDriver, {
@@ -1249,7 +1331,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
               textEncoder.encode(JSON.stringify(persistedEvents)),
             ),
             artifactContentHash: null,
-          }, executionMode);
+          }, driverExecutionMode);
         persistedEvents.push(
           await observableEvent(
             command,
@@ -1260,13 +1342,10 @@ export function resolveWpsAiPptProductAdapterExecutor(
               evidenceId: reconciliation.evidenceId,
               sourceUrl: null,
               submissionEvidenceAtCheckpoint:
-                persistedEvents.some(
-                  (event) =>
-                    event.submissionEvidenceAtCheckpoint ===
-                    "submitted",
-                )
-                  ? "submitted"
-                  : "unknown",
+                submissionEvidenceForReconciliation(
+                  reconciliation.observedState,
+                  recoveredSubmissionState,
+                ),
               vendorTaskId: reconciliation.query.vendorTaskId,
               taskStateVersion:
                 reconciliation.query.taskStateVersion,
@@ -1312,7 +1391,26 @@ export function resolveWpsAiPptProductAdapterExecutor(
           manualActions: Object.freeze([]),
         };
       }
+      if (
+        persistedEvents.some(
+          isUnresolvedProviderSubmissionIntent,
+        ) &&
+        recoveredSubmissionState === "unknown"
+      ) {
+        return {
+          terminalReason: "task_state_unknown",
+          blockReason: null,
+          submissionEvidence: "unknown",
+          elapsedMs: 0,
+          artifactCandidates: [],
+          observableEvents: Object.freeze([...persistedEvents]),
+          manualActions: Object.freeze([
+            "provider submission intent is unresolved; automatic resubmission suppressed",
+          ]),
+        };
+      }
     }
+    const browserStreamStartIndex = persistedEvents.length;
     const runBrowser = resolveRegisteredWpsAiPptBrowserDriver(
       browserDriver,
       async (event) => {
@@ -1325,10 +1423,25 @@ export function resolveWpsAiPptProductAdapterExecutor(
         persistedEvents.push(checkpoint);
         return checkpoint;
       },
-      executionMode,
+      driverExecutionMode,
     );
     let result: WpsAiPptBrowserResult;
     try {
+      if (
+        executionMode === "live" &&
+        (!testOnlyReplay || testOnlyRecordSubmissionIntent)
+      ) {
+        if (checkpointStore === undefined) {
+          throw new Error(
+            "WPS live provider submission requires durable checkpoints",
+          );
+        }
+        await appendProviderSubmissionIntentCheckpoint(
+          checkpointStore,
+          command,
+          WPS_AIPPT_ADAPTER_VERSION,
+        );
+      }
       result = await runBrowser({
         jobId: command.jobId,
         runId: command.runId,
@@ -1346,6 +1459,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
         pageCount: 16,
       });
     } catch (error) {
+      if (isOwnerFailStopRequiredError(error)) throw error;
       const latestTaskCheckpoint = [...persistedEvents].reverse().find(
         (event) =>
           event.vendorTaskId !== null &&
@@ -1370,7 +1484,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
             textEncoder.encode(JSON.stringify(persistedEvents)),
           ),
           artifactContentHash: null,
-        }, executionMode);
+        }, driverExecutionMode);
       persistedEvents.push(
         await observableEvent(
           command,
@@ -1414,7 +1528,9 @@ export function resolveWpsAiPptProductAdapterExecutor(
         manualActions: Object.freeze([]),
       };
     }
-    const events = Object.freeze([...persistedEvents]);
+    const events = Object.freeze(
+      persistedEvents.slice(browserStreamStartIndex),
+    );
     if (events.length !== result.events.length) {
       throw new Error(
         "WPS browser driver did not stream every observable event",
@@ -1445,7 +1561,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
           taskStateVersion: latest.taskStateVersion,
           eventHistoryHash,
           artifactContentHash: null,
-        }, executionMode);
+        }, driverExecutionMode);
       if (!Number.isFinite(Date.parse(reconciliation.observedAt))) {
         throw new Error(
           "WPS reconciliation API returned inconsistent task state",
@@ -1464,7 +1580,10 @@ export function resolveWpsAiPptProductAdapterExecutor(
             evidenceId: reconciliation.evidenceId,
             sourceUrl: null,
             submissionEvidenceAtCheckpoint:
-              result.submissionEvidence,
+              submissionEvidenceForReconciliation(
+                reconciliation.observedState,
+                result.submissionEvidence,
+              ),
             vendorTaskId: latest.vendorTaskId,
             taskStateVersion: latest.taskStateVersion,
             adapterVersion: WPS_AIPPT_ADAPTER_VERSION,
@@ -1485,6 +1604,15 @@ export function resolveWpsAiPptProductAdapterExecutor(
       );
     }
     const manualActions = checkedManualActions(result.manualActions);
+    const durableResultEvents =
+      checkpointStore?.readAttempt === undefined
+        ? persistedEvents
+        : await checkpointStore.readAttempt(command.attemptId);
+    const durableSubmissionEvidence =
+      submissionEvidenceBoundToCheckpoints(
+        result.submissionEvidence,
+        durableResultEvents,
+      );
     if (result.outcome !== "captured") {
       return {
         terminalReason:
@@ -1495,14 +1623,17 @@ export function resolveWpsAiPptProductAdapterExecutor(
           result.outcome === "authentication"
             ? result.outcome
             : null,
-        submissionEvidence: result.submissionEvidence,
+        submissionEvidence: durableSubmissionEvidence,
         elapsedMs: result.elapsedMs,
         artifactCandidates: [],
         observableEvents: Object.freeze([...persistedEvents]),
         manualActions,
       };
     }
-    if (result.submissionEvidence !== "submitted") {
+    if (
+      result.submissionEvidence !== "submitted" ||
+      durableSubmissionEvidence !== "submitted"
+    ) {
       throw new Error(
         "WPS captured Artifact requires submitted evidence",
       );
@@ -1520,7 +1651,7 @@ export function resolveWpsAiPptProductAdapterExecutor(
     return {
       terminalReason: "success",
       blockReason: null,
-      submissionEvidence: result.submissionEvidence,
+      submissionEvidence: durableSubmissionEvidence,
       elapsedMs: result.elapsedMs,
       artifactCandidates: [
         {
@@ -1538,6 +1669,75 @@ export function resolveWpsAiPptProductAdapterExecutor(
       manualActions,
     };
   });
+}
+
+export function resolveWpsAiPptProductAdapterExecutor(
+  implementation: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  browserDriver: WpsAiPptBrowserDriverPort | undefined,
+  checkpointStore?: AttemptCheckpointPort,
+): ProductAdapterExecutor {
+  if (browserDriver?.provenance === "TEST_FAKE") {
+    throw new Error(
+      "WPS production resolver rejects TEST_FAKE browser drivers",
+    );
+  }
+  return createWpsAiPptProductAdapterExecutor(
+    implementation,
+    executionConfiguration,
+    browserDriver,
+    checkpointStore,
+  );
+}
+
+export function resolveWpsAiPptProductAdapterExecutorForTest(
+  implementation: ProductAdapterImplementationPackage,
+  executionConfiguration: ProductAdapterExecutionConfiguration,
+  browserDriver: WpsAiPptBrowserDriverPort | undefined,
+  checkpointStore?: AttemptCheckpointPort,
+  recordSubmissionIntent = false,
+): ProductAdapterExecutor {
+  if (browserDriver?.provenance !== "TEST_FAKE") {
+    throw new Error(
+      "WPS TEST resolver requires a TEST_FAKE browser driver",
+    );
+  }
+  return createWpsAiPptProductAdapterExecutor(
+    implementation,
+    executionConfiguration,
+    browserDriver,
+    checkpointStore,
+    true,
+    recordSubmissionIntent,
+  );
+}
+
+export function createWpsAiPptReplayBehaviorExecutorForTest(input: {
+  readonly sessions: readonly WpsAiPptBrowserResult[];
+  readonly reconciliations?: readonly WpsAiPptTaskReconciliationEvidence[];
+  readonly checkpointStore?: AttemptCheckpointPort;
+}): ProductAdapterExecutor {
+  if (input.sessions.some((session) => session.outcome === "captured")) {
+    throw new Error(
+      "WPS TEST replay behavior fixture cannot mint an Artifact",
+    );
+  }
+  const driver = createWpsAiPptBrowserDriverPackage({
+    provenance: "TEST_FAKE",
+    sessions: input.sessions,
+    ...(input.reconciliations === undefined
+      ? {}
+      : { reconciliations: input.reconciliations }),
+  });
+  return createWpsAiPptProductAdapterExecutor(
+    implementationPackage(),
+    parseAdapterExecutionConfiguration(
+      executionConfigurationPackage("production-replay"),
+    ),
+    driver,
+    input.checkpointStore,
+    true,
+  );
 }
 
 export class WpsAiPptProductAdapter implements ProductAdapterPort {

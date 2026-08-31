@@ -17,6 +17,17 @@ export {
   type VerifiedBuildIdentity,
 } from "./doubao-current-verifier-evidence.ts";
 export {
+  FileSystemArtifactCaptureJournal,
+  FileSystemEgressAuthorizationAudit,
+  FileSystemJudgeEgressAudit,
+  FileSystemReferencePackStore,
+  assertHarnessOwnedDurableEgressAuthorizationAudit,
+  assertHarnessOwnedDurableJudgeEgressAudit,
+  assertHarnessOwnedDurableReferencePackStore,
+  createHarnessOwnedProductionOperationalDurability,
+  type HarnessOwnedProductionOperationalDurability,
+} from "./file-system-operational-durability.ts";
+export {
   FileSystemBrowserProfileLock,
   InProcessBrowserProfileLock,
   type BrowserProfileLockPort,
@@ -27,6 +38,7 @@ export {
   type HarnessOwnedProductionCapabilities,
   type HarnessOwnedProductionCapabilityEvidence,
 } from "./production-capabilities.ts";
+export { assertT10ProductionAcceptanceReady } from "./production-readiness.ts";
 export {
   BUILD_IDENTITY,
   BUILD_IDENTITY_SOURCE,
@@ -36,6 +48,7 @@ export {
   loadDurableRootRegistry,
   registerDurableRoots,
   resolveDurableRoot,
+  resolveDurableRootIdentity,
   retainedRehearsalRoot,
   type DurableRootRegistry,
   type DurableRootRegistryEntry,
@@ -129,10 +142,17 @@ export {
 } from "./retention.ts";
 export {
   createComparisonReportService,
+  planCompatibleComparisonPairs,
   type ComparisonReportService,
   type ComparisonReportServiceDependencies,
   type CreateComparisonReportCommand,
 } from "./comparison-report.ts";
+export {
+  REQUIRED_SCORE_DIMENSIONS,
+  assertArtifactScoreCompatibility,
+  assertCompleteScoreDimensions,
+  expectedComparisonCompatibilityFingerprint,
+} from "./comparison-compatibility.ts";
 export {
   MOCK_TEST_ENVIRONMENT_ORIGIN,
   PRODUCTION_ENVIRONMENT_ORIGIN,
@@ -143,6 +163,7 @@ export {
 } from "./environment-origin.ts";
 export {
   InMemoryFeishuProjection,
+  ProjectionStaleBaselineError,
   type AdjudicationEventTablePort,
   type ArtifactScoreTablePort,
   type CapturedArtifactTablePort,
@@ -153,12 +174,60 @@ export {
   type FeishuProjectionPort,
   type FeishuProjectionSnapshot,
   type InMemoryFeishuProjectionOptions,
+  type ProjectionCommitBaseline,
   type ProductGapCardTablePort,
   type ProductGapCardWorkflowTablePort,
   type ReportDocumentPort,
   type ReviewEventTablePort,
   type RunRecordTablePort,
 } from "./feishu.ts";
+export {
+  CODEX_CLI_FIXED_ARGUMENTS_HASH,
+  CODEX_CLI_JUDGE_ADAPTER_VERSION,
+  FROZEN_CODEX_CLI_BINARY,
+  FROZEN_CODEX_CLI_SHA256,
+  FROZEN_SANDBOX_EXEC_BINARY,
+  FROZEN_SANDBOX_EXEC_SHA256,
+  CODEX_CLI_SANDBOX_PROFILE_HASH,
+  assertCodexCliTranscriptIsDataOnly,
+  assertHarnessOwnedProductionJudge,
+  createCodexCliJudgeForTest,
+  createHarnessOwnedCodexCliJudge,
+  preflightHarnessOwnedProductionJudge,
+  type CodexCliJudgeTransportCommand,
+  type CodexCliJudgeTransportPort,
+  type CodexCliJudgeTransportResult,
+} from "./codex-cli-judge.ts";
+export {
+  FROZEN_LARK_CLI_BINARY,
+  FROZEN_LARK_CLI_SCRIPT,
+  FROZEN_LARK_CLI_SCRIPT_SHA256,
+  FROZEN_LARK_CLI_SHA256,
+  FROZEN_LARK_CLI_VERSION,
+  FROZEN_LARK_CLI_WRAPPER,
+  FROZEN_LARK_CLI_WRAPPER_TARGET,
+  REVIEWED_LARK_MACHINE_LOCK_ROOT,
+  assertFrozenLarkCliInstallation,
+  assertHarnessOwnedLarkBaseProjection,
+  claimHarnessOwnedLarkProductionJob,
+  createLarkReportCollectionMarkdown,
+  createHarnessOwnedLarkBaseProjection,
+  createLarkBaseProjectionForTest,
+  createLarkCliTransportForMutationBoundaryTest,
+  createVerifiedLarkCliTransport,
+  isHarnessOwnedLarkBaseProjection,
+  parseLarkDocumentReadback,
+  parseLarkRecordShareLinkEnvelope,
+  parseLarkRecordSearchEnvelope,
+  parseLarkRecordUpsertEnvelope,
+  persistHarnessOwnedLarkProjectionSnapshot,
+  preflightHarnessOwnedLarkBaseProjection,
+  readHarnessOwnedLarkProductionJobState,
+  type LarkCommitMarker,
+  type LarkBaseProjectionTransportPort,
+  type LarkProjectionTableKey,
+  type ProductionJobRemoteState,
+} from "./lark-base-projection.ts";
 export {
   createScoreAdjudicationService,
   type AdjudicateDimensionCommand,
@@ -188,8 +257,14 @@ export {
   type MockAdapterScenario,
 } from "./mock-wps.ts";
 export {
+  appendProviderSubmissionIntentCheckpoint,
+  attemptSubmissionState,
+  createHarnessProviderExecutionNotStartedCheckpoint,
+  createProviderSubmissionIntentCheckpoint,
   InMemoryAttemptCheckpointStore,
+  isHarnessProviderExecutionNotStartedCheckpoint,
   parseAdapterExecutionConfiguration,
+  submissionEvidenceBoundToCheckpoints,
   type AttemptCheckpointPort,
   type ArtifactCandidate,
   type ProductAdapterExecutionConfiguration,
@@ -210,6 +285,18 @@ export {
   type SafeRasterRendererPort,
   type TrustedBrowserDriverEvidence,
 } from "./product-adapter.ts";
+export {
+  validateWpsProductionRecoveryPayloads,
+  type WpsProductionRecoveryCommand,
+  type WpsProductionRecoveryPayloads,
+  type WpsProductionRecoveryResult,
+  type WpsVerifiedBuildIdentity,
+} from "./wps-production-recovery.ts";
+export {
+  trustedWpsRecoveryCheckpoint,
+  type TrustedWpsRecoveryCheckpoint,
+  type WpsRecoverySha256,
+} from "./wps-recovery-checkpoints.ts";
 export {
   DOUBAO_PRODUCTION_ADAPTER_KIND,
   DOUBAO_PRODUCTION_ADAPTER_VERSION,
@@ -275,6 +362,7 @@ export {
   registeredWpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverEvidence,
   type WpsAiPptBrowserDriverPort,
+  type WpsAiPptRetainedRenderedPage,
   type WpsAiPptTaskReconciliationEvidence,
   type WpsAiPptTaskReconciliationQuery,
 } from "./wps-aippt-driver.ts";

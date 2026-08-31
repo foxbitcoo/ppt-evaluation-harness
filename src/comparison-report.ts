@@ -2,25 +2,60 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type {
+  AdjudicationEventRecord,
   ArtifactScoreTableRecord,
   ComparisonPairSelection,
   ComparisonReportOutcome,
   CauseHypothesis,
-  CapturedArtifactTableRecord,
   DynamicComparisonView,
   EffectiveArtifactScorecard,
   EffectiveDimensionScore,
-  FeishuReportDraft,
-  PageEvidenceLink,
+  ExecutionProvenance,
   ProductGapCardRecord,
   ProductGapEvidence,
+  ReviewEventRecord,
   RunRecord,
   ScoreDimension,
-  VendorComparisonSummary,
-  VendorFinding,
+  FeishuReportDraft,
+  FeishuReport,
 } from "./domain.ts";
-import type { FeishuProjectionPort } from "./feishu.ts";
+import {
+  assertValidAdjudicationEventFields,
+  assertValidReviewEventFields,
+} from "./adjudication-validation.ts";
+import {
+  ProjectionStaleBaselineError,
+  type FeishuProjectionPort,
+  type FeishuProjectionSnapshot,
+} from "./feishu.ts";
+import type {
+  ClockPort,
+  EgressAuthorizationAuditPort,
+  EgressAuthorizationPort,
+} from "./egress-authorization.ts";
+import {
+  requireEgressAuthorization,
+  SYSTEM_CLOCK,
+} from "./egress-authorization.ts";
+import {
+  isHarnessOwnedLarkBaseProjection,
+  persistHarnessOwnedLarkProjectionSnapshot,
+  readHarnessOwnedLarkCommittedAuxiliaryReportState,
+  type LarkCommittedAuxiliaryReportState,
+} from "./lark-base-projection.ts";
+import {
+  captureExecutionProvenance,
+  projectionProvenanceCoversCapture,
+} from "./provenance.ts";
 import { createScoreAdjudicationService } from "./score-adjudication.ts";
+import {
+  assertArtifactScoreCompatibility,
+  assertCompleteScoreDimensions,
+} from "./comparison-compatibility.ts";
+import {
+  buildCanonicalComparisonReportDraft,
+  deriveCanonicalVendorSummaries,
+} from "./comparison-report-render.ts";
 
 export interface CreateComparisonReportCommand {
   readonly jobId: string;
@@ -35,11 +70,17 @@ export interface ComparisonReportService {
 
 export interface ComparisonReportServiceDependencies {
   readonly feishu: FeishuProjectionPort;
+  readonly egressAuthorization?: EgressAuthorizationPort;
+  readonly egressAudit?: EgressAuthorizationAuditPort;
+  readonly clock?: ClockPort;
 }
 
-interface ScoredRun {
+interface ScoredRun<
+  ScoreRecord extends ArtifactScoreTableRecord =
+    EffectiveArtifactScoreTableRecord,
+> {
   readonly run: RunRecord & { readonly product: string };
-  readonly score: EffectiveArtifactScoreTableRecord;
+  readonly score: ScoreRecord;
 }
 
 type EffectiveArtifactScoreTableRecord = ArtifactScoreTableRecord & {
@@ -53,12 +94,12 @@ function shortHash(value: unknown): string {
     .slice(0, 16);
 }
 
-function scoredRunById(
+function scoredRunById<ScoreRecord extends ArtifactScoreTableRecord>(
   runId: string,
   vendorRuns: readonly RunRecord[],
-  scores: readonly EffectiveArtifactScoreTableRecord[],
+  scores: readonly ScoreRecord[],
   scorecardId?: string,
-): ScoredRun {
+): ScoredRun<ScoreRecord> {
   const run = vendorRuns.find(({ recordId }) => recordId === runId);
   const candidates = scores.filter((record) => record.runId === runId);
   if (scorecardId === undefined && candidates.length > 1) {
@@ -69,9 +110,18 @@ function scoredRunById(
   const score =
     scorecardId === undefined
       ? candidates[0]
-      : candidates.find(
-          (record) => record.scorecard.scorecardId === scorecardId,
-        );
+      : (() => {
+          const matches = candidates.filter(
+            (record) =>
+              record.scorecard.scorecardId === scorecardId,
+          );
+          if (matches.length > 1) {
+            throw new Error(
+              `Scorecard identity is duplicated: ${scorecardId}`,
+            );
+          }
+          return matches[0];
+        })();
   if (run === undefined || score === undefined || run.product === null) {
     throw new Error(`Scored vendor Run not found: ${runId}`);
   }
@@ -98,6 +148,28 @@ function compatibleJudgeConfiguration(
   if (leftJudge === null || rightJudge === null) {
     return leftJudge === rightJudge;
   }
+  const stableCodexExecutionIdentityMatches = () => {
+    if (
+      leftJudge.provider !== "codex_cli" ||
+      rightJudge.provider !== "codex_cli"
+    ) {
+      return true;
+    }
+    const leftExecution = leftJudge.executionEvidence;
+    const rightExecution = rightJudge.executionEvidence;
+    return (
+      leftExecution !== undefined &&
+      rightExecution !== undefined &&
+      leftExecution.schemaVersion === rightExecution.schemaVersion &&
+      leftExecution.binaryHash === rightExecution.binaryHash &&
+      leftExecution.fixedArgumentsHash ===
+        rightExecution.fixedArgumentsHash &&
+      leftExecution.sandboxBinaryHash ===
+        rightExecution.sandboxBinaryHash &&
+      leftExecution.sandboxProfileHash ===
+        rightExecution.sandboxProfileHash
+    );
+  };
   return (
     leftJudge.provider === rightJudge.provider &&
     leftJudge.adapterVersion === rightJudge.adapterVersion &&
@@ -108,8 +180,549 @@ function compatibleJudgeConfiguration(
     leftJudge.configHash === rightJudge.configHash &&
     leftJudge.schemaHash === rightJudge.schemaHash &&
     leftJudge.rasterizerVersion === rightJudge.rasterizerVersion &&
-    leftJudge.imageDetail === rightJudge.imageDetail
+    leftJudge.imageDetail === rightJudge.imageDetail &&
+    stableCodexExecutionIdentityMatches()
   );
+}
+
+function compatibleComparisonLineage(
+  jobId: string,
+  left: ScoredRun<ArtifactScoreTableRecord>,
+  right: ScoredRun<ArtifactScoreTableRecord>,
+): boolean {
+  const leftCaptureProvenance = captureExecutionProvenance(
+    left.score.artifact,
+    left.score.renderManifest,
+    left.score.scorecard,
+  );
+  const rightCaptureProvenance = captureExecutionProvenance(
+    right.score.artifact,
+    right.score.renderManifest,
+    right.score.scorecard,
+  );
+  return (
+    leftCaptureProvenance !== null &&
+    rightCaptureProvenance !== null &&
+    leftCaptureProvenance === rightCaptureProvenance &&
+    projectionProvenanceCoversCapture(
+      left.score.provenance,
+      leftCaptureProvenance,
+    ) &&
+    projectionProvenanceCoversCapture(
+      right.score.provenance,
+      rightCaptureProvenance,
+    ) &&
+    left.score.jobId === jobId &&
+    right.score.jobId === jobId &&
+    left.score.caseId === right.score.caseId &&
+    left.score.scorecard.rubricVersion ===
+      right.score.scorecard.rubricVersion &&
+    left.score.renderManifest.renderer ===
+      right.score.renderManifest.renderer &&
+    left.score.environmentOrigin === right.score.environmentOrigin &&
+    left.run.provenance === left.score.provenance &&
+    right.run.provenance === right.score.provenance &&
+    left.score.provenance === right.score.provenance &&
+    isDeepStrictEqual(
+      left.score.comparisonCompatibilityFingerprint,
+      right.score.comparisonCompatibilityFingerprint,
+    ) &&
+    compatibleJudgeConfiguration(left.score, right.score)
+  );
+}
+
+function mergeCommittedAuxiliaryState(
+  local: FeishuProjectionSnapshot,
+  state: LarkCommittedAuxiliaryReportState,
+): FeishuProjectionSnapshot {
+  if (state.marker === null) return local;
+  if (state.bakeoffJob === null) {
+    throw new Error(
+      "Durable Lark auxiliary state is missing its Bakeoff Job",
+    );
+  }
+  const identity = (
+    record: FeishuProjectionSnapshot["productGapCardTable"][number],
+  ) =>
+    record.recordType === "comparison"
+      ? `comparison:${record.comparisonId}`
+      : `gap:${record.gapCardId}`;
+  const localJobs = local.runRecordTable.filter(
+    (record) =>
+      record.recordType === "bakeoff_job" &&
+      record.jobId === state.bakeoffJob!.jobId,
+  );
+  const localJob = localJobs[0];
+  if (localJobs.length !== 1 || localJob === undefined) {
+    throw new Error(
+      "Durable Lark auxiliary state has no unique local Bakeoff Job lineage",
+    );
+  }
+  const {
+    reportUrl: _durableReportUrl,
+    auxiliaryReportUrls: _durableAuxiliaryReportUrls,
+    environmentOrigin: durableEnvironmentOrigin,
+    ...durableStableJob
+  } = state.bakeoffJob;
+  const {
+    reportUrl: _localReportUrl,
+    auxiliaryReportUrls: _localAuxiliaryReportUrls,
+    environmentOrigin: localEnvironmentOrigin,
+    ...localStableJob
+  } = localJob;
+  if (
+    !isDeepStrictEqual(
+      durableEnvironmentOrigin,
+      localEnvironmentOrigin,
+    ) ||
+    !isDeepStrictEqual(durableStableJob, localStableJob)
+  ) {
+    throw new Error(
+      "Durable Lark Bakeoff Job lineage or environment conflicts with the verified local projection",
+    );
+  }
+  const durableProductGapCardTable = state.productGapCardTable.map(
+    (record) => {
+      if (
+        !isDeepStrictEqual(
+          record.environmentOrigin,
+          localEnvironmentOrigin,
+        )
+      ) {
+        throw new Error(
+          "Durable Lark Comparison or Gap Card environment conflicts with the verified local projection",
+        );
+      }
+      return {
+        ...record,
+        environmentOrigin: localEnvironmentOrigin,
+      };
+    },
+  );
+  const durableIds = new Set(
+    durableProductGapCardTable.map(identity),
+  );
+  const mergeCausalEvents = <
+    Event extends AdjudicationEventRecord | ReviewEventRecord,
+  >(
+    localEvents: readonly Event[],
+    durableEvents: readonly Event[],
+    eventId: (event: Event) => string,
+    priorId: (event: Event) => string | null,
+    groupId: (event: Event) => string,
+    label: string,
+    validate: (event: Event) => void,
+  ): readonly Event[] => {
+    const merged = new Map<string, Event>();
+    for (const event of [...localEvents, ...durableEvents]) {
+      validate(event);
+      if (event.jobId !== state.bakeoffJob!.jobId) {
+        throw new Error(`${label} durable Job lineage conflicts`);
+      }
+      if (
+        !isDeepStrictEqual(
+          event.environmentOrigin,
+          localEnvironmentOrigin,
+        )
+      ) {
+        throw new Error(`${label} durable environment conflicts`);
+      }
+      const normalized = {
+        ...event,
+        environmentOrigin: localEnvironmentOrigin,
+      } as Event;
+      const id = eventId(normalized);
+      const existing = merged.get(id);
+      if (
+        existing !== undefined &&
+        !isDeepStrictEqual(existing, normalized)
+      ) {
+        throw new Error(`${label} durable identity conflict: ${id}`);
+      }
+      merged.set(id, normalized);
+    }
+    const ordered: Event[] = [];
+    const groups = new Map<string, Event[]>();
+    for (const event of merged.values()) {
+      const group = groupId(event);
+      groups.set(group, [...(groups.get(group) ?? []), event]);
+    }
+    for (const [group, events] of [...groups].sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      const byId = new Map(events.map((event) => [eventId(event), event]));
+      const children = new Map<string, Event>();
+      const roots: Event[] = [];
+      for (const event of events) {
+        const prior = priorId(event);
+        if (prior === null) {
+          roots.push(event);
+          continue;
+        }
+        const parent = byId.get(prior);
+        if (parent === undefined || children.has(prior)) {
+          throw new Error(`${label} durable causal chain conflicts: ${group}`);
+        }
+        if (Date.parse(event.occurredAt) < Date.parse(parent.occurredAt)) {
+          throw new Error(`${label} durable child precedes parent: ${group}`);
+        }
+        children.set(prior, event);
+      }
+      if (roots.length !== 1) {
+        throw new Error(`${label} durable causal root conflicts: ${group}`);
+      }
+      const visited = new Set<string>();
+      let current: Event | undefined = roots[0];
+      while (current !== undefined) {
+        const id = eventId(current);
+        if (visited.has(id)) {
+          throw new Error(`${label} durable causal cycle: ${group}`);
+        }
+        visited.add(id);
+        ordered.push(current);
+        current = children.get(id);
+      }
+      if (visited.size !== events.length) {
+        throw new Error(`${label} durable causal chain is disconnected: ${group}`);
+      }
+    }
+    return ordered;
+  };
+  const adjudicationEventTable = mergeCausalEvents(
+    local.adjudicationEventTable,
+    state.adjudicationEventTable,
+    (event) => event.adjudicationEventId,
+    (event) => event.priorAdjudicationEventId,
+    (event) => `${event.scorecardId}:${event.dimension}`,
+    "Adjudication Event",
+    assertValidAdjudicationEventFields,
+  );
+  const reviewEventTable = mergeCausalEvents(
+    local.reviewEventTable,
+    state.reviewEventTable,
+    (event) => event.reviewEventId,
+    (event) => event.priorReviewEventId,
+    (event) => event.scorecardId,
+    "Review Event",
+    assertValidReviewEventFields,
+  );
+  return {
+    ...local,
+    adjudicationEventTable,
+    reviewEventTable,
+    runRecordTable: local.runRecordTable.map((record) =>
+      record.recordType === "bakeoff_job" &&
+      record.jobId === state.bakeoffJob!.jobId
+        ? {
+            ...record,
+            reportUrl: state.bakeoffJob!.reportUrl,
+            auxiliaryReportUrls:
+              state.bakeoffJob!.auxiliaryReportUrls,
+            // Persisted JSON carries the same origin payload but not the
+            // registered in-process origin object. Preserve the verified
+            // local identity while refreshing durable mutable Job fields.
+            environmentOrigin: record.environmentOrigin,
+          }
+        : record,
+    ),
+    productGapCardTable: [
+      ...local.productGapCardTable.filter(
+        (record) => !durableIds.has(identity(record)),
+      ),
+      ...durableProductGapCardTable,
+    ],
+  };
+}
+
+async function hydrateCommittedReports(command: {
+  readonly projection: FeishuProjectionPort;
+  readonly state: LarkCommittedAuxiliaryReportState;
+  readonly source: Awaited<
+    ReturnType<FeishuProjectionPort["loadComparisonReportSource"]>
+  >;
+  readonly effectiveScores: readonly EffectiveArtifactScoreTableRecord[];
+}): Promise<void> {
+  if (command.state.reportCollection.length === 0) return;
+  const comparisons = command.state.productGapCardTable.filter(
+    (record): record is DynamicComparisonView =>
+      record.recordType === "comparison",
+  );
+  const persistedGaps = new Map(
+    command.state.productGapCardTable.flatMap((record) =>
+      record.recordType === "gap_card"
+        ? [[record.gapCardId, record] as const]
+        : [],
+    ),
+  );
+  const trustedReportOrigins = new Set(
+    (command.state.marker?.reportUrls ?? []).map(({ url }) =>
+      new URL(url).origin,
+    ),
+  );
+  if (trustedReportOrigins.size !== 1) {
+    throw new Error(
+      "Durable Lark report marker has no unique trusted origin",
+    );
+  }
+  const trustedOrigin = [...trustedReportOrigins][0]!;
+  const durablePageEvidenceUrls = new Map<string, string>();
+  for (const entry of command.state.marker?.pageEvidenceUrls ?? []) {
+    const key = `${entry.artifactId}:${entry.pageNumber}`;
+    let trusted: URL;
+    try {
+      trusted = new URL(entry.url);
+    } catch {
+      throw new Error(
+        `Durable Lark page-evidence URL is invalid: ${key}`,
+      );
+    }
+    if (
+      trusted.protocol !== "https:" ||
+      trusted.username !== "" ||
+      trusted.password !== "" ||
+      trusted.search !== "" ||
+      trusted.hash !== "" ||
+      trusted.origin !== trustedOrigin ||
+      durablePageEvidenceUrls.has(key)
+    ) {
+      throw new Error(
+        `Durable Lark page-evidence marker has an untrusted or conflicting entry: ${key}`,
+      );
+    }
+    durablePageEvidenceUrls.set(key, trusted.toString());
+  }
+  const durableEvidenceUrl = (
+    artifactId: string,
+    pageNumber: number,
+  ): string => {
+    const key = `${artifactId}:${pageNumber}`;
+    const url = durablePageEvidenceUrls.get(key);
+    if (url === undefined) {
+      throw new Error(
+        `Durable Lark page-evidence marker is missing a referenced page: ${key}`,
+      );
+    }
+    return url;
+  };
+  const comparisonsById = new Map(
+    comparisons.map((comparison) => [comparison.comparisonId, comparison]),
+  );
+  if (comparisonsById.size !== comparisons.length) {
+    throw new Error("Durable Lark Comparison identity is duplicated");
+  }
+  const adjudications = new Map(
+    (
+      await Promise.all(
+        command.source.artifactScores.map(({ scorecard }) =>
+          command.projection.listAdjudicationEvents(scorecard.scorecardId),
+        ),
+      )
+    )
+      .flat()
+      .map((event) => [event.adjudicationEventId, event]),
+  );
+  for (const persisted of command.state.reportCollection) {
+    const candidateComparisons = persisted.comparisonIds.map((id) => {
+      const comparison = comparisonsById.get(id);
+      if (comparison === undefined) {
+        throw new Error(
+          `Durable Lark report references a missing Comparison: ${id}`,
+        );
+      }
+      return comparison;
+    });
+    if (
+      candidateComparisons.length === 0 ||
+      new Set(persisted.comparisonIds).size !==
+        persisted.comparisonIds.length
+    ) {
+      throw new Error(
+        `Durable Lark report has invalid Comparison lineage: ${persisted.reportId}`,
+      );
+    }
+    const historicalScores: EffectiveArtifactScoreTableRecord[] =
+      command.effectiveScores.map((score) => {
+        const dimensions = score.scorecard.dimensions.map((model) => {
+          const states = candidateComparisons.flatMap((comparison) => {
+            const side =
+              comparison.leftScorecardId === score.scorecard.scorecardId
+                ? "left"
+                : comparison.rightScorecardId ===
+                    score.scorecard.scorecardId
+                  ? "right"
+                  : null;
+            const dimension = comparison.dimensions.find(
+              (candidate) => candidate.dimension === model.dimension,
+            );
+            if (side === null || dimension === undefined) return [];
+            return [{ side, dimension }];
+          });
+          const first = states[0];
+          if (first === undefined) {
+            return score.effectiveScorecard.dimensions.find(
+              ({ dimension }) => dimension === model.dimension,
+            )!;
+          }
+          const state = {
+            effectiveAssessmentStatus:
+              first.side === "left"
+                ? first.dimension.leftAssessmentStatus
+                : first.dimension.rightAssessmentStatus,
+            effectiveValue:
+              first.side === "left"
+                ? first.dimension.leftValue
+                : first.dimension.rightValue,
+            evidencePages:
+              first.side === "left"
+                ? first.dimension.leftEvidencePages
+                : first.dimension.rightEvidencePages,
+            reviewState:
+              first.side === "left"
+                ? first.dimension.leftReviewState
+                : first.dimension.rightReviewState,
+            source:
+              first.side === "left"
+                ? first.dimension.leftScoreSource
+                : first.dimension.rightScoreSource,
+            adjudicationEventId:
+              first.side === "left"
+                ? first.dimension.leftAdjudicationEventId
+                : first.dimension.rightAdjudicationEventId,
+          };
+          if (
+            states.slice(1).some(({ side, dimension }) =>
+              !isDeepStrictEqual(state, {
+                effectiveAssessmentStatus:
+                  side === "left"
+                    ? dimension.leftAssessmentStatus
+                    : dimension.rightAssessmentStatus,
+                effectiveValue:
+                  side === "left"
+                    ? dimension.leftValue
+                    : dimension.rightValue,
+                evidencePages:
+                  side === "left"
+                    ? dimension.leftEvidencePages
+                    : dimension.rightEvidencePages,
+                reviewState:
+                  side === "left"
+                    ? dimension.leftReviewState
+                    : dimension.rightReviewState,
+                source:
+                  side === "left"
+                    ? dimension.leftScoreSource
+                    : dimension.rightScoreSource,
+                adjudicationEventId:
+                  side === "left"
+                    ? dimension.leftAdjudicationEventId
+                    : dimension.rightAdjudicationEventId,
+              }),
+            )
+          ) {
+            throw new Error(
+              "Durable report Comparisons disagree on one historical Scorecard state",
+            );
+          }
+          const adjudication =
+            state.adjudicationEventId === null
+              ? undefined
+              : adjudications.get(state.adjudicationEventId);
+          if (
+            state.adjudicationEventId !== null &&
+            (adjudication === undefined ||
+              adjudication.scorecardId !== score.scorecard.scorecardId ||
+              adjudication.dimension !== model.dimension)
+          ) {
+            throw new Error(
+              "Durable report historical adjudication lineage is missing",
+            );
+          }
+          return {
+            dimension: model.dimension,
+            modelOriginalAssessmentStatus: model.assessmentStatus,
+            modelOriginalValue: model.value,
+            ...state,
+            rationale: adjudication?.reason ?? model.rationale,
+          };
+        });
+        const reviewed = dimensions.filter(
+          ({ reviewState }) => reviewState === "human_reviewed",
+        ).length;
+        return {
+          ...score,
+          effectiveScorecard: {
+            ...score.effectiveScorecard,
+            dimensions,
+            reviewState:
+              reviewed === 0
+                ? "model_not_reviewed"
+                : reviewed === dimensions.length
+                  ? "human_reviewed"
+                  : "partially_human_reviewed",
+          },
+        };
+      });
+    const candidateGaps = persisted.gapCardIds.map((id) => {
+      const gap = persistedGaps.get(id);
+      if (gap === undefined) {
+        throw new Error(
+          `Durable Lark report references a missing Gap Card: ${id}`,
+        );
+      }
+      return gap;
+    });
+    const canonicalGaps = createGapCards(
+      durableEvidenceUrl,
+      candidateComparisons,
+      command.source.vendorRuns,
+      historicalScores,
+    );
+    if (!isDeepStrictEqual(candidateGaps, canonicalGaps)) {
+      throw new Error(
+        `Durable Lark report Gap Card lineage is not canonical: ${persisted.reportId}`,
+      );
+    }
+    const vendorSummaries = deriveCanonicalVendorSummaries(
+      durableEvidenceUrl,
+      candidateComparisons,
+      command.source.vendorRuns,
+      historicalScores,
+    );
+    const matched = buildCanonicalComparisonReportDraft({
+      resolveEvidenceUrl: durableEvidenceUrl,
+      job: command.source.job,
+      vendorRuns: command.source.vendorRuns,
+      capturedArtifacts: command.source.capturedArtifacts,
+      comparisons: candidateComparisons,
+      gapCards: candidateGaps,
+      vendorSummaries,
+      scores: historicalScores,
+    });
+    const payloadHash = `sha256:${createHash("sha256")
+      .update(
+        JSON.stringify({
+          reportId: matched.reportId,
+          title: matched.title,
+          markdown: matched.markdown,
+        }),
+      )
+      .digest("hex")}` as const;
+    if (
+      matched.reportId !== persisted.reportId ||
+      matched.title !== persisted.title ||
+      matched.markdown !== persisted.markdown ||
+      payloadHash !== persisted.payloadHash
+    ) {
+      throw new Error(
+        `Durable Lark report collection cannot be deterministically reconstructed: ${persisted.reportId}`,
+      );
+    }
+    const materializedReport: FeishuReport = {
+      ...matched,
+      url: persisted.url,
+    };
+    await command.projection.createReport(materializedReport);
+  }
 }
 
 function comparePair(
@@ -133,22 +746,48 @@ function comparePair(
     scores,
     pair.rightScorecardId,
   );
-  if (
-    left.score.jobId !== jobId ||
-    right.score.jobId !== jobId ||
-    left.score.caseId !== right.score.caseId ||
-    left.score.scorecard.rubricVersion !==
-      right.score.scorecard.rubricVersion ||
-    left.score.renderManifest.renderer !==
-      right.score.renderManifest.renderer ||
-    left.score.environmentOrigin !== right.score.environmentOrigin ||
-    !isDeepStrictEqual(
-      left.score.comparisonCompatibilityFingerprint,
-      right.score.comparisonCompatibilityFingerprint,
-    ) ||
-    !compatibleJudgeConfiguration(left.score, right.score)
-  ) {
+  if (!compatibleComparisonLineage(jobId, left, right)) {
     throw new Error("Selected Runs are not compatible for direct comparison");
+  }
+  const sharedProvenance = left.score.provenance;
+  const leftExecutionProvenance = captureExecutionProvenance(
+    left.score.artifact,
+    left.score.renderManifest,
+    left.score.scorecard,
+  );
+  const rightExecutionProvenance = captureExecutionProvenance(
+    right.score.artifact,
+    right.score.renderManifest,
+    right.score.scorecard,
+  );
+  if (
+    leftExecutionProvenance === null ||
+    rightExecutionProvenance === null ||
+    leftExecutionProvenance !== rightExecutionProvenance ||
+    leftExecutionProvenance === "PRODUCTION"
+  ) {
+    throw new Error(
+      "Selected Runs do not preserve one shared execution provenance",
+    );
+  }
+  const executionProvenance =
+    leftExecutionProvenance as ExecutionProvenance;
+  assertCompleteScoreDimensions(
+    left.score.effectiveScorecard.dimensions,
+    "Left effective Scorecard",
+  );
+  assertCompleteScoreDimensions(
+    right.score.effectiveScorecard.dimensions,
+    "Right effective Scorecard",
+  );
+  const leftDimensionNames = left.score.effectiveScorecard.dimensions
+    .map(({ dimension }) => dimension)
+    .sort();
+  const rightDimensionNames = right.score.effectiveScorecard.dimensions
+    .map(({ dimension }) => dimension)
+    .sort();
+  if (!isDeepStrictEqual(leftDimensionNames, rightDimensionNames)) {
+    throw new Error("Selected Scorecards use incompatible dimensions");
   }
 
   const rightDimensions = dimensionsByName(
@@ -222,6 +861,13 @@ function comparePair(
   const knownComparisonId = knownComparisonIds.get(
     `${pair.leftRunId}|${pair.rightRunId}`,
   );
+  const usesOnlyModelOriginalScores = dimensions.every(
+    (dimension) =>
+      dimension.leftAdjudicationEventId === null &&
+      dimension.rightAdjudicationEventId === null &&
+      dimension.leftReviewState === "model_not_reviewed" &&
+      dimension.rightReviewState === "model_not_reviewed",
+  );
   const knownScorecardPair =
     (pair.leftRunId === "MOCK-run-wps-volcano-v1"
       ? "MOCK-scorecard-wps-volcano-v1"
@@ -234,13 +880,16 @@ function comparePair(
         ? "MOCK-scorecard-doubao-volcano-v1"
         : null) === right.score.scorecard.scorecardId;
   const comparisonId =
-    knownComparisonId !== undefined && knownScorecardPair
+    knownComparisonId !== undefined &&
+    knownScorecardPair &&
+    usesOnlyModelOriginalScores
       ? knownComparisonId
       : `comparison-${shortHash([
           pair.leftRunId,
           left.score.scorecard.scorecardId,
           pair.rightRunId,
           right.score.scorecard.scorecardId,
+          dimensions,
         ])}`;
   return {
     recordType: "comparison",
@@ -251,190 +900,12 @@ function comparePair(
     rightRunId: pair.rightRunId,
     leftScorecardId: left.score.scorecard.scorecardId,
     rightScorecardId: right.score.scorecard.scorecardId,
-    provenance: left.score.provenance,
+    provenance: sharedProvenance,
+    executionProvenance,
     environmentOrigin: left.score.environmentOrigin,
     leftProduct: left.run.product,
     rightProduct: right.run.product,
     dimensions,
-  };
-}
-
-function reportDraft(
-  feishu: FeishuProjectionPort,
-  job: RunRecord,
-  vendorRuns: readonly RunRecord[],
-  capturedArtifacts: readonly CapturedArtifactTableRecord[],
-  comparisons: readonly DynamicComparisonView[],
-  gapCards: readonly ProductGapCardRecord[],
-  vendorSummaries: readonly VendorComparisonSummary[],
-  scores: readonly EffectiveArtifactScoreTableRecord[],
-): FeishuReportDraft {
-  const reportKey = shortHash(
-    comparisons.map(({ comparisonId, dimensions }) => ({
-      comparisonId,
-      dimensions: dimensions.map(
-        ({
-          dimension,
-          leftValue,
-          rightValue,
-          leftReviewState,
-          rightReviewState,
-          leftAdjudicationEventId,
-          rightAdjudicationEventId,
-        }) => ({
-          dimension,
-          leftValue,
-          rightValue,
-          leftReviewState,
-          rightReviewState,
-          leftAdjudicationEventId,
-          rightAdjudicationEventId,
-        }),
-      ),
-    })),
-  );
-  const comparisonSections = comparisons
-    .map(
-      (comparison) => `## ${comparison.leftProduct}–${comparison.rightProduct}
-
-| 维度 | 左侧 | 右侧 | 双方页级证据 |
-|---|---:|---:|---|
-${comparison.dimensions
-  .map(
-    ({
-      dimension,
-      leftValue,
-      rightValue,
-      leftEvidencePages,
-      rightEvidencePages,
-      leftReviewState,
-      rightReviewState,
-    }) => {
-      const leftScore = scores.find(
-        ({ scorecard }) =>
-          scorecard.scorecardId === comparison.leftScorecardId,
-      );
-      const rightScore = scores.find(
-        ({ scorecard }) =>
-          scorecard.scorecardId === comparison.rightScorecardId,
-      );
-      const evidence =
-        leftScore === undefined || rightScore === undefined
-          ? "—"
-          : `${evidenceMarkdown(
-              feishu,
-              leftScore.artifactId,
-              leftEvidencePages,
-            )} / ${evidenceMarkdown(
-              feishu,
-              rightScore.artifactId,
-              rightEvidencePages,
-            )}`;
-      const display = (
-        value: number | null,
-        reviewState: "model_not_reviewed" | "human_reviewed",
-      ) => `${
-        value ?? "NOT_ASSESSABLE"
-      }（${
-        reviewState === "human_reviewed"
-          ? "人工已复核"
-          : "模型未复核"
-      }）`;
-      return `| ${DIMENSION_SPECS[dimension].label} | ${display(
-        leftValue,
-        leftReviewState,
-      )} | ${display(
-        rightValue,
-        rightReviewState,
-      )} | ${evidence} |`;
-    },
-  )
-  .join("\n")}`,
-    )
-    .join("\n\n");
-  const deliveryRows = vendorRuns
-    .map((run) => {
-      const artifact = capturedArtifacts.find(
-        (record) => record.runId === run.recordId,
-      );
-      return `| ${run.product ?? "—"} | \`${run.recordId}\` | \`${
-        run.status
-      }\` | \`${
-        run.terminalReason ?? run.waitingReason ?? "—"
-      }\` | ${artifact?.artifactId ?? "无"} |`;
-    })
-    .join("\n");
-  const gapCardSections =
-    gapCards.length === 0
-      ? "本次所选维度未形成可评估的分差卡片。"
-      : gapCards
-          .map(
-            (card, index) => `### 产品差距卡 ${index + 1}｜${DIMENSION_SPECS[card.dimension].label}
-
-- 关键页：${evidenceMarkdown(
-              feishu,
-              card.leftEvidence.artifactId,
-              card.keyPages.left,
-            )} / ${evidenceMarkdown(
-              feishu,
-              card.rightEvidence.artifactId,
-              card.keyPages.right,
-            )}
-- 双方证据：${card.leftEvidence.product} ${card.leftEvidence.value} 分；${card.rightEvidence.product} ${card.rightEvidence.value} 分
-- 影响：${card.impact}
-- 原因标记：**${card.causeHypothesis.label}** — ${card.causeHypothesis.statement}
-- 建议实验：${card.proposedExperiment}
-- 验收指标：${card.acceptanceMetric}`,
-          )
-          .join("\n\n");
-  const summarySections = vendorSummaries
-    .map(
-      (summary) => `### ${summary.product}
-
-- 主要优点：${findingMarkdown(summary.majorStrengths)}
-- 主要问题：${findingMarkdown(summary.majorIssues)}`,
-    )
-    .join("\n\n");
-  return {
-    reportId: `comparison-report-${reportKey}`,
-    provenance: job.provenance,
-    environmentOrigin: job.environmentOrigin,
-    title:
-      job.provenance === "MOCK"
-        ? "MOCK｜Case Sample 动态 A/B 精简报告"
-        : "Case Sample｜动态 A/B 精简报告",
-    jobId: job.jobId,
-    runIds:
-      job.selectedRunIds === null
-        ? vendorRuns.map(({ recordId }) => recordId)
-        : [...job.selectedRunIds],
-    artifactIds: capturedArtifacts.map(({ artifactId }) => artifactId),
-    claimLevel: "case_sample",
-    markdown: `# ${
-      job.provenance === "MOCK" ? "MOCK｜" : ""
-    }Case Sample 动态 A/B 精简报告
-
-> **单次 Case Sample：结论仅适用于当前已捕获的静态自读 PPT，不外推到其他场景。**
-
-## 全部所选产品交付结果
-
-- Bakeoff Job 状态：\`${job.status}\`
-
-| 产品 | Run | 状态 | 状态原因 | Artifact |
-|---|---|---|---|---|
-${deliveryRows}
-
-${comparisonSections}
-
-## 产品差距卡
-
-${gapCardSections}
-
-## 各产品主要优点与主要问题
-
-${summarySections}
-`,
-    createdAt: job.createdAt,
   };
 }
 
@@ -487,44 +958,8 @@ const DIMENSION_SPECS: Readonly<
   },
 };
 
-function evidenceMarkdown(
-  feishu: FeishuProjectionPort,
-  artifactId: string,
-  pages: readonly number[],
-): string {
-  return pages.length === 0
-    ? "—"
-    : pages
-        .slice(0, 3)
-        .map(
-          (pageNumber) =>
-            `[第 ${pageNumber} 页证据](${feishu.artifactPageEvidenceUrl(
-              artifactId,
-              pageNumber,
-            )})`,
-        )
-        .join("、");
-}
-
-function findingMarkdown(findings: readonly VendorFinding[]): string {
-  return findings.length === 0
-    ? "未观察到可评估的相对项"
-    : findings
-        .map(
-          ({ dimension, comparedWith, evidenceLinks }) =>
-            `${DIMENSION_SPECS[dimension].label}（对比 ${comparedWith}；${evidenceLinks
-              .slice(0, 1)
-              .map(
-                ({ pageNumber, url }) =>
-                  `[第 ${pageNumber} 页证据](${url})`,
-              )
-              .join("")}）`,
-        )
-        .join("；");
-}
-
 function evidenceForDimension(
-  feishu: FeishuProjectionPort,
+  resolveEvidenceUrl: (artifactId: string, pageNumber: number) => string,
   scoredRun: ScoredRun,
   dimension: ScoreDimension,
 ): ProductGapEvidence {
@@ -549,7 +984,7 @@ function evidenceForDimension(
       .slice(0, 3)
       .map((pageNumber) => ({
         pageNumber,
-        url: feishu.artifactPageEvidenceUrl(
+        url: resolveEvidenceUrl(
           scoredRun.score.artifactId,
           pageNumber,
         ),
@@ -558,7 +993,7 @@ function evidenceForDimension(
 }
 
 function createGapCards(
-  feishu: FeishuProjectionPort,
+  resolveEvidenceUrl: (artifactId: string, pageNumber: number) => string,
   comparisons: readonly DynamicComparisonView[],
   vendorRuns: readonly RunRecord[],
   scores: readonly EffectiveArtifactScoreTableRecord[],
@@ -593,12 +1028,12 @@ function createGapCards(
         comparison.rightScorecardId,
       );
       const leftEvidence = evidenceForDimension(
-        feishu,
+        resolveEvidenceUrl,
         left,
         dimension.dimension,
       );
       const rightEvidence = evidenceForDimension(
-        feishu,
+        resolveEvidenceUrl,
         right,
         dimension.dimension,
       );
@@ -619,6 +1054,12 @@ function createGapCards(
         jobId: comparison.jobId,
         comparisonId: comparison.comparisonId,
         provenance: comparison.provenance,
+        ...(comparison.executionProvenance === undefined
+          ? {}
+          : {
+              executionProvenance:
+                comparison.executionProvenance,
+            }),
         environmentOrigin: comparison.environmentOrigin,
         workflowState: "pending_review",
         causeAttribution: "HYPOTHESIS",
@@ -643,254 +1084,353 @@ function createGapCards(
     });
 }
 
-function createVendorSummaries(
-  feishu: FeishuProjectionPort,
-  comparisons: readonly DynamicComparisonView[],
+const COMPARISON_VENDOR_ORDER = new Map([
+  ["wps", 0],
+  ["qwen", 1],
+  ["doubao", 2],
+]);
+
+function compareCanonicalRunOrder(
+  left: ScoredRun,
+  right: ScoredRun,
+): number {
+  return (
+    (COMPARISON_VENDOR_ORDER.get(
+      left.run.productVendorId ?? "",
+    ) ?? Number.MAX_SAFE_INTEGER) -
+      (COMPARISON_VENDOR_ORDER.get(
+        right.run.productVendorId ?? "",
+      ) ?? Number.MAX_SAFE_INTEGER) ||
+    left.run.recordId.localeCompare(right.run.recordId) ||
+    left.score.scorecard.scorecardId.localeCompare(
+      right.score.scorecard.scorecardId,
+    )
+  );
+}
+
+function canonicalExplicitPairs(
+  pairs: readonly ComparisonPairSelection[],
   vendorRuns: readonly RunRecord[],
   scores: readonly EffectiveArtifactScoreTableRecord[],
-): readonly VendorComparisonSummary[] {
-  const summaries = new Map<
-    string,
-    {
-      product: string;
-      strengths: VendorFinding[];
-      issues: VendorFinding[];
-    }
-  >();
-  const addFinding = (
-    runId: string,
-    product: string,
-    target: "strengths" | "issues",
-    finding: VendorFinding,
-  ) => {
-    const summary = summaries.get(runId) ?? {
-      product,
-      strengths: [],
-      issues: [],
-    };
-    const findings = summary[target];
-    if (
-      !findings.some(
-        (existing) =>
-          existing.dimension === finding.dimension &&
-          existing.comparedWith === finding.comparedWith,
-      )
-    ) {
-      findings.push(finding);
-    }
-    summaries.set(runId, summary);
-  };
-  const linksFor = (
-    runId: string,
-    scorecardId: string,
-    dimension: ScoreDimension,
-  ): readonly PageEvidenceLink[] => {
-    const score = scores.find(
-      (record) =>
-        record.runId === runId &&
-        record.scorecard.scorecardId === scorecardId,
+): readonly ComparisonPairSelection[] {
+  const seen = new Set<string>();
+  return pairs.flatMap((pair) => {
+    const requestedLeft = scoredRunById(
+      pair.leftRunId,
+      vendorRuns,
+      scores,
+      pair.leftScorecardId,
     );
-    if (score === undefined) {
-      throw new Error(
-        `Artifact Scorecard not found for selection: ${scorecardId}`,
-      );
-    }
-    const assessment = score.effectiveScorecard.dimensions.find(
-      (candidate) => candidate.dimension === dimension,
+    const requestedRight = scoredRunById(
+      pair.rightRunId,
+      vendorRuns,
+      scores,
+      pair.rightScorecardId,
     );
-    return (
-      assessment?.evidencePages.slice(0, 3).map((pageNumber) => ({
-        pageNumber,
-        url: feishu.artifactPageEvidenceUrl(
-          score.artifactId,
-          pageNumber,
-        ),
-      })) ?? []
-    );
-  };
-  for (const comparison of comparisons) {
-    for (const dimension of comparison.dimensions) {
-      if (dimension.difference === null || dimension.difference === 0) {
-        continue;
-      }
-      const leftTarget =
-        dimension.difference > 0 ? "strengths" : "issues";
-      const rightTarget =
-        dimension.difference > 0 ? "issues" : "strengths";
-      addFinding(
-        comparison.leftRunId,
-        comparison.leftProduct,
-        leftTarget,
-        {
-          dimension: dimension.dimension,
-          comparedWith: comparison.rightProduct,
-          difference: Math.abs(dimension.difference),
-          evidenceLinks: linksFor(
-            comparison.leftRunId,
-            comparison.leftScorecardId,
-            dimension.dimension,
-          ),
-        },
-      );
-      addFinding(
-        comparison.rightRunId,
-        comparison.rightProduct,
-        rightTarget,
-        {
-          dimension: dimension.dimension,
-          comparedWith: comparison.leftProduct,
-          difference: Math.abs(dimension.difference),
-          evidenceLinks: linksFor(
-            comparison.rightRunId,
-            comparison.rightScorecardId,
-            dimension.dimension,
-          ),
-        },
-      );
-    }
-  }
-  const selectedRunIds = [
-    ...new Set(
-      comparisons.flatMap(({ leftRunId, rightRunId }) => [
-        leftRunId,
-        rightRunId,
-      ]),
-    ),
-  ];
-  return selectedRunIds.map((runId) => {
-    const run = vendorRuns.find(({ recordId }) => recordId === runId);
-    if (run === undefined || run.product === null) {
-      throw new Error(`Vendor Run not found for summary: ${runId}`);
-    }
-    const summary = summaries.get(runId) ?? {
-      product: run.product,
-      strengths: [],
-      issues: [],
+    const [left, right] =
+      compareCanonicalRunOrder(requestedLeft, requestedRight) <= 0
+        ? [requestedLeft, requestedRight]
+        : [requestedRight, requestedLeft];
+    const canonicalPair: ComparisonPairSelection = {
+      leftRunId: left.run.recordId,
+      leftScorecardId: left.score.scorecard.scorecardId,
+      rightRunId: right.run.recordId,
+      rightScorecardId: right.score.scorecard.scorecardId,
     };
-    const rank = (findings: readonly VendorFinding[]) =>
-      [...findings]
-        .sort(
-          (left, right) =>
-            right.difference - left.difference ||
-            left.dimension.localeCompare(right.dimension),
-        )
-        .slice(0, 3);
-    return {
-      product: summary.product,
-      runId,
-      majorStrengths: rank(summary.strengths),
-      majorIssues: rank(summary.issues),
-    };
+    const key = JSON.stringify([
+      canonicalPair.leftRunId,
+      canonicalPair.leftScorecardId,
+      canonicalPair.rightRunId,
+      canonicalPair.rightScorecardId,
+    ]);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [canonicalPair];
   });
 }
 
 function defaultViewPairs(
   vendorRuns: readonly RunRecord[],
-  scores: readonly EffectiveArtifactScoreTableRecord[],
+  scores: readonly ArtifactScoreTableRecord[],
 ): readonly ComparisonPairSelection[] {
   const scoredRunIds = new Set(scores.map(({ runId }) => runId));
-  const runIdForVendor = (vendorId: string): string | null =>
-    vendorRuns.find(
-      (run) =>
-        run.productVendorId === vendorId &&
-        scoredRunIds.has(run.recordId),
-    )?.recordId ??
-    null;
-  const wpsRunId = runIdForVendor("wps");
-  if (wpsRunId === null) return [];
-  return [
-    runIdForVendor("qwen"),
-    runIdForVendor("doubao"),
-  ].flatMap((rightRunId) =>
-    rightRunId === null ? [] : [{ leftRunId: wpsRunId, rightRunId }],
+  const scoredRuns = vendorRuns
+    .filter((run) => scoredRunIds.has(run.recordId))
+    .sort(
+      (left, right) =>
+        (COMPARISON_VENDOR_ORDER.get(left.productVendorId ?? "") ??
+          Number.MAX_SAFE_INTEGER) -
+          (COMPARISON_VENDOR_ORDER.get(right.productVendorId ?? "") ??
+            Number.MAX_SAFE_INTEGER) ||
+        left.recordId.localeCompare(right.recordId),
+    );
+  return scoredRuns.flatMap((left, leftIndex) =>
+    scoredRuns.slice(leftIndex + 1).map((right) => ({
+      leftRunId: left.recordId,
+      rightRunId: right.recordId,
+    })),
   );
+}
+
+export function planCompatibleComparisonPairs(command: {
+  readonly jobId: string;
+  readonly vendorRuns: readonly RunRecord[];
+  readonly artifactScores: readonly ArtifactScoreTableRecord[];
+}): readonly ComparisonPairSelection[] {
+  return defaultViewPairs(
+    command.vendorRuns,
+    command.artifactScores,
+  ).filter((pair) => {
+    const left = scoredRunById(
+      pair.leftRunId,
+      command.vendorRuns,
+      command.artifactScores,
+      pair.leftScorecardId,
+    );
+    const right = scoredRunById(
+      pair.rightRunId,
+      command.vendorRuns,
+      command.artifactScores,
+      pair.rightScorecardId,
+    );
+    return compatibleComparisonLineage(command.jobId, left, right);
+  });
 }
 
 export function createComparisonReportService({
   feishu,
+  egressAuthorization,
+  egressAudit,
+  clock,
 }: ComparisonReportServiceDependencies): ComparisonReportService {
   return {
     async createReport(command) {
-      const source = await feishu.loadComparisonReportSource(command.jobId);
-      const adjudicationService = createScoreAdjudicationService({
-        feishu,
-      });
-      const effectiveScores: readonly EffectiveArtifactScoreTableRecord[] =
-        await Promise.all(
-          source.artifactScores.map(async (score) => ({
-            ...score,
-            effectiveScorecard:
-              await adjudicationService.getEffectiveScorecardForRecord(
-                score,
-              ),
-          })),
+      const requiresAuthorizedPersistence =
+        isHarnessOwnedLarkBaseProjection(feishu);
+      if (
+        requiresAuthorizedPersistence &&
+        (egressAuthorization === undefined ||
+          egressAudit === undefined)
+      ) {
+        throw new Error(
+          "Production dynamic comparison requires authorized Lark persistence",
         );
-      const pairs =
-        command.pairs ??
-        defaultViewPairs(source.vendorRuns, effectiveScores);
-      if (pairs.length === 0) {
-        throw new Error("A comparison report requires at least one pair");
       }
-      const comparisons = pairs.map((pair) =>
-        comparePair(
+      if (requiresAuthorizedPersistence) {
+        const localSource = await feishu.loadComparisonReportSource(
           command.jobId,
-          pair,
-          source.vendorRuns,
-          effectiveScores,
-        ),
-      );
-      for (const comparison of comparisons) {
-        await feishu.appendComparison({
-          recordType: comparison.recordType,
-          comparisonId: comparison.comparisonId,
-          caseId: comparison.caseId,
-          jobId: comparison.jobId,
-          leftRunId: comparison.leftRunId,
-          rightRunId: comparison.rightRunId,
-          leftScorecardId: comparison.leftScorecardId,
-          rightScorecardId: comparison.rightScorecardId,
-          provenance: comparison.provenance,
-          environmentOrigin: comparison.environmentOrigin,
-        });
+        );
+        const readPayloadHash = `sha256:${createHash("sha256")
+          .update(JSON.stringify(feishu.snapshot()))
+          .digest("hex")}` as const;
+        const readAuthorization = await requireEgressAuthorization(
+          egressAuthorization!,
+          {
+            requestId: `lark-auxiliary-state-read:${command.jobId}:${readPayloadHash}`,
+            jobId: command.jobId,
+            runId: null,
+            attemptId: null,
+            dataClassification:
+              localSource.evaluationCase.dataClassification,
+            sourceOwner: localSource.evaluationCase.sourceOwner,
+            processingPurpose: "operational_ledger_projection_storage",
+            targetKind: "storage",
+            targetService: feishu.egressDestination.targetService,
+            targetAccount: feishu.egressDestination.targetAccount,
+            targetRegion: feishu.egressDestination.targetRegion,
+            subprocessors: feishu.egressDestination.subprocessors,
+            contentFields: [
+              "commit_marker",
+              "bakeoff_job",
+              "comparison_and_product_gap_card_table",
+              "report_collection",
+            ],
+            payloadHash: readPayloadHash,
+            requiredRedactions: [],
+          },
+          clock ?? SYSTEM_CLOCK,
+        );
+        await egressAudit!.append(readAuthorization);
       }
-      const gapCards = createGapCards(
-        feishu,
-        comparisons,
-        source.vendorRuns,
-        effectiveScores,
-      );
-      for (const gapCard of gapCards) {
-        await feishu.appendProductGapCard(gapCard);
+      for (let staleRetry = 0; ; staleRetry += 1) {
+        try {
+          const durableState = requiresAuthorizedPersistence
+            ? await readHarnessOwnedLarkCommittedAuxiliaryReportState(
+                feishu,
+                command.jobId,
+              )
+            : undefined;
+          const baseline = requiresAuthorizedPersistence
+            ? await feishu.captureCommitBaseline(command.jobId)
+            : undefined;
+          if (
+            durableState !== undefined &&
+            (durableState.marker?.batchHash ?? null) !==
+              baseline!.remoteBatchHash
+          ) {
+            throw new ProjectionStaleBaselineError(
+              "Lark durable auxiliary state and commit baseline differ",
+            );
+          }
+          const writeProjection = requiresAuthorizedPersistence
+            ? feishu.forkForStaging(
+                mergeCommittedAuxiliaryState(
+                  baseline!.localSnapshot,
+                  durableState!,
+                ),
+              )
+            : feishu;
+          const source = await writeProjection.loadComparisonReportSource(
+            command.jobId,
+          );
+          const durableEvidenceUrls = new Map(
+            (durableState?.marker?.pageEvidenceUrls ?? []).map(
+              ({ artifactId, pageNumber, url }) => [
+                `${artifactId}:${pageNumber}`,
+                url,
+              ],
+            ),
+          );
+          const resolveReportEvidenceUrl = (
+            artifactId: string,
+            pageNumber: number,
+          ) =>
+            durableEvidenceUrls.get(`${artifactId}:${pageNumber}`) ??
+            feishu.artifactPageEvidenceUrl(artifactId, pageNumber);
+          for (const score of source.artifactScores) {
+            assertArtifactScoreCompatibility(
+              score,
+              source.evaluationCase,
+              source.job.protocolSnapshot,
+            );
+          }
+          const adjudicationService = createScoreAdjudicationService({
+            feishu: writeProjection,
+          });
+          const effectiveScores: readonly EffectiveArtifactScoreTableRecord[] =
+            await Promise.all(
+              source.artifactScores.map(async (score) => ({
+                ...score,
+                effectiveScorecard:
+                  await adjudicationService.getEffectiveScorecardForRecord(
+                    score,
+                  ),
+              })),
+            );
+          if (durableState !== undefined) {
+            await hydrateCommittedReports({
+              projection: writeProjection,
+              state: durableState,
+              source,
+              effectiveScores,
+            });
+          }
+          const pairs =
+            command.pairs === undefined
+              ? planCompatibleComparisonPairs({
+                  jobId: command.jobId,
+                  vendorRuns: source.vendorRuns,
+                  artifactScores: effectiveScores,
+                })
+              : canonicalExplicitPairs(
+                  command.pairs,
+                  source.vendorRuns,
+                  effectiveScores,
+                );
+          if (pairs.length === 0) {
+            throw new Error("A comparison report requires at least one pair");
+          }
+          const comparisons = pairs.map((pair) =>
+            comparePair(
+              command.jobId,
+              pair,
+              source.vendorRuns,
+              effectiveScores,
+            ),
+          );
+          if (comparisons.length === 0) {
+            throw new Error(
+              "A comparison report requires at least one compatible pair",
+            );
+          }
+          for (const comparison of comparisons) {
+            await writeProjection.appendComparison(comparison);
+          }
+          const gapCards = createGapCards(
+            resolveReportEvidenceUrl,
+            comparisons,
+            source.vendorRuns,
+            effectiveScores,
+          );
+          for (const gapCard of gapCards) {
+            await writeProjection.appendProductGapCard(gapCard);
+          }
+          const vendorSummaries = deriveCanonicalVendorSummaries(
+            resolveReportEvidenceUrl,
+            comparisons,
+            source.vendorRuns,
+            effectiveScores,
+          );
+          const report = await writeProjection.createReport(
+            buildCanonicalComparisonReportDraft({
+              resolveEvidenceUrl: resolveReportEvidenceUrl,
+              job: source.job,
+              vendorRuns: source.vendorRuns,
+              capturedArtifacts: source.capturedArtifacts,
+              comparisons,
+              gapCards,
+              vendorSummaries,
+              scores: effectiveScores,
+            }),
+          );
+          await writeProjection.linkReportToBakeoffJob(
+            command.jobId,
+            report.url,
+            command.pairs === undefined ? "primary" : "auxiliary",
+          );
+          let materializedReport = report;
+          if (requiresAuthorizedPersistence) {
+            const snapshot =
+              await persistHarnessOwnedLarkProjectionSnapshot({
+                projection: feishu,
+                stagedSnapshot: writeProjection.snapshot(),
+                baseline: baseline!,
+                jobId: command.jobId,
+                egressAuthorization: egressAuthorization!,
+                egressAudit: egressAudit!,
+                ...(clock === undefined ? {} : { clock }),
+              });
+            const readback = snapshot.reports.find(
+              ({ reportId }) => reportId === report.reportId,
+            );
+            if (
+              readback === undefined ||
+              !/^https:\/\/[^/\s]+\/docx\/[a-zA-Z0-9_-]+$/.test(
+                readback.url,
+              )
+            ) {
+              throw new Error(
+                "Production dynamic comparison report was not materialized",
+              );
+            }
+            materializedReport = readback;
+          }
+          return {
+            comparisons,
+            gapCards,
+            vendorSummaries,
+            report: materializedReport,
+          };
+        } catch (error) {
+          if (
+            !requiresAuthorizedPersistence ||
+            !(error instanceof ProjectionStaleBaselineError) ||
+            staleRetry >= 2
+          ) {
+            throw error;
+          }
+        }
       }
-      const vendorSummaries = createVendorSummaries(
-        feishu,
-        comparisons,
-        source.vendorRuns,
-        effectiveScores,
-      );
-      const report = await feishu.createReport(
-        reportDraft(
-          feishu,
-          source.job,
-          source.vendorRuns,
-          source.capturedArtifacts,
-          comparisons,
-          gapCards,
-          vendorSummaries,
-          effectiveScores,
-        ),
-      );
-      await feishu.linkReportToBakeoffJob(
-        command.jobId,
-        report.url,
-        command.pairs === undefined ? "primary" : "auxiliary",
-      );
-      return {
-        comparisons,
-        gapCards,
-        vendorSummaries,
-        report,
-      };
     },
   };
 }

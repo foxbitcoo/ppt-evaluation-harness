@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type {
   AdjudicationEventRecord,
   ArtifactScoreTableRecord,
@@ -11,6 +12,11 @@ import type {
   AdjudicationEventTablePort,
   ReviewEventTablePort,
 } from "./feishu.ts";
+import {
+  assertValidAdjudicationEventFields,
+  assertValidReviewEventFields,
+} from "./adjudication-validation.ts";
+import { renderedPageNumbers } from "./artifact-projection-validation.ts";
 
 export interface AdjudicateDimensionCommand {
   readonly adjudicationEventId: string;
@@ -95,6 +101,12 @@ function causalAdjudicationHead(
         `Invalid adjudication causal history: missing parent ${prior}`,
       );
     }
+    const parent = byId.get(prior)!;
+    if (Date.parse(event.occurredAt) < Date.parse(parent.occurredAt)) {
+      throw new Error(
+        "Invalid adjudication causal history: child precedes parent",
+      );
+    }
     if (referencedParents.has(prior)) {
       throw new Error(
         `Invalid adjudication causal history: fork at ${prior}`,
@@ -138,6 +150,67 @@ function causalAdjudicationHead(
   return head;
 }
 
+function causalReviewHistory(
+  reviews: readonly ReviewEventRecord[],
+): readonly ReviewEventRecord[] {
+  reviews.forEach(assertValidReviewEventFields);
+  if (reviews.length === 0) return [];
+  const byId = new Map(
+    reviews.map((review) => [review.reviewEventId, review]),
+  );
+  if (byId.size !== reviews.length) {
+    throw new Error("Invalid review causal history: duplicate event ID");
+  }
+  const children = new Map<string, ReviewEventRecord>();
+  const roots: ReviewEventRecord[] = [];
+  for (const review of reviews) {
+    const parentId = review.priorReviewEventId;
+    if (parentId === null) {
+      roots.push(review);
+      continue;
+    }
+    const parent = byId.get(parentId);
+    if (parent === undefined) {
+      throw new Error(
+        `Invalid review causal history: missing parent ${parentId}`,
+      );
+    }
+    if (children.has(parentId)) {
+      throw new Error(
+        `Invalid review causal history: fork at ${parentId}`,
+      );
+    }
+    if (Date.parse(review.occurredAt) < Date.parse(parent.occurredAt)) {
+      throw new Error(
+        "Invalid review causal history: child precedes parent",
+      );
+    }
+    children.set(parentId, review);
+  }
+  if (roots.length !== 1) {
+    throw new Error(
+      "Invalid review causal history: expected one causal root",
+    );
+  }
+  const ordered: ReviewEventRecord[] = [];
+  const visited = new Set<string>();
+  let current: ReviewEventRecord | undefined = roots[0];
+  while (current !== undefined) {
+    if (visited.has(current.reviewEventId)) {
+      throw new Error("Invalid review causal history: cycle detected");
+    }
+    visited.add(current.reviewEventId);
+    ordered.push(current);
+    current = children.get(current.reviewEventId);
+  }
+  if (visited.size !== reviews.length) {
+    throw new Error(
+      "Invalid review causal history: disconnected events",
+    );
+  }
+  return ordered;
+}
+
 function effectiveScorecard(
   score: Awaited<
     ReturnType<AdjudicationEventTablePort["loadArtifactScoreByScorecardId"]>
@@ -145,6 +218,64 @@ function effectiveScorecard(
   events: readonly AdjudicationEventRecord[],
   reviews: readonly ReviewEventRecord[],
 ): EffectiveArtifactScorecard {
+  events.forEach(assertValidAdjudicationEventFields);
+  const causalReviews = causalReviewHistory(reviews);
+  if (
+    events.some(
+      (event) =>
+        event.scorecardId !== score.scorecard.scorecardId ||
+        event.artifactId !== score.artifactId ||
+        event.runId !== score.runId ||
+        event.jobId !== score.jobId ||
+        event.provenance !== score.provenance ||
+        !isDeepStrictEqual(
+          event.environmentOrigin,
+          score.environmentOrigin,
+        ),
+    )
+  ) {
+    throw new Error(
+      "Invalid adjudication causal history: score lineage mismatch",
+    );
+  }
+  if (
+    causalReviews.some(
+      (review) =>
+        review.scorecardId !== score.scorecard.scorecardId ||
+        review.artifactId !== score.artifactId ||
+        review.runId !== score.runId ||
+        review.jobId !== score.jobId ||
+        review.provenance !== score.provenance ||
+        !isDeepStrictEqual(
+          review.environmentOrigin,
+          score.environmentOrigin,
+        ),
+    )
+  ) {
+    throw new Error(
+      "Invalid review causal history: score lineage mismatch",
+    );
+  }
+  const availablePages = renderedPageNumbers(
+    score.renderManifest,
+  );
+  if (
+    events.some(
+      (event) =>
+        event.evidencePages.length === 0 ||
+        new Set(event.evidencePages).size !==
+          event.evidencePages.length ||
+        event.evidencePages.some(
+          (pageNumber) =>
+            !Number.isSafeInteger(pageNumber) ||
+            !availablePages.has(pageNumber),
+        ),
+    )
+  ) {
+    throw new Error(
+      "Invalid adjudication causal history: page evidence does not exist in the persisted Render Manifest",
+    );
+  }
   const scoreDimensions = new Set(
     score.scorecard.dimensions.map(({ dimension }) => dimension),
   );
@@ -177,7 +308,7 @@ function effectiveScorecard(
         );
       }
       const latest = causalAdjudicationHead(matching);
-      const acceptedByHuman = reviews.some((review) =>
+      const acceptedByHuman = causalReviews.some((review) =>
         review.reviewedDimensions.includes(modelOriginal.dimension),
       );
       return latest === undefined
@@ -228,6 +359,19 @@ function effectiveScorecard(
           ? "human_reviewed"
           : "partially_human_reviewed",
   };
+}
+
+/**
+ * Recomputes the effective score strictly from persisted source rows.
+ * Projection validators use this pure boundary so derived Comparison,
+ * Gap Card, and Report records cannot bless caller-supplied conclusions.
+ */
+export function effectiveScorecardFromPersistedRows(
+  score: ArtifactScoreTableRecord,
+  events: readonly AdjudicationEventRecord[],
+  reviews: readonly ReviewEventRecord[],
+): EffectiveArtifactScorecard {
+  return effectiveScorecard(score, events, reviews);
 }
 
 export function createScoreAdjudicationService({
@@ -306,6 +450,7 @@ export function createScoreAdjudicationService({
         provenance: score.provenance,
         environmentOrigin: score.environmentOrigin,
       };
+      assertValidAdjudicationEventFields(event);
       await feishu.appendAdjudicationEvent(event);
       return event;
     },
