@@ -402,7 +402,7 @@ WPS 仍然不是固定 baseline；A/B 的两侧由比较请求动态选择。
 2. 已将评测对象树与维度 Assessment/Evidence 分离，并支持图片、文本框元素。
 3. 已在新公共契约中排除序数评分字段；旧 `ArtifactScorecard` 仅因集成分支尚有 Judge/报告/飞书消费者而保留在 legacy 代码中，后续通过迁移 PR 物理删除。
 4. 下一阶段将 `bakeoff.ts` 的评测分支收敛为组装 `EvaluationInput` 和消费 `EvaluationResult`，但不修改厂商 Runner。
-5. 在产品确认各维度聚合规则和一致性门槛后，再实现权威 `AggregationSpec/DimensionMapping`；不先做总分或正式排名。
+5. 当前只冻结 `query-atomic-dimensions-v1`：每个已出现的原子维度必须一一映射为同名比较轴，不能选择性遗漏；它不做跨维度权重或战略轴聚合。在产品确认各维度聚合规则和一致性门槛后，再新增权威 `AggregationSpec/DimensionMapping` 版本；不先做总分或正式排名。
 
 ## 11. 已确认决策与后续待决策
 

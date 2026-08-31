@@ -134,10 +134,27 @@ test("Run identity changes when the product package, configuration, or requester
     ...approvedCase,
     requesterProfile: [...approvedCase.requesterProfile, { label: "偏好", value: "结论先行" }],
   });
+  const mockEnvironment = createBakeoffBatchManifest({
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "MOCK",
+    cases: [approvedCase],
+    surfaces: [surfaces[0]!],
+    judge: { provider: "deterministic-test-double", model: "mock-v1" },
+    rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+  });
+  const desktopEntry = create({
+    ...surfaces[0]!,
+    surface: "DESKTOP",
+    entryLocator: "com.kingsoft.wpsoffice.mac",
+  });
   assert.notEqual(baseline.runs[0]!.runId, pro.runs[0]!.runId);
   assert.notEqual(baseline.runs[1]!.runId, pro.runs[1]!.runId);
   assert.equal(baseline.runs[0]!.runId, changedProfile.runs[0]!.runId);
   assert.notEqual(baseline.runs[1]!.runId, changedProfile.runs[1]!.runId);
+  assert.notEqual(baseline.runs[0]!.runId, mockEnvironment.runs[0]!.runId);
+  assert.notEqual(baseline.runs[0]!.runId, desktopEntry.runs[0]!.runId);
 });
 
 test("Batch manifest fails closed on invalid environment, surface, or memory policy", () => {

@@ -223,6 +223,24 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
     [...(evaluationInput.staticSurface.pages[0]!.elements[0]! as { renderedCrop: Uint8Array }).renderedCrop],
     [4, 5, 6],
   );
+  const {
+    schemaVersion: _schemaVersion,
+    evaluationInputHash: _evaluationInputHash,
+    ...evaluationInputPayload
+  } = evaluationInput;
+  const changedAltText = createEvaluationInput({
+    ...evaluationInputPayload,
+    staticSurface: {
+      ...evaluationInput.staticSurface,
+      pages: evaluationInput.staticSurface.pages.map((page) => ({
+        ...page,
+        elements: page.elements.map((element) => element.kind === "IMAGE"
+          ? { ...element, altText: "已改写的图片说明" }
+          : element),
+      })),
+    },
+  });
+  assert.notEqual(changedAltText.evaluationInputHash, evaluationInput.evaluationInputHash);
 
   assert.throws(
     () =>
@@ -355,11 +373,11 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
       ],
     },
     comparisonVector: {
-      mappingVersion: "query-strategic-axes-v1",
-      mappingHash: EVALUATION_COMPARISON_MAPPING_REGISTRY["query-strategic-axes-v1"].mappingHash,
+      mappingVersion: "query-atomic-dimensions-v1",
+      mappingHash: EVALUATION_COMPARISON_MAPPING_REGISTRY["query-atomic-dimensions-v1"].mappingHash,
       axes: [
         {
-          axisId: "task_fit",
+          axisId: "audience_fit",
           sourceDimensionIds: ["audience_fit"],
           goodRate: 1,
           badRate: 0,
@@ -368,13 +386,31 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
           comparable: true,
         },
         {
-          axisId: "visual_system",
-          sourceDimensionIds: ["layout_hierarchy", "image_quality_and_fit", "text_readability"],
+          axisId: "layout_hierarchy",
+          sourceDimensionIds: ["layout_hierarchy"],
           goodRate: 0,
-          badRate: 1 / 3,
-          uncertainRate: 2 / 3,
-          denominator: 3,
+          badRate: 0,
+          uncertainRate: 1,
+          denominator: 1,
+          comparable: false,
+        },
+        {
+          axisId: "image_quality_and_fit",
+          sourceDimensionIds: ["image_quality_and_fit"],
+          goodRate: 0,
+          badRate: 1,
+          uncertainRate: 0,
+          denominator: 1,
           comparable: true,
+        },
+        {
+          axisId: "text_readability",
+          sourceDimensionIds: ["text_readability"],
+          goodRate: 0,
+          badRate: 0,
+          uncertainRate: 1,
+          denominator: 1,
+          comparable: false,
         },
       ],
       rankStatus: "EXPLORATORY_ONLY",
@@ -460,7 +496,7 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
     ...resultInput,
     comparisonVector: {
       ...resultInput.comparisonVector,
-      axes: resultInput.comparisonVector.axes.filter(({ axisId }) => axisId !== "task_fit"),
+      axes: resultInput.comparisonVector.axes.filter(({ axisId }) => axisId !== "audience_fit"),
     },
   };
   assert.throws(() => createEvaluationResult(selectiveVector), /比较轴集合与注册映射不一致/);

@@ -470,25 +470,15 @@ function sha256(value: unknown): Sha256Hash {
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
-const QUERY_STRATEGIC_AXES_V1 = Object.freeze({
-  mappingVersion: "query-strategic-axes-v1",
-  axes: Object.freeze([
-    Object.freeze({ axisId: "task_fit", sourceDimensionIds: Object.freeze(["audience_fit"]) }),
-    Object.freeze({
-      axisId: "visual_system",
-      sourceDimensionIds: Object.freeze([
-        "layout_hierarchy",
-        "image_quality_and_fit",
-        "text_readability",
-      ]),
-    }),
-  ]),
+const QUERY_ATOMIC_DIMENSIONS_V1 = Object.freeze({
+  mappingVersion: "query-atomic-dimensions-v1",
+  strategy: "IDENTITY_ALL_DIMENSIONS",
 });
 
 export const EVALUATION_COMPARISON_MAPPING_REGISTRY = Object.freeze({
-  "query-strategic-axes-v1": Object.freeze({
-    ...QUERY_STRATEGIC_AXES_V1,
-    mappingHash: sha256(QUERY_STRATEGIC_AXES_V1),
+  "query-atomic-dimensions-v1": Object.freeze({
+    ...QUERY_ATOMIC_DIMENSIONS_V1,
+    mappingHash: sha256(QUERY_ATOMIC_DIMENSIONS_V1),
   }),
 });
 
@@ -657,6 +647,7 @@ function buildEvaluationInputHash(input: CreateEvaluationInputInput): Sha256Hash
               bounds: element.bounds,
               renderedCropHash: element.renderedCropHash,
               sourceAssetHash: element.sourceAssetHash,
+              altText: element.altText,
             }
           : {
               elementId: element.elementId,
@@ -922,34 +913,20 @@ function validateComparisonVector(
   }
   const axisIds = new Set<string>();
   const dimensionIds = new Set(assessments.map(({ dimensionId }) => dimensionId));
-  if (vector.axes.length !== mapping.axes.length) {
+  if (vector.axes.length !== dimensionIds.size) {
     throw new Error("比较轴集合与注册映射不一致");
   }
   vector.axes.forEach((axis) => {
     assertNonEmpty(axis.axisId, "comparisonVector.axisId");
     if (axisIds.has(axis.axisId)) throw new Error(`比较轴 ID 重复：${axis.axisId}`);
     axisIds.add(axis.axisId);
-    const registeredAxis = mapping.axes.find((candidate) => candidate.axisId === axis.axisId);
     if (
-      registeredAxis === undefined ||
-      registeredAxis.sourceDimensionIds.length !== axis.sourceDimensionIds.length ||
-      registeredAxis.sourceDimensionIds.some((dimensionId, index) =>
-        dimensionId !== axis.sourceDimensionIds[index]
-      )
+      axis.sourceDimensionIds.length !== 1 ||
+      axis.sourceDimensionIds[0] !== axis.axisId ||
+      !dimensionIds.has(axis.axisId)
     ) {
       throw new Error(`比较轴 ${axis.axisId} 的维度映射与注册表不一致`);
     }
-    if (axis.sourceDimensionIds.length === 0) {
-      throw new Error(`比较轴 ${axis.axisId} 必须引用至少一个维度`);
-    }
-    if (new Set(axis.sourceDimensionIds).size !== axis.sourceDimensionIds.length) {
-      throw new Error(`比较轴 ${axis.axisId} 存在重复维度`);
-    }
-    axis.sourceDimensionIds.forEach((dimensionId) => {
-      if (!dimensionIds.has(dimensionId)) {
-        throw new Error(`比较轴 ${axis.axisId} 引用未知维度：${dimensionId}`);
-      }
-    });
     const matching = assessments.filter(({ dimensionId }) =>
       axis.sourceDimensionIds.includes(dimensionId)
     );
@@ -977,7 +954,7 @@ function validateComparisonVector(
       throw new Error(`比较轴 ${axis.axisId} 与原子判断聚合结果不一致`);
     }
   });
-  const mappedDimensionIds = new Set(mapping.axes.flatMap(({ sourceDimensionIds }) => sourceDimensionIds));
+  const mappedDimensionIds = new Set(vector.axes.flatMap(({ sourceDimensionIds }) => sourceDimensionIds));
   dimensionIds.forEach((dimensionId) => {
     if (!mappedDimensionIds.has(dimensionId)) {
       throw new Error(`评测维度未进入冻结比较映射：${dimensionId}`);
