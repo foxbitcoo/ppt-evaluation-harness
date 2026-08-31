@@ -44,6 +44,14 @@ For each approved base case, create two variants:
 
 The treatment effect is evaluated within the same case and product package. It is not inferred from unmatched vendor outputs.
 
+The frozen Batch manifest binds each `ProductSurface` to `productPackageId`, a
+canonical `configurationHash`, and `nativeMemoryPolicy=DISABLED|ISOLATED`.
+Both Profile arms reuse that exact Surface snapshot, so model/tier, search,
+template, account treatment, client version, entry point, and native Memory
+cannot silently change between OFF and ON. Human-readable Feishu fields expose
+the package and Memory policy; the stable English enum remains in the hashed
+payload.
+
 ## Education candidates
 
 ### EDU-01: Digital-information literacy class meeting

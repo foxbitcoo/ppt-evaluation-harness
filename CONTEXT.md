@@ -97,7 +97,7 @@ A rubric-versioned, independently produced profile of Task Success, Presentation
 _Avoid_: Pairwise result, operational telemetry, uncalibrated vendor rank
 
 **Pairwise Judgment**:
-A blind, relative preference judgment between two compatible Artifacts, used as supplementary evidence for subjective visual dimensions.
+A relative preference judgment between two compatible Artifacts, used as supplementary evidence for subjective visual dimensions. The current MVP is non-blind. Blinding may only be enabled later by an explicit, versioned Batch protocol.
 _Avoid_: Primary score, permanent ranking
 
 **Operational Metrics**:

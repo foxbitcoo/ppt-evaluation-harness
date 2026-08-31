@@ -457,27 +457,52 @@ function canonicalize(value: unknown): unknown {
 }
 
 function sha256(value: unknown): Sha256Hash {
-  const content = typeof value === "string" || value instanceof Uint8Array
+  const content = typeof value === "string"
     ? value
-    : JSON.stringify(canonicalize(value));
+    : value instanceof Uint8Array
+      ? value.slice()
+      : JSON.stringify(canonicalize(value));
   return `sha256:${createHash("sha256").update(content).digest("hex")}`;
 }
 
-function deepFreeze<T>(value: T): T {
-  if (
-    value !== null &&
-    typeof value === "object" &&
-    !ArrayBuffer.isView(value) &&
-    !Object.isFrozen(value)
-  ) {
-    Object.values(value as Record<string, unknown>).forEach(deepFreeze);
-    Object.freeze(value);
-  }
-  return value;
+const BYTE_MUTATORS = new Set(["copyWithin", "fill", "reverse", "set", "sort"]);
+
+function readonlyBytes(value: Uint8Array): Uint8Array {
+  const copy = new Uint8Array(value);
+  return new Proxy(copy, {
+    defineProperty() {
+      throw new TypeError("评测输入字节是不可变快照");
+    },
+    deleteProperty() {
+      throw new TypeError("评测输入字节是不可变快照");
+    },
+    get(target, property) {
+      if (BYTE_MUTATORS.has(String(property))) {
+        return () => {
+          throw new TypeError("评测输入字节是不可变快照");
+        };
+      }
+      const result = Reflect.get(target, property, target) as unknown;
+      return typeof result === "function" ? result.bind(target) : result;
+    },
+    set() {
+      throw new TypeError("评测输入字节是不可变快照");
+    },
+  });
 }
 
 function immutableSnapshot<T>(value: T): T {
-  return deepFreeze(structuredClone(value));
+  if (value instanceof Uint8Array) return readonlyBytes(value) as T;
+  if (Array.isArray(value)) {
+    return Object.freeze(value.map((item) => immutableSnapshot(item))) as T;
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.freeze(Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, child]) => [key, immutableSnapshot(child)]),
+    )) as T;
+  }
+  return value;
 }
 
 function assertSha256Hash(value: string, fieldName: string): asserts value is Sha256Hash {

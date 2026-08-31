@@ -38,6 +38,9 @@ const surfaces: readonly ProductSurface[] = [
     surface: "WEB",
     entryLocator: "https://aippt.wps.cn/aippt/",
     version: "web@batch-time",
+    productPackageId: "wps-aippt-professional-web",
+    configurationHash: `sha256:${"1".repeat(64)}`,
+    nativeMemoryPolicy: "ISOLATED",
   },
   {
     surfaceId: "qianwen-desktop",
@@ -45,6 +48,9 @@ const surfaces: readonly ProductSurface[] = [
     surface: "DESKTOP",
     entryLocator: "com.alibaba.tongyi",
     version: "4.0.0.158",
+    productPackageId: "qianwen-expert-desktop",
+    configurationHash: `sha256:${"2".repeat(64)}`,
+    nativeMemoryPolicy: "DISABLED",
   },
 ];
 
@@ -100,8 +106,41 @@ test("Batch manifest expands one approved case into deterministic per-surface A/
   assert.equal(feishu["批次日期"], "2026-08-10");
   assert.equal(feishu["运行面"], "WEB");
   assert.equal(feishu["网页入口"], "https://aippt.wps.cn/aippt/");
+  assert.equal(feishu["产品套餐ID"], "wps-aippt-professional-web");
+  assert.equal(feishu["原生记忆策略"], "ISOLATED");
   assert.equal(feishu["运行状态"], undefined);
   assert.match(String(feishu["载荷哈希"]), /^[a-f0-9]{64}$/);
+});
+
+test("Batch manifest fails closed on invalid environment, surface, or memory policy", () => {
+  const base = {
+    batchId: "BATCH-0001",
+    batchSeq: 1,
+    batchDate: "2026-08-10",
+    environment: "LIVE_PRODUCTION" as const,
+    cases: [approvedCase],
+    surfaces,
+    judge: { provider: "volcengine-ark", model: "doubao-seed-2-0-pro-260215" },
+    rubric: { rubricId: "query-ppt-rubric", rubricVersion: "1.1.0" },
+  };
+  assert.throws(
+    () => createBakeoffBatchManifest({ ...base, environment: "BROKEN" as never }),
+    /environment 枚举值无效/,
+  );
+  assert.throws(
+    () => createBakeoffBatchManifest({
+      ...base,
+      surfaces: [{ ...surfaces[0]!, surface: "MOBILE" as never }],
+    }),
+    /surface\.surface 枚举值无效/,
+  );
+  assert.throws(
+    () => createBakeoffBatchManifest({
+      ...base,
+      surfaces: [{ ...surfaces[0]!, nativeMemoryPolicy: "ENABLED" as never }],
+    }),
+    /nativeMemoryPolicy 枚举值无效/,
+  );
 });
 
 test("Batch manifest rejects ambiguous or duplicate product surfaces", () => {

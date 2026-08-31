@@ -191,6 +191,17 @@ test("EvaluationInput exposes deck, slide, image, and text-box targets and enfor
     { value: "SLIDE", labelZh: "单页" },
     { value: "ELEMENT", labelZh: "页面元素" },
   ]);
+  assert.throws(
+    () => {
+      evaluationInput.staticSurface.pages[0]!.image[0] = 9;
+    },
+    /不可变快照/,
+  );
+  assert.throws(
+    () => evaluationInput.staticSurface.pages[0]!.elements[0]!.kind === "IMAGE" &&
+      evaluationInput.staticSurface.pages[0]!.elements[0]!.renderedCrop.fill(9),
+    /不可变快照/,
+  );
 
   assert.throws(
     () =>

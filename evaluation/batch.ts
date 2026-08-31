@@ -56,6 +56,9 @@ export interface ProductSurface {
   readonly surface: "WEB" | "DESKTOP";
   readonly entryLocator: string;
   readonly version: string;
+  readonly productPackageId: string;
+  readonly configurationHash: Sha256Hash;
+  readonly nativeMemoryPolicy: "DISABLED" | "ISOLATED";
 }
 
 export interface EvaluationRunPlan {
@@ -75,6 +78,9 @@ export interface EvaluationRunPlan {
   readonly surface: "WEB" | "DESKTOP";
   readonly surfaceVersion: string;
   readonly entryLocator: string;
+  readonly productPackageId: string;
+  readonly configurationHash: Sha256Hash;
+  readonly nativeMemoryPolicy: ProductSurface["nativeMemoryPolicy"];
   readonly query: string;
   readonly vendorPrompt: QueryProfileCaseVariant["vendorPrompt"];
   readonly targetPageCount: number;
@@ -153,6 +159,22 @@ function sha256(value: unknown): Sha256Hash {
 
 function withoutSha256Prefix(hash: Sha256Hash): string {
   return hash.slice("sha256:".length);
+}
+
+function assertOneOf<T extends string>(
+  value: string,
+  allowed: readonly T[],
+  fieldName: string,
+): asserts value is T {
+  if (!allowed.includes(value as T)) {
+    throw new Error(`${fieldName} 枚举值无效：${value}`);
+  }
+}
+
+function assertSha256Hash(value: string, fieldName: string): asserts value is Sha256Hash {
+  if (!/^sha256:[a-f0-9]{64}$/.test(value)) {
+    throw new Error(`${fieldName} 必须是 sha256 哈希`);
+  }
 }
 
 function buildCommonPrompt(input: ApprovedQueryProfileCase): string {
@@ -273,6 +295,9 @@ function createRunPlan(input: {
     surface: input.surface.surface,
     surfaceVersion: input.surface.version,
     entryLocator: input.surface.entryLocator,
+    productPackageId: input.surface.productPackageId,
+    configurationHash: input.surface.configurationHash,
+    nativeMemoryPolicy: input.surface.nativeMemoryPolicy,
     query: input.variant.query,
     vendorPrompt: immutableSnapshot(input.variant.vendorPrompt),
     targetPageCount: input.variant.useContext.targetPageCount,
@@ -311,6 +336,11 @@ export function createBakeoffBatchManifest(
   }
   if (input.cases.length === 0) throw new Error("批次至少需要一个 Case");
   if (input.surfaces.length === 0) throw new Error("批次至少需要一个运行面");
+  assertOneOf(
+    input.environment,
+    ["LIVE_PRODUCTION", "PRODUCTION_REPLAY", "MOCK"],
+    "environment",
+  );
 
   const surfaceIds = new Set<string>();
   input.surfaces.forEach((surface) => {
@@ -318,6 +348,10 @@ export function createBakeoffBatchManifest(
     assertNonEmpty(surface.vendor, "surface.vendor");
     assertNonEmpty(surface.entryLocator, "surface.entryLocator");
     assertNonEmpty(surface.version, "surface.version");
+    assertNonEmpty(surface.productPackageId, "surface.productPackageId");
+    assertOneOf(surface.surface, ["WEB", "DESKTOP"], "surface.surface");
+    assertOneOf(surface.nativeMemoryPolicy, ["DISABLED", "ISOLATED"], "nativeMemoryPolicy");
+    assertSha256Hash(surface.configurationHash, "surface.configurationHash");
     if (surfaceIds.has(surface.surfaceId)) {
       throw new Error(`运行面 ID 重复：${surface.surfaceId}`);
     }
@@ -389,6 +423,9 @@ export function toFeishuRunRecord(run: EvaluationRunPlan): FeishuRunRecord {
     "运行面": run.surface,
     "运行面版本": run.surfaceVersion,
     "入口定位": run.entryLocator,
+    "产品套餐ID": run.productPackageId,
+    "配置哈希": withoutSha256Prefix(run.configurationHash),
+    "原生记忆策略": run.nativeMemoryPolicy,
     "数据环境": run.environment,
     "提示词": run.vendorPrompt.text,
     "目标页数": run.targetPageCount,
