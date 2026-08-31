@@ -26,6 +26,7 @@ export interface ApprovedQueryProfileCase {
     readonly expectedDurationMinutes: number;
     readonly targetPageCount: number;
   };
+  readonly requesterProfileVersion: string;
   readonly requesterProfile: readonly {
     readonly label: string;
     readonly value: string;
@@ -41,6 +42,8 @@ export interface QueryProfileCaseVariant {
   readonly presentationAudience: ApprovedQueryProfileCase["presentationAudience"];
   readonly useContext: ApprovedQueryProfileCase["useContext"];
   readonly requesterProfileVisible: boolean;
+  readonly requesterProfileVersion: string;
+  readonly requesterProfileHash: Sha256Hash;
   readonly commonInputHash: Sha256Hash;
   readonly vendorPrompt: {
     readonly templateVersion: "query-profile-ab-v1";
@@ -73,6 +76,8 @@ export interface EvaluationRunPlan {
   readonly caseId: string;
   readonly caseVersion: string;
   readonly treatment: MemoryExposureTreatment;
+  readonly requesterProfileVersion: string;
+  readonly requesterProfileHash: Sha256Hash;
   readonly surfaceId: string;
   readonly vendor: string;
   readonly surface: "WEB" | "DESKTOP";
@@ -198,6 +203,7 @@ export function createQueryProfileCaseVariants(
   assertNonEmpty(input.query, "query");
   assertNonEmpty(input.presentationAudience.description, "presentationAudience.description");
   assertNonEmpty(input.useContext.objective, "useContext.objective");
+  assertNonEmpty(input.requesterProfileVersion, "requesterProfileVersion");
   if (
     !Number.isInteger(input.useContext.targetPageCount) ||
     input.useContext.targetPageCount < 1 ||
@@ -222,6 +228,10 @@ export function createQueryProfileCaseVariants(
     useContext: input.useContext,
   });
   const commonInputHash = sha256(commonInput);
+  const requesterProfileHash = sha256({
+    version: input.requesterProfileVersion,
+    fields: input.requesterProfile,
+  });
 
   const createVariant = (
     treatment: MemoryExposureTreatment,
@@ -241,6 +251,8 @@ export function createQueryProfileCaseVariants(
       ...commonInput,
       treatment,
       requesterProfileVisible,
+      requesterProfileVersion: input.requesterProfileVersion,
+      requesterProfileHash,
       commonInputHash,
       vendorPrompt: {
         templateVersion: "query-profile-ab-v1" as const,
@@ -277,7 +289,10 @@ function createRunPlan(input: {
     caseVersion: input.variant.caseVersion,
     treatment: input.variant.treatment,
     variantContentHash: input.variant.contentHash,
+    requesterProfileVersion: input.variant.requesterProfileVersion,
+    requesterProfileHash: input.variant.requesterProfileHash,
     surfaceId: input.surface.surfaceId,
+    vendor: input.surface.vendor,
     surface: input.surface.surface,
     entryLocator: input.surface.entryLocator,
     surfaceVersion: input.surface.version,
@@ -298,6 +313,8 @@ function createRunPlan(input: {
     caseId: input.variant.caseId,
     caseVersion: input.variant.caseVersion,
     treatment: input.variant.treatment,
+    requesterProfileVersion: input.variant.requesterProfileVersion,
+    requesterProfileHash: input.variant.requesterProfileHash,
     surfaceId: input.surface.surfaceId,
     vendor: input.surface.vendor,
     surface: input.surface.surface,
@@ -427,6 +444,8 @@ export function toFeishuRunRecord(run: EvaluationRunPlan): FeishuRunRecord {
     "题目ID": run.caseId,
     "Case版本": run.caseVersion,
     "实验分组": treatmentLabel[run.treatment],
+    "请求者人设版本": run.requesterProfileVersion,
+    "请求者人设哈希": withoutSha256Prefix(run.requesterProfileHash),
     "厂商": run.vendor,
     "运行面": run.surface,
     "运行面版本": run.surfaceVersion,

@@ -24,6 +24,7 @@ const approvedCase: ApprovedQueryProfileCase = {
     expectedDurationMinutes: 10,
     targetPageCount: 8,
   },
+  requesterProfileVersion: "requester-profile-office-01@1.0.0",
   requesterProfile: [
     { label: "角色", value: "B2B SaaS产品经理" },
     { label: "经验", value: "5年产品经验，第一年定期向经营层汇报" },
@@ -61,6 +62,7 @@ test("Profile A/B variants keep Query, audience, use context, and page count ide
   assert.equal(control.treatment, "NO_REQUESTER_PROFILE");
   assert.equal(treatment.treatment, "REQUESTER_PROFILE_INJECTED");
   assert.equal(control.commonInputHash, treatment.commonInputHash);
+  assert.equal(control.requesterProfileHash, treatment.requesterProfileHash);
   assert.equal(control.query, treatment.query);
   assert.deepEqual(control.presentationAudience, treatment.presentationAudience);
   assert.deepEqual(control.useContext, treatment.useContext);
@@ -103,6 +105,7 @@ test("Batch manifest expands one approved case into deterministic per-surface A/
   const feishu = toFeishuRunRecord(webControl);
   assert.equal(feishu["批次ID"], "BATCH-0001");
   assert.equal(feishu["实验分组"], "对照组｜不注入请求者人设");
+  assert.equal(feishu["请求者人设版本"], "requester-profile-office-01@1.0.0");
   assert.equal(feishu["批次日期"], "2026-08-10");
   assert.equal(feishu["运行面"], "WEB");
   assert.equal(feishu["网页入口"], "https://aippt.wps.cn/aippt/");
@@ -151,10 +154,12 @@ test("Run identity changes when the product package, configuration, or requester
   });
   assert.notEqual(baseline.runs[0]!.runId, pro.runs[0]!.runId);
   assert.notEqual(baseline.runs[1]!.runId, pro.runs[1]!.runId);
-  assert.equal(baseline.runs[0]!.runId, changedProfile.runs[0]!.runId);
+  assert.notEqual(baseline.runs[0]!.runId, changedProfile.runs[0]!.runId);
   assert.notEqual(baseline.runs[1]!.runId, changedProfile.runs[1]!.runId);
   assert.notEqual(baseline.runs[0]!.runId, mockEnvironment.runs[0]!.runId);
   assert.notEqual(baseline.runs[0]!.runId, desktopEntry.runs[0]!.runId);
+  const changedVendor = create({ ...surfaces[0]!, vendor: "另一个厂商" });
+  assert.notEqual(baseline.runs[0]!.runId, changedVendor.runs[0]!.runId);
 });
 
 test("Batch manifest fails closed on invalid environment, surface, or memory policy", () => {

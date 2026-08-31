@@ -52,6 +52,11 @@ cannot silently change between OFF and ON. Human-readable Feishu fields expose
 the package and Memory policy; the stable English enum remains in the hashed
 payload.
 
+Both arms also persist the same `requesterProfileVersion` and canonical
+`requesterProfileHash`. The OFF arm hides Profile fields from the vendor Prompt,
+but it does not erase treatment lineage; changing the frozen Profile creates a
+new Run identity for both arms.
+
 ## Education candidates
 
 ### EDU-01: Digital-information literacy class meeting

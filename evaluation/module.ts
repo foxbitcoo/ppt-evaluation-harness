@@ -1028,6 +1028,13 @@ function validateTargetsAgainstEvaluationInput(
   if (elementTargets.length !== expectedElements.size) {
     throw new Error("评测 Target 树必须完整覆盖 EvaluationInput 的所有页面元素");
   }
+  const actualElementIds = new Set(elementTargets.map(({ elementId }) => elementId));
+  if (
+    actualElementIds.size !== elementTargets.length ||
+    [...expectedElements.keys()].some((elementId) => !actualElementIds.has(elementId))
+  ) {
+    throw new Error("评测 Target 树的元素定位必须唯一且完整");
+  }
   elementTargets.forEach((target) => {
     const expected = target.elementId === null ? undefined : expectedElements.get(target.elementId);
     if (
@@ -1141,8 +1148,8 @@ export function createEvaluationResult(
       }
     }
     const target = targets.get(evidence.targetId)!;
-    if (target.scope === "DECK" && evidence.elementId !== null) {
-      throw new Error(`Deck Evidence ${evidence.evidenceId} 不能定位元素`);
+    if (target.scope === "DECK" && (evidence.pageNumber !== null || evidence.elementId !== null)) {
+      throw new Error(`Deck Evidence ${evidence.evidenceId} 不能定位页面或元素`);
     }
     if (
       target.scope === "SLIDE" &&
