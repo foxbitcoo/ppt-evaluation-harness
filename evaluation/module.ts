@@ -1148,8 +1148,16 @@ export function createEvaluationResult(
       }
     }
     const target = targets.get(evidence.targetId)!;
-    if (target.scope === "DECK" && (evidence.pageNumber !== null || evidence.elementId !== null)) {
-      throw new Error(`Deck Evidence ${evidence.evidenceId} 不能定位页面或元素`);
+    if (target.scope === "DECK") {
+      if (evidence.elementId !== null) {
+        throw new Error(`Deck Evidence ${evidence.evidenceId} 不能定位元素`);
+      }
+      if (
+        evidence.pageNumber !== null &&
+        !evaluationInput.staticSurface.pages.some(({ pageNumber }) => pageNumber === evidence.pageNumber)
+      ) {
+        throw new Error(`Deck Evidence ${evidence.evidenceId} 引用了不存在的页面`);
+      }
     }
     if (
       target.scope === "SLIDE" &&

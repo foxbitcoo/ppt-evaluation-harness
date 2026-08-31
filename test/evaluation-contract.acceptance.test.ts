@@ -366,7 +366,7 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
         },
       ],
       evidence: [
-        { evidenceId: "evidence-deck", targetId: "deck-1", pageNumber: null, elementId: null, kind: "VISUAL_OBSERVATION", observation: "概念均附带初学者解释。" },
+        { evidenceId: "evidence-deck", targetId: "deck-1", pageNumber: 1, elementId: null, kind: "VISUAL_OBSERVATION", observation: "概念均附带初学者解释。" },
         { evidenceId: "evidence-slide", targetId: "slide-1", pageNumber: 1, elementId: null, kind: "VISUAL_OBSERVATION", observation: "标题与首行间距过小。" },
         { evidenceId: "evidence-image", targetId: "image-1", pageNumber: 1, elementId: "slide-1-image-1", kind: "ELEMENT_CROP", observation: "图片上沿裁掉火山口。" },
         { evidenceId: "evidence-text", targetId: "text-1", pageNumber: 1, elementId: "slide-1-text-1", kind: "GATE", observation: "元素裁剪仅 40px 高。" },
@@ -532,7 +532,7 @@ test("EvaluationResult keeps target hierarchy separate from dimension aggregatio
         : evidence),
     },
   };
-  assert.throws(() => createEvaluationResult(deckEvidenceWithFakePage), /Deck Evidence .*不能定位页面或元素/);
+  assert.throws(() => createEvaluationResult(deckEvidenceWithFakePage), /Deck Evidence .*引用了不存在的页面/);
 
   const emptyResponseId: CreateEvaluationResultInput = {
     ...resultInput,
