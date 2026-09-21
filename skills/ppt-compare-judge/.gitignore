@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+*.key
+*.pem
+private/
+outputs/
+local-tests/
+.DS_Store
+config.local.json
+*.local.json
