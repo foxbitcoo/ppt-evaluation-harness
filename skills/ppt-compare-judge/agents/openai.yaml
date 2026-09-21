@@ -1,0 +1,4 @@
+interface:
+  display_name: "PPT 对比评审"
+  short_description: "文字与视觉模型独立配置，默认 JEV 加豆包 Pro，输出页面证据与成本报告"
+  default_prompt: "使用 $ppt-compare-judge 比较这些同主题 PPT，用 JEV 验收文字、豆包 Seed 2.0 Pro 比较视觉，生成带页面证据和成本的 HTML 报告。"

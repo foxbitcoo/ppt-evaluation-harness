@@ -1,0 +1,19 @@
+{
+  "text": {
+    "protocol": "typesafe",
+    "model": "jev-1.13.0",
+    "base_url": "https://api.typesafe.ai/v1",
+    "api_key_env": "TYPESAFE_API_KEY"
+  },
+  "vision": {
+    "protocol": "ark-responses",
+    "model": "doubao-seed-2-0-pro-260215",
+    "endpoint_id": "",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "api_key_env": "ARK_API_KEY"
+  },
+  "output": {
+    "format": "html",
+    "separate_text_and_vision": true
+  }
+}
